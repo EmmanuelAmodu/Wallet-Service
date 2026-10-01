@@ -1,0 +1,72 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Wallet {
+  id           String        @id @db.Uuid
+  tenant_id    String
+  external_id  String
+  chain        String
+  network      String
+  seed_id      String
+  account      Int
+  path         String
+  address      String?
+  status       String        @default("deriving")
+  last_error   String?
+  created_at   DateTime      @default(now()) @db.Timestamptz
+  transactions Transaction[]
+
+  @@unique([tenant_id, external_id, chain, network])
+  @@unique([seed_id, chain, account])
+  @@unique([chain, network, address])
+  @@map("wallets")
+}
+
+model Transaction {
+  id                   String   @id @db.Uuid
+  tenant_id            String
+  wallet_id            String   @db.Uuid
+  wallet               Wallet   @relation(fields: [wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  idempotency_key      String
+  request_hash         String
+  intent               Json
+  prepared             Json?
+  signed               Json?
+  tx_hash              String?
+  status               String
+  broadcast_attempts   Int      @default(0)
+  broadcast_generation Int      @default(0)
+  last_error           String?
+  created_at           DateTime @default(now()) @db.Timestamptz
+  updated_at           DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@unique([tenant_id, idempotency_key])
+  @@index([tenant_id, created_at], map: "transactions_tenant")
+  // one_pending_per_wallet is a partial unique index maintained in migration SQL.
+  @@map("transactions")
+}
+
+model Outbox {
+  id           String    @id @db.Uuid
+  queue        String
+  dedupe_key   String    @unique
+  payload      Json
+  available_at DateTime  @default(now()) @db.Timestamptz
+  published_at DateTime? @db.Timestamptz
+  created_at   DateTime  @default(now()) @db.Timestamptz
+
+  @@index([published_at, available_at])
+  @@map("outbox")
+}
+
+model Inbox {
+  id           String   @id
+  processed_at DateTime @default(now()) @db.Timestamptz
+
+  @@map("inbox")
+}
