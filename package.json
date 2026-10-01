@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "NestJS wallet, signer, and broadcast services using Prisma, PostgreSQL, Redis/BullMQ, and Trust Wallet Core",
   "scripts": {
-    "build": "prisma generate && tsc -p tsconfig.json",
+    "build": "npm run db:generate && tsc -p tsconfig.json",
     "test": "npm run build && node --test --test-concurrency=1 dist/tests/*.test.js",
     "dev:signer": "npm run build && node --env-file-if-exists=.env dist/apps/signer/src/main.js",
     "dev:wallet": "npm run build && node --env-file-if-exists=.env dist/apps/wallet/src/main.js",
@@ -15,10 +15,12 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
     "format:check": "prettier --check eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
-    "db:generate": "prisma generate",
+    "db:generate": "prisma generate && prisma generate --config prisma.broadcast.config.ts",
     "dev:broadcast": "npm run build && node --env-file-if-exists=.env dist/apps/broadcast/src/main.js",
     "start:broadcast": "node dist/apps/broadcast/src/main.js",
-    "queue": "tsx --env-file-if-exists=.env scripts/queue.ts"
+    "queue": "tsx --env-file-if-exists=.env scripts/queue.ts",
+    "migrate:wallet": "npm run migrate -- wallet",
+    "migrate:broadcast": "npm run migrate -- broadcast"
   },
   "license": "ISC",
   "type": "commonjs",

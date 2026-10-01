@@ -1,16 +1,20 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { createDatabase } from '../packages/database/src/client';
+import { WalletWorker } from '../apps/wallet/src/worker';
+import { Rpc } from '../packages/chain/src/rpc';
+import { Job } from 'bullmq';
+import { Database, createDatabase } from '../apps/wallet/src/database';
 import { migrate } from '../scripts/migrate';
 import { WalletService } from '../apps/wallet/src/service';
 import { Transfer } from '../packages/shared/src/contracts';
-import { QUEUES } from '../packages/queue/src/messages';
+import { Message, MessageAuth, QUEUES } from '../packages/queue/src/messages';
 
 const enabled = !!process.env.TEST_DATABASE_URL;
 const db = enabled ? createDatabase(process.env.TEST_DATABASE_URL!) : undefined;
 let service: WalletService;
 const tenant = randomUUID();
+const inboxIds: string[] = [];
 const intent: Transfer = {
   chain: 'ethereum',
   to: '0x' + '11'.repeat(20),
@@ -36,6 +40,7 @@ after(async () => {
     await db.outbox.deleteMany({
       where: { OR: ids.map((id) => ({ dedupe_key: { contains: id } })) },
     });
+    await db.inbox.deleteMany({ where: { id: { in: inboxIds } } });
     await db.transaction.deleteMany({ where: { tenant_id: tenant } });
     await db.wallet.deleteMany({ where: { tenant_id: tenant } });
     await db.$disconnect();
@@ -105,7 +110,44 @@ test(
       /pending transaction/,
     );
     assert.equal((await service.requestBroadcast(tenant, tx.id)).broadcast_generation, 2);
-    await db!.transaction.update({ where: { id: tx.id }, data: { status: 'confirmed' } });
+    const auth = new MessageAuth('b'.repeat(64));
+    const worker = new WalletWorker(db as Database, auth, {} as Rpc, {
+      seedId: 'test',
+      ethereumChainId: '11155111',
+      solanaGenesisHash: 'devnet',
+    });
+    const deliver = async (
+      generation: number,
+      revision: number,
+      status: Extract<Message, { type: 'broadcast.updated' }>['status'],
+      id = randomUUID(),
+    ) => {
+      inboxIds.push(id);
+      const payload: Message = {
+        type: 'broadcast.updated',
+        transactionId: tx.id,
+        generation,
+        revision,
+        status,
+        attempts: 3,
+        lastError: null,
+      };
+      await worker.process({ id, name: payload.type, data: auth.seal(payload, id) } as Job);
+      return id;
+    };
+    const eventId = await deliver(2, 3, 'submitted');
+    await deliver(2, 3, 'submitted', eventId);
+    await deliver(2, 2, 'attention');
+    await deliver(1, 100, 'confirmed');
+    assert.equal((await service.getTransaction(tenant, tx.id)).status, 'submitted');
+    await deliver(2, 4, 'attention');
+    await assert.rejects(
+      () => service.createTransaction(tenant, wallet.id, 'payment-2', intent),
+      /pending transaction/,
+    );
+    await deliver(2, 5, 'confirmed');
+    await deliver(2, 6, 'broadcasting');
+    assert.equal((await service.getTransaction(tenant, tx.id)).status, 'confirmed');
     assert.equal(
       (await service.createTransaction(tenant, wallet.id, 'payment-2', intent)).status,
       'preparing',

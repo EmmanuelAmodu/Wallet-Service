@@ -7,9 +7,10 @@ import {
 } from '@nestjs/common';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
-import { Database, lock, lockTransaction } from '../../../packages/database/src/client';
+import { Database } from './database';
+import { lock, lockTransaction } from '../../../packages/database/src/locks';
 import { Chain, derivationPath, Transfer } from '../../../packages/shared/src/contracts';
-import { canonical, QUEUES } from '../../../packages/queue/src/messages';
+import { broadcastSnapshotSchema, canonical, QUEUES } from '../../../packages/queue/src/messages';
 import { enqueue } from '../../../packages/queue/src/outbox';
 import { networkFor } from '../../../packages/chain/src/config';
 
@@ -134,10 +135,28 @@ export class WalletService {
     if (!tx) throw new NotFoundException('Transaction not found');
     return tx;
   }
+  private snapshot(tx: {
+    wallet: { chain: string; network: string };
+    signed: unknown;
+    prepared: unknown;
+  }) {
+    const prepared = tx.prepared as { lastValidBlockHeight?: number } | null;
+    return broadcastSnapshotSchema.parse({
+      chain: tx.wallet.chain,
+      network: tx.wallet.network,
+      signed: tx.signed,
+      ...(tx.wallet.chain === 'solana'
+        ? { lastValidBlockHeight: prepared?.lastValidBlockHeight }
+        : {}),
+    });
+  }
   async requestBroadcast(tenant: string, id: string) {
     return this.db.$transaction(async (db) => {
       await lockTransaction(db, id);
-      const tx = await db.transaction.findFirst({ where: { id, tenant_id: tenant } });
+      const tx = await db.transaction.findFirst({
+        where: { id, tenant_id: tenant },
+        include: { wallet: true },
+      });
       if (!tx) throw new NotFoundException('Transaction not found');
       if (['queued', 'broadcasting', 'submitted', 'confirmed', 'failed'].includes(tx.status))
         return tx;
@@ -145,13 +164,19 @@ export class WalletService {
         throw new ConflictException('Transaction is not signed');
       const updated = await db.transaction.update({
         where: { id },
-        data: { status: 'queued', broadcast_generation: { increment: 1 }, last_error: null },
+        data: {
+          status: 'queued',
+          broadcast_generation: { increment: 1 },
+          broadcast_revision: 0,
+          last_error: null,
+        },
       });
       await enqueue(
         db,
         QUEUES.broadcast,
         {
           type: 'broadcast.requested',
+          snapshot: this.snapshot(tx),
           transactionId: id,
           generation: updated.broadcast_generation,
         },
@@ -163,7 +188,10 @@ export class WalletService {
   async requestRefresh(tenant: string, id: string) {
     return this.db.$transaction(async (db) => {
       await lockTransaction(db, id);
-      const tx = await db.transaction.findFirst({ where: { id, tenant_id: tenant } });
+      const tx = await db.transaction.findFirst({
+        where: { id, tenant_id: tenant },
+        include: { wallet: true },
+      });
       if (!tx) throw new NotFoundException('Transaction not found');
       if (['confirmed', 'failed'].includes(tx.status)) return tx;
       if (!tx.signed || !['queued', 'broadcasting', 'submitted', 'attention'].includes(tx.status))
@@ -173,6 +201,7 @@ export class WalletService {
         QUEUES.broadcast,
         {
           type: 'broadcast.confirm',
+          snapshot: this.snapshot(tx),
           transactionId: id,
           generation: tx.broadcast_generation,
           poll: 0,

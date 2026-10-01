@@ -1,9 +1,13 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { createDatabase } from '../packages/database/src/client';
+import { createDatabase } from '../apps/wallet/src/database';
 import { required } from '../packages/shared/src/http';
 
-export async function migrate(url: string) {
+export async function migrate(url: string, application: 'wallet' | 'broadcast' = 'wallet') {
+  if (application === 'broadcast') {
+    run(['migrate', 'deploy', '--config', 'prisma.broadcast.config.ts'], url, application);
+    return;
+  }
   const db = createDatabase(url);
   try {
     // The original SQL runner recorded 001_initial.sql. Baseline only that known schema.
@@ -21,16 +25,33 @@ export async function migrate(url: string) {
     await db.$disconnect();
   }
 }
-function run(args: string[], url: string) {
+function run(args: string[], url: string, application = 'wallet') {
   const result = spawnSync(
     process.execPath,
     [resolve('node_modules/prisma/build/index.js'), ...args],
-    { env: { ...process.env, DATABASE_URL: url }, stdio: 'inherit' },
+    {
+      env: {
+        ...process.env,
+        DATABASE_URL: url,
+        WALLET_DATABASE_URL: url,
+        ...(application === 'broadcast' ? { BROADCAST_DATABASE_URL: url } : {}),
+      },
+      stdio: 'inherit',
+    },
   );
   if (result.status !== 0) throw new Error('Prisma migration command failed');
 }
-if (require.main === module)
-  migrate(required('DATABASE_URL')).catch(() => {
-    console.error('Migration failed; inspect Prisma diagnostics');
+if (require.main === module) {
+  const application = process.argv[2];
+  const runMigrations = async () => {
+    if (application && application !== 'wallet' && application !== 'broadcast')
+      throw new Error('Expected wallet or broadcast');
+    if (!application || application === 'wallet') await migrate(required('WALLET_DATABASE_URL'));
+    if (!application || application === 'broadcast')
+      await migrate(required('BROADCAST_DATABASE_URL'), 'broadcast');
+  };
+  runMigrations().catch(() => {
+    console.error('Migration failed; inspect Prisma diagnostics and application database URLs');
     process.exitCode = 1;
   });
+}

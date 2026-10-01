@@ -2,7 +2,8 @@ import { Inject, HttpException } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, UnrecoverableError } from 'bullmq';
 import { Prisma } from '@prisma/client';
-import { Database, lock, lockTransaction } from '../../../packages/database/src/client';
+import { Database } from './database';
+import { lock, lockTransaction } from '../../../packages/database/src/locks';
 import { MessageAuth, Message, QUEUES } from '../../../packages/queue/src/messages';
 import { enqueue } from '../../../packages/queue/src/outbox';
 import { Rpc } from '../../../packages/chain/src/rpc';
@@ -52,15 +53,34 @@ export class WalletWorker extends WorkerHost {
       return;
     }
     if (
-      !['wallet.derived', 'wallet.rejected', 'transaction.signed', 'transaction.rejected'].includes(
-        message.type,
-      )
+      ![
+        'wallet.derived',
+        'wallet.rejected',
+        'transaction.signed',
+        'transaction.rejected',
+        'broadcast.updated',
+      ].includes(message.type)
     )
       throw new UnrecoverableError('Unsupported wallet action');
     await this.db.$transaction(async (db) => {
       await lock(db, `inbox-${job.id}`);
       if (await db.inbox.findUnique({ where: { id: job.id! } })) return;
-      if (message.type === 'wallet.derived') {
+      if (message.type === 'broadcast.updated') {
+        await db.transaction.updateMany({
+          where: {
+            id: message.transactionId,
+            broadcast_generation: message.generation,
+            broadcast_revision: { lt: message.revision },
+            status: { in: ['queued', 'broadcasting', 'submitted', 'attention'] },
+          },
+          data: {
+            status: message.status,
+            broadcast_revision: message.revision,
+            broadcast_attempts: message.attempts,
+            last_error: message.lastError,
+          },
+        });
+      } else if (message.type === 'wallet.derived') {
         const wallet = await db.wallet.findUnique({ where: { id: message.walletId } });
         if (wallet?.status === 'deriving') {
           if (message.path !== wallet.path)

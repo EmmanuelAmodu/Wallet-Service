@@ -1,0 +1,42 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../../node_modules/.prisma/broadcast-client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Transaction {
+  id                   String   @id @db.Uuid
+  snapshot             Json
+  status               String
+  broadcast_generation Int
+  broadcast_attempts   Int      @default(0)
+  revision             Int      @default(0)
+  last_error           String?
+  created_at           DateTime @default(now()) @db.Timestamptz
+  updated_at           DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@map("transactions")
+}
+
+model Outbox {
+  id           String    @id @db.Uuid
+  queue        String
+  dedupe_key   String    @unique
+  payload      Json
+  available_at DateTime  @default(now()) @db.Timestamptz
+  published_at DateTime? @db.Timestamptz
+  created_at   DateTime  @default(now()) @db.Timestamptz
+
+  @@index([published_at, available_at])
+  @@map("outbox")
+}
+
+model Inbox {
+  id           String   @id
+  processed_at DateTime @default(now()) @db.Timestamptz
+
+  @@map("inbox")
+}

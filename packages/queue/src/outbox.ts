@@ -3,12 +3,34 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
-import { Database, DbTransaction } from '../../database/src/client';
 import { Message, MessageAuth, messageSchema, QUEUES } from './messages';
 import { integerSetting } from '../../shared/src/config';
 
+export const OUTBOX_DATABASE = Symbol('OUTBOX_DATABASE');
+type OutboxRow = { id: string; queue: string; payload: unknown };
+type OutboxTransaction = {
+  $queryRaw<T>(query: TemplateStringsArray, ...values: unknown[]): Promise<T>;
+  outbox: {
+    upsert(args: {
+      where: { dedupe_key: string };
+      update: Record<string, never>;
+      create: {
+        id: string;
+        queue: string;
+        payload: Prisma.InputJsonValue;
+        dedupe_key: string;
+        available_at: Date;
+      };
+    }): Promise<OutboxRow>;
+    findUniqueOrThrow(args: { where: { id: string } }): Promise<OutboxRow>;
+    update(args: { where: { id: string }; data: { published_at: Date } }): Promise<unknown>;
+  };
+};
+export interface OutboxDatabase {
+  $transaction<T>(fn: (db: OutboxTransaction) => Promise<T>): Promise<T>;
+}
 export async function enqueue(
-  db: DbTransaction,
+  db: Pick<OutboxTransaction, 'outbox'>,
   queue: string,
   payload: Message,
   dedupeKey: string,
@@ -32,7 +54,7 @@ export class OutboxRelay implements OnModuleInit, OnModuleDestroy {
   private timer?: NodeJS.Timeout;
   private running?: Promise<void>;
   constructor(
-    @Inject(Database) private readonly db: Database,
+    @Inject(OUTBOX_DATABASE) private readonly db: OutboxDatabase,
     @Inject(MessageAuth) private readonly auth: MessageAuth,
     @InjectQueue(QUEUES.wallet) private readonly wallet: Queue,
     @InjectQueue(QUEUES.signer) private readonly signer: Queue,

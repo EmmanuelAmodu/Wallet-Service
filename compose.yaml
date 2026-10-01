@@ -14,6 +14,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  broadcast-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: broadcast
+      POSTGRES_PASSWORD: broadcast_local_only
+      POSTGRES_DB: broadcast
+    ports:
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - broadcast-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U broadcast -d broadcast']
+      interval: 5s
+      timeout: 3s
+      retries: 10
   redis:
     image: redis:7.4-alpine
     command:
@@ -37,4 +52,5 @@ services:
       retries: 10
 volumes:
   postgres-data:
+  broadcast-postgres-data:
   redis-data:

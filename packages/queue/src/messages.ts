@@ -1,6 +1,6 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { deriveSchema, signSchema, signedSchema } from '../../shared/src/contracts';
+import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../shared/src/contracts';
 import { matches, token } from '../../shared/src/http';
 
 export const QUEUES = {
@@ -8,6 +8,18 @@ export const QUEUES = {
   signer: 'signer-actions',
   broadcast: 'broadcast-actions',
 } as const;
+export const broadcastSnapshotSchema = z
+  .object({
+    chain: chainSchema,
+    network: z.string().min(1),
+    signed: signedSchema,
+    lastValidBlockHeight: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    if (value.chain === 'solana' && value.lastValidBlockHeight === undefined)
+      ctx.addIssue({ code: 'custom', message: 'Solana expiry height required' });
+  });
 export const messageSchema = z.discriminatedUnion('type', [
   z
     .object({ type: z.literal('wallet.derive'), walletId: z.uuid(), request: deriveSchema })
@@ -36,6 +48,7 @@ export const messageSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('broadcast.requested'),
+      snapshot: broadcastSnapshotSchema,
       transactionId: z.uuid(),
       generation: z.number().int().nonnegative(),
     })
@@ -43,10 +56,22 @@ export const messageSchema = z.discriminatedUnion('type', [
   z
     .object({
       type: z.literal('broadcast.confirm'),
+      snapshot: broadcastSnapshotSchema.optional(),
       transactionId: z.uuid(),
       generation: z.number().int().nonnegative(),
       poll: z.number().int().nonnegative(),
       monitorId: z.uuid().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('broadcast.updated'),
+      transactionId: z.uuid(),
+      generation: z.number().int().nonnegative(),
+      revision: z.number().int().positive(),
+      status: z.enum(['queued', 'broadcasting', 'submitted', 'confirmed', 'failed', 'attention']),
+      attempts: z.number().int().nonnegative(),
+      lastError: z.string().nullable(),
     })
     .strict(),
 ]);

@@ -9,7 +9,8 @@ import { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { Transaction as EthTransaction } from 'ethers';
 import { Queue } from 'bullmq';
-import { createDatabase } from '../packages/database/src/client';
+import { BroadcastDatabase } from '../apps/broadcast/src/database';
+import { createDatabase } from '../apps/wallet/src/database';
 import { migrate } from '../scripts/migrate';
 import { connection } from '../packages/queue/src/module';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages';
@@ -49,8 +50,16 @@ async function stop(child: ChildProcess) {
 
 test(
   'HTTP + Redis + Prisma: offline workers, async signing, retries, lost response reconciliation, replicas and confirmations',
-  { skip: !process.env.TEST_DATABASE_URL || !process.env.TEST_REDIS_URL, timeout: 60000 },
+  {
+    skip:
+      !process.env.TEST_DATABASE_URL ||
+      !process.env.TEST_REDIS_URL ||
+      !process.env.TEST_BROADCAST_DATABASE_URL,
+    timeout: 60000,
+  },
   async () => {
+    const broadcastDb = new BroadcastDatabase(process.env.TEST_BROADCAST_DATABASE_URL!);
+    await migrate(process.env.TEST_BROADCAST_DATABASE_URL!, 'broadcast');
     const db = createDatabase(process.env.TEST_DATABASE_URL!);
     await migrate(process.env.TEST_DATABASE_URL!);
     const dir = await mkdtemp(join(tmpdir(), 'waas-events-')),
@@ -120,7 +129,7 @@ test(
     await new Promise<void>((r) => rpc.listen(0, '127.0.0.1', r));
     const env = {
       ...process.env,
-      DATABASE_URL: process.env.TEST_DATABASE_URL,
+
       REDIS_URL: process.env.TEST_REDIS_URL,
       QUEUE_PREFIX: prefix,
       QUEUE_AUTH_KEY: queueKey,
@@ -142,7 +151,14 @@ test(
     let logs = '';
     function start(name: string, overrides: Record<string, string> = {}) {
       const child = spawn(process.execPath, [resolve(`dist/apps/${name}/src/main.js`)], {
-        env: { ...env, ...overrides },
+        env: {
+          ...env,
+          DATABASE_URL: undefined,
+          WALLET_DATABASE_URL: name === 'wallet' ? process.env.TEST_DATABASE_URL : undefined,
+          BROADCAST_DATABASE_URL:
+            name === 'broadcast' ? process.env.TEST_BROADCAST_DATABASE_URL : undefined,
+          ...overrides,
+        },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
       child.stdout?.on('data', (b) => {
@@ -169,7 +185,7 @@ test(
         body: body === undefined ? undefined : JSON.stringify(body),
       });
     try {
-      start('wallet');
+      const walletProcess = start('wallet');
       await eventually(
         async () => {
           try {
@@ -234,8 +250,18 @@ test(
         () => queues.find((q) => q.name === QUEUES.broadcast)!.getWaitingCount(),
         (n) => n === 1,
       );
+      await stop(walletProcess);
       start('broadcast');
       start('broadcast');
+      await eventually(
+        () => broadcastDb.transaction.findUnique({ where: { id: tx.id } }),
+        (t) => t?.status === 'submitted',
+      );
+      assert.equal(
+        (await db.transaction.findUniqueOrThrow({ where: { id: tx.id } })).status,
+        'queued',
+      );
+      start('wallet');
       await eventually(
         () => db.transaction.findUniqueOrThrow({ where: { id: tx.id } }),
         (t) => t.status === 'submitted',
@@ -249,6 +275,14 @@ test(
         (t) => t.status === 'confirmed',
       );
       assert.equal(final.broadcast_attempts, 3);
+      assert.equal(
+        (await broadcastDb.transaction.findUniqueOrThrow({ where: { id: tx.id } })).status,
+        'confirmed',
+      );
+      const [tables] = await broadcastDb.$queryRaw<
+        { wallets: string | null }[]
+      >`SELECT to_regclass('public.wallets')::text AS wallets`;
+      assert.equal(tables.wallets, null, 'Broadcast database must not have wallet tables');
       // Replay a completed signing event after finality. State guards must not regress it.
       const signOutbox = await db.outbox.findUniqueOrThrow({
         where: { dedupe_key: `sign-${tx.id}` },
@@ -291,6 +325,11 @@ test(
       });
       await db.inbox.deleteMany({ where: { id: { in: outbox.map((o) => `result-${o.id}`) } } });
       await db.outbox.deleteMany({ where: { id: { in: outbox.map((o) => o.id) } } });
+      await broadcastDb.outbox.deleteMany({
+        where: { OR: txs.map((t) => ({ dedupe_key: { contains: t.id } })) },
+      });
+      await broadcastDb.transaction.deleteMany({ where: { id: { in: txs.map((t) => t.id) } } });
+      await broadcastDb.$disconnect();
       await db.transaction.deleteMany({ where: { tenant_id: tenant } });
       await db.wallet.deleteMany({ where: { tenant_id: tenant } });
       await db.$disconnect();

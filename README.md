@@ -7,13 +7,14 @@ A NestJS monorepo with **wallet, signer, and broadcast services**, PostgreSQL th
 ```mermaid
 flowchart LR
   Client -->|Authenticated HTTP commands / queries| Wallet[Wallet service]
-  Wallet --> DB[(PostgreSQL / Prisma)]
+  Wallet --> DB[(Wallet PostgreSQL / Prisma)]
   DB -->|Transactional outbox relay| Redis[(Redis / BullMQ)]
   Redis -->|Derive / sign commands| Signer[Signer service]
   Signer -->|Derived / signed / rejected events| Redis
-  Redis -->|Prepare commands / signer events| Wallet
+  Redis -->|Prepare commands / signer and broadcast events| Wallet
   Redis -->|Broadcast / confirm commands| Broadcast[Broadcast service]
-  Broadcast --> DB
+  Broadcast --> BroadcastDB[(Broadcast PostgreSQL / Prisma)]
+  BroadcastDB -->|Transactional outbox / status events| Redis
   Broadcast -->|Reconcile / submit / monitor| Nodes[Blockchain RPC]
   Wallet -->|Nonce / gas / UTXO / blockhash reads| Nodes
   Signer --> Seed[Read-only master seed]
@@ -25,7 +26,7 @@ flowchart LR
 | `apps/signer` | Consume derivation/signing commands; derive ephemeral keys; publish results | Redis, Wallet Core, seed file; **no database or RPC** |
 | `apps/broadcast` | Reconcile hashes, submit stored signed bytes, exponential retries, Solana simulation/expiry checks, confirmation monitoring | Prisma/PostgreSQL, Redis, RPCs; **no seed or signing responsibilities** |
 
-The wallet service does not submit transactions or call the signer over HTTP. The signer and broadcast services are Nest application contexts with `@Processor` / `WorkerHost` consumers, not HTTP servers. Shared packages contain Prisma access, queue contracts/outbox, input validation, and read-only chain preparation code. Wallet and broadcast use a shared database model in this iteration; they own different stages of the same transaction lifecycle.
+The wallet service does not submit transactions or call the signer over HTTP. The signer and broadcast services are Nest application contexts with `@Processor` / `WorkerHost` consumers, not HTTP servers. Shared packages contain Prisma access, queue contracts/outbox, input validation, and read-only chain preparation code. Wallet and broadcast each own a separate database, Prisma schema, migration history, and Prisma client. Neither service reads or writes the other database. The signer remains stateless and needs no database. Broadcast status in the wallet API is an eventually consistent projection of queue events.
 
 **Redis/BullMQ was chosen for action queues with durable jobs, retries, and competing workers.** This does not use Redis Pub/Sub or Nest's ephemeral Redis microservice transport. Kafka is not required for this implementation.
 
@@ -34,10 +35,12 @@ The wallet service does not submit transactions or call the signer over HTTP. Th
 1. Creating a wallet atomically stores a `deriving` wallet and a `wallet.derive` outbox command. The signer publishes `wallet.derived`; a wallet worker saves the address and sets `ready`.
 2. Creating a transaction atomically reserves the wallet, saves the intent as `preparing`, and queues `transaction.prepare` through the outbox. A wallet worker obtains chain data, persists the prepared transaction, and queues `transaction.sign`.
 3. The signer returns a `transaction.signed` event. The wallet worker persists the signed bytes and transaction hash, then sets `signed`.
-4. An explicit broadcast request changes the record to `queued` and stores `broadcast.requested` in the same database transaction.
-5. A broadcast worker reconciles the hash before sending. It only submits the **persisted signed bytes**. It stores the result and schedules delayed `broadcast.confirm` commands through the outbox until finality or an operator-action state.
+4. An explicit broadcast request changes the wallet record to `queued` and stores `broadcast.requested` with an immutable signed payload, network, and any Solana expiry height in the wallet outbox.
+5. A broadcast worker reconciles the hash before sending. It only submits the **persisted signed bytes**. It persists the signed payload in its own database, commits revisioned `broadcast.updated` events alongside state changes, and schedules delayed `broadcast.confirm` commands through the outbox until finality or an operator-action state.
 
 Private keys and seed phrases are never placed in queue jobs or database records. Queue payloads do contain addresses, paths, transaction intents, and signed bytes; treat Redis as sensitive infrastructure. Commands and results carry versioned, HMAC-authenticated envelopes using `QUEUE_AUTH_KEY`.
+
+The wallet worker deduplicates broadcast events and checks generation and revision before updating its local projection. Out-of-order events cannot regress newer state, and wallet reservations remain held until a terminal event arrives. If the wallet service is offline, broadcast and confirmation continue independently; events wait durably in Redis.
 
 ## Chain support
 
@@ -60,7 +63,7 @@ Requires Node.js **22.12+**, PostgreSQL 14+, and Redis 7+. Docker Compose provid
 ```sh
 npm ci
 npm run setup:local
-docker compose up -d postgres redis
+docker compose up -d postgres broadcast-postgres redis
 npm run migrate
 npm run build
 ```
@@ -79,11 +82,21 @@ These commands compile and start; they are not watch processes. Production start
 
 Only the wallet service exposes HTTP, at `127.0.0.1:3000` by default. Set `WALLET_HOST=0.0.0.0` inside a container when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
 
+### Database configuration
+
+- Wallet: `WALLET_DATABASE_URL`, local PostgreSQL on port 5432.
+- Broadcast: `BROADCAST_DATABASE_URL`, separate local PostgreSQL on port 5433.
+- Signer: no database URL or database access.
+
+`npm run migrate` migrates both databases. For independent deployment use `npm run migrate:wallet` or `npm run migrate:broadcast`, supplying only that application's URL. Each service should receive only its own database credentials. Separate databases may live on one PostgreSQL server with separate roles and access restrictions, or on separate servers as in Compose.
+
 ### Upgrading the earlier version
 
-Keep the existing seed, seed ID, and database. Add `REDIS_URL`, `QUEUE_PREFIX`, and `QUEUE_AUTH_KEY` to your environment; remove obsolete `SIGNER_URL`, `SIGNER_PORT`, and `SIGNER_HOST`. The old internal `SIGNER_TOKEN` can be renamed to `QUEUE_AUTH_KEY` if it is already a distinct random secret of at least 32 characters. Do not rerun local seed setup on an existing installation.
+This changes the broadcast queue contract. Before upgrading an existing deployment, stop accepting new work and drain active broadcasts and confirmation monitoring using the old services. Resolve all `attention` transactions first; do not discard reservations or uncertain payments. Stop the old workers and relays before deploying the new version. Do not mix old and new workers. Retained old broadcast jobs lack signed snapshots and must not be replayed into the new consumers.
 
-Run `npm run migrate` before starting the new services. The migration wrapper recognizes the original `schema_migrations` entry for `001_initial.sql`, marks its identical Prisma baseline as applied, then applies the additive event-driven migration. Existing addresses become `ready`; transaction data, derivation accounts, and the sequence are retained. Unknown legacy migration histories are rejected for manual review. Fresh databases apply both Prisma migrations normally.
+Keep the existing seed, seed ID, and wallet database. Rename `DATABASE_URL` to `WALLET_DATABASE_URL` and provision a fresh, separate `BROADCAST_DATABASE_URL`. No existing database is deleted or copied by these scripts. Add `REDIS_URL`, `QUEUE_PREFIX`, and `QUEUE_AUTH_KEY` to your environment; remove obsolete `SIGNER_URL`, `SIGNER_PORT`, and `SIGNER_HOST`. The old internal `SIGNER_TOKEN` can be renamed to `QUEUE_AUTH_KEY` if it is already a distinct random secret of at least 32 characters. Do not rerun local seed setup on an existing installation.
+
+Run `npm run migrate` before starting the new services. The migration wrapper recognizes the original `schema_migrations` entry for `001_initial.sql`, marks its identical Prisma baseline as applied, then applies the additive event-driven migration. Existing addresses become `ready`; transaction data, derivation accounts, and the sequence are retained. Unknown legacy migration histories are rejected for manual review. Fresh wallet databases apply the full wallet migration history; broadcast has an independent initial migration.
 
 ## API changes
 
@@ -138,7 +151,7 @@ Wait for `signed`, enable broadcasting on the broadcast service when ready, and 
 - **Transactional outbox:** state changes and their next action commit together in PostgreSQL. Wallet and broadcast replicas run relays using `FOR UPDATE SKIP LOCKED`. A Redis outage leaves actions unpublished for a later attempt. Relays publish stable job IDs before marking delivery; a lost acknowledgement can safely cause redelivery.
 - **At-least-once processing:** this is not an exactly-once transport. Deterministic job IDs, durable signer-result inbox records, status checks, generation checks, and a partial unique database index absorb duplicates. Signed bytes remain immutable across broadcast retries.
 - **Reservations:** one pending transaction per wallet, including `attention`, across all replicas. Rejected preparation/signing releases the reservation; uncertain sends do not. This prevents this system's nonce/UTXO conflicts, provided these wallets are not spent from externally.
-- **Workers:** wallet and broadcast concurrency is 8 per replica; signer concurrency is 1 per replica because cryptography is synchronous. Add replicas with the same database, queue prefix, Redis, network config, and appropriate secret credentials. Distinct environments require distinct databases and queue namespaces.
+- **Workers:** wallet and broadcast concurrency is 8 per replica; signer concurrency is 1 per replica because cryptography is synchronous. Add replicas with the same application-specific database, queue prefix, Redis, network config, and appropriate secret credentials. Distinct environments require distinct databases and queue namespaces.
 - **Retries:** 8 attempts with exponential backoff, starting at `QUEUE_RETRY_DELAY_MS` (default 1,000 ms). Failed jobs are retained for inspection/replay. Completed jobs are retained for up to a day, capped at 10,000 per queue; database guards still apply after queue cleanup.
 - **Monitoring:** delayed confirmation commands default to 30 seconds, with up to 120 reschedules per monitoring run. Ethereum requires 12 confirmations, Bitcoin 6, and Solana `finalized`. Bitcoin Core needs transaction-history lookup, typically `txindex=1`.
 - **Shutdown:** workers drain active jobs before releasing signer/database resources. A terminated worker's stalled job can be recovered by BullMQ.
@@ -166,7 +179,7 @@ PostgreSQL outbox/inbox records are retained for recovery and currently have no 
 
 ## Prisma and deployment
 
-`prisma/schema.prisma` is the application data model; `prisma/migrations` is the migration history. Ordinary queries and writes use Prisma Client with the PostgreSQL adapter. Database sessions use UTC so delayed actions retain their intended timestamps. Small parameterized raw queries remain for row/advisory locks, `SKIP LOCKED`, and the existing non-recycling account sequence. Partial unique indexes and CHECK constraints are maintained in migration SQL; do not replace migrations with `db push`.
+`apps/wallet/prisma` and `apps/broadcast/prisma` contain independent schemas and migrations. `prisma.config.ts` configures wallet; `prisma.broadcast.config.ts` configures broadcast. `npm run db:generate` generates both clients. Ordinary queries and writes use Prisma Client with the PostgreSQL adapter. Database sessions use UTC so delayed actions retain their intended timestamps. Small parameterized raw queries remain for row/advisory locks, `SKIP LOCKED`, and the existing non-recycling account sequence. Partial unique indexes and CHECK constraints are maintained in migration SQL; do not replace migrations with `db push`.
 
 The Dockerfile provides a non-root runtime for any service. Override its command for signer or broadcast. Build the `migrate` target to run `node dist/scripts/migrate.js` with the Prisma CLI available. Mount the seed read-only only in signer containers, owned by UID 1000 with mode 0600. Do not mount it in wallet or broadcast containers.
 
@@ -180,12 +193,13 @@ Prisma CLI transitive dependencies `deepmerge-ts` and `mysql2` are pinned throug
 npm test
 # Use a dedicated test database and Redis; DB/queue tests otherwise skip explicitly.
 TEST_DATABASE_URL=postgresql://user:password@localhost:5432/wallet_test \
+TEST_BROADCAST_DATABASE_URL=postgresql://user:password@localhost:5433/broadcast_test \
 TEST_REDIS_URL=redis://localhost:6379 npm test
 npm run format:check
 npm run lint
 npm audit
 ```
 
-Tests run serially against the shared test database and clean their records. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC only. It exercises offline consumers, async signing, signature recovery, retries, lost responses after acceptance, duplicate result delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. No test sends live funds. CI supplies PostgreSQL and Redis.
+Tests run serially against two dedicated test databases and clean their records. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC only. It exercises offline consumers, async signing, signature recovery, retries, lost responses after acceptance, duplicate result delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. No test sends live funds. CI supplies PostgreSQL and Redis.
 
 References: [NestJS queues](https://docs.nestjs.com/techniques/queues), [BullMQ retries](https://docs.bullmq.io/guide/retrying-failing-jobs), [Prisma PostgreSQL integration](https://www.prisma.io/docs/orm/overview/databases/postgresql), [Prisma baselining](https://www.prisma.io/docs/orm/prisma-migrate/workflows/baselining), [Wallet Core usage](https://developer.trustwallet.com/developer/wallet-core/integration-guide/wallet-core-usage).

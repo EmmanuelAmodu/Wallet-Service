@@ -2,17 +2,17 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Job, Queue } from 'bullmq';
-import { Database, createDatabase } from '../packages/database/src/client';
+import { BroadcastDatabase } from '../apps/broadcast/src/database';
 import { migrate } from '../scripts/migrate';
 import { BroadcastWorker } from '../apps/broadcast/src/worker';
 import { BroadcastRpc } from '../apps/broadcast/src/rpc';
 import { OutboxRelay, enqueue } from '../packages/queue/src/outbox';
 import { MessageAuth, Message, QUEUES } from '../packages/queue/src/messages';
 
-const enabled = !!process.env.TEST_DATABASE_URL;
-const db = enabled ? createDatabase(process.env.TEST_DATABASE_URL!) : undefined;
-const tenant = randomUUID(),
-  auth = new MessageAuth('b'.repeat(64));
+const enabled = !!process.env.TEST_BROADCAST_DATABASE_URL;
+const db = enabled ? new BroadcastDatabase(process.env.TEST_BROADCAST_DATABASE_URL!) : undefined;
+const ids: string[] = [];
+const auth = new MessageAuth('b'.repeat(64));
 const signed = { raw: '0x1234', txHash: '0x' + 'ab'.repeat(32), encoding: 'hex' as const };
 const config = {
   allowBroadcast: true,
@@ -22,47 +22,26 @@ const config = {
   maxPolls: 2,
 };
 before(async () => {
-  if (db) await migrate(process.env.TEST_DATABASE_URL!);
+  if (db) await migrate(process.env.TEST_BROADCAST_DATABASE_URL!, 'broadcast');
 });
 after(async () => {
   if (db) {
-    const txs = await db.transaction.findMany({ where: { tenant_id: tenant } });
+    const txs = await db.transaction.findMany({ where: { id: { in: ids } } });
     await db.outbox.deleteMany({
       where: { OR: txs.map((t) => ({ dedupe_key: { contains: t.id } })) },
     });
-    await db.transaction.deleteMany({ where: { tenant_id: tenant } });
-    await db.wallet.deleteMany({ where: { tenant_id: tenant } });
+    await db.transaction.deleteMany({ where: { id: { in: ids } } });
     await db.$disconnect();
   }
 });
+const snapshot = { chain: 'ethereum' as const, network: '11155111', signed };
 async function fixture() {
-  const [{ account }] = await db!.$queryRaw<
-    { account: bigint }[]
-  >`SELECT nextval('wallet_account_seq') AS account`;
-  const wallet = await db!.wallet.create({
-    data: {
-      id: randomUUID(),
-      tenant_id: tenant,
-      external_id: randomUUID(),
-      chain: 'ethereum',
-      network: '11155111',
-      seed_id: 'test',
-      account: Number(account),
-      path: `m/44'/60'/${account}'/0/0`,
-      status: 'ready',
-      address: '0x' + account.toString(16).padStart(40, '0'),
-    },
-  });
+  const id = randomUUID();
+  ids.push(id);
   return db!.transaction.create({
     data: {
-      id: randomUUID(),
-      tenant_id: tenant,
-      wallet_id: wallet.id,
-      idempotency_key: randomUUID(),
-      request_hash: 'test',
-      intent: { chain: 'ethereum' },
-      signed,
-      tx_hash: signed.txHash,
+      id,
+      snapshot,
       status: 'queued',
       broadcast_generation: 1,
     },
@@ -79,13 +58,13 @@ function job(message: Message, attemptsMade = 0) {
   } as unknown as Job;
 }
 function worker(rpc: Partial<BroadcastRpc>, overrides: Partial<typeof config> = {}) {
-  return new BroadcastWorker(db as Database, auth, rpc as BroadcastRpc, {
+  return new BroadcastWorker(db as BroadcastDatabase, auth, rpc as BroadcastRpc, {
     ...config,
     ...overrides,
   });
 }
 test(
-  'broadcast gate and retry exhaustion preserve signed bytes and wallet reservation',
+  'broadcast gate and retry exhaustion preserve signed bytes and publish attention events',
   { skip: !enabled },
   async () => {
     const tx = await fixture();
@@ -100,7 +79,12 @@ test(
         throw new Error('timeout');
       },
     };
-    const action = { type: 'broadcast.requested' as const, transactionId: tx.id, generation: 1 };
+    const action = {
+      type: 'broadcast.requested' as const,
+      snapshot,
+      transactionId: tx.id,
+      generation: 1,
+    };
     await assert.rejects(
       () => worker(rpc, { allowBroadcast: false }).process(job(action)),
       /disabled/,
@@ -114,20 +98,12 @@ test(
     const result = await db!.transaction.findUniqueOrThrow({ where: { id: tx.id } });
     assert.equal(result.status, 'attention');
     assert.equal(result.broadcast_attempts, 1);
-    assert.deepEqual(result.signed, signed);
-    await assert.rejects(() =>
-      db!.transaction.create({
-        data: {
-          id: randomUUID(),
-          wallet_id: tx.wallet_id,
-          tenant_id: tenant,
-          idempotency_key: randomUUID(),
-          request_hash: 'test',
-          intent: {},
-          status: 'preparing',
-        },
-      }),
-    );
+    assert.deepEqual(result.snapshot, snapshot);
+    const events = await db!.outbox.findMany({
+      where: { dedupe_key: { startsWith: `broadcast-result-${tx.id}-` } },
+      orderBy: { created_at: 'asc' },
+    });
+    assert.equal((events.at(-1)!.payload as { status: string }).status, 'attention');
   },
 );
 test(
@@ -146,20 +122,47 @@ test(
       },
     });
     await instance.process(
-      job({ type: 'broadcast.requested', transactionId: tx.id, generation: 0 }),
+      job({ type: 'broadcast.requested', snapshot, transactionId: tx.id, generation: 0 }),
     );
     assert.equal(calls, 0);
     await instance.process(
-      job({ type: 'broadcast.requested', transactionId: tx.id, generation: 1 }),
+      job({ type: 'broadcast.requested', snapshot, transactionId: tx.id, generation: 1 }),
     );
     assert.equal(calls, 1);
     await instance.process(
-      job({ type: 'broadcast.requested', transactionId: tx.id, generation: 1 }),
+      job({ type: 'broadcast.requested', snapshot, transactionId: tx.id, generation: 1 }),
     );
     assert.equal(calls, 1);
     assert.equal(
       (await db!.transaction.findUniqueOrThrow({ where: { id: tx.id } })).status,
       'confirmed',
+    );
+    // A retry requested before the wallet sees finality must receive finality for its new generation.
+    await instance.process(
+      job({ type: 'broadcast.requested', snapshot, transactionId: tx.id, generation: 2 }),
+    );
+    assert.equal(calls, 1);
+    const finalEvent = await db!.outbox.findFirstOrThrow({
+      where: {
+        dedupe_key: { startsWith: `broadcast-result-${tx.id}-2-` },
+      },
+    });
+    assert.equal((finalEvent.payload as { status: string }).status, 'confirmed');
+    await assert.rejects(
+      () =>
+        instance.process(
+          job({
+            type: 'broadcast.requested',
+            snapshot: { ...snapshot, signed: { ...signed, raw: '0x5678' } },
+            transactionId: tx.id,
+            generation: 2,
+          }),
+        ),
+      /immutable/,
+    );
+    assert.deepEqual(
+      (await db!.transaction.findUniqueOrThrow({ where: { id: tx.id } })).snapshot,
+      snapshot,
     );
   },
 );
@@ -203,7 +206,7 @@ test(
       enqueue(
         client,
         QUEUES.broadcast,
-        { type: 'broadcast.requested', transactionId: tx.id, generation: 1 },
+        { type: 'broadcast.requested', snapshot, transactionId: tx.id, generation: 1 },
         `ack-${tx.id}`,
       ),
     );
@@ -215,7 +218,7 @@ test(
         if (fail) throw new Error('lost acknowledgement');
       },
     } as unknown as Queue;
-    const relay = new OutboxRelay(db as Database, auth, queue, queue, queue);
+    const relay = new OutboxRelay(db as BroadcastDatabase, auth, queue, queue, queue);
     await assert.rejects(() => relay.flush());
     assert.equal(
       (await db!.outbox.findUniqueOrThrow({ where: { dedupe_key: `ack-${tx.id}` } })).published_at,
@@ -223,7 +226,7 @@ test(
     );
     fail = false;
     await relay.flush();
-    assert.equal(new Set(ids).size, 1);
+    assert.equal(ids[0], ids[1]);
     const future = await db!.outbox.findMany({ where: { published_at: null } });
     assert(
       future.every((row) => row.available_at.getTime() > Date.now()),

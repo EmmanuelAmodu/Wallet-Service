@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
 import { networkConfig } from '../../../packages/chain/src/config';
 import { Rpc } from '../../../packages/chain/src/rpc';
-import { Database } from '../../../packages/database/src/client';
+import { Database } from './database';
 import { MessagingModule } from '../../../packages/queue/src/module';
-import { OutboxRelay } from '../../../packages/queue/src/outbox';
+import { OUTBOX_DATABASE, OutboxRelay } from '../../../packages/queue/src/outbox';
 import { required } from '../../../packages/shared/src/http';
 import { WalletService, WALLET_CONFIG } from './service';
 import { WalletWorker } from './worker';
@@ -13,7 +13,8 @@ import { WalletController } from './wallet.controller';
   imports: [MessagingModule.register()],
   controllers: [WalletController],
   providers: [
-    Database,
+    { provide: Database, useFactory: () => new Database() },
+    { provide: OUTBOX_DATABASE, useExisting: Database },
     OutboxRelay,
     WalletService,
     WalletWorker,
