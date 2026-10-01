@@ -2,15 +2,18 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Job, Queue } from 'bullmq';
-import { BroadcastDatabase } from '../apps/broadcast/src/database';
+import { BroadcastPrismaService } from '../apps/broadcast/src/prisma/prisma.service';
 import { migrate } from '../scripts/migrate';
-import { BroadcastWorker } from '../apps/broadcast/src/worker';
-import { BroadcastRpc } from '../apps/broadcast/src/rpc';
-import { OutboxRelay, enqueue } from '../packages/queue/src/outbox';
+import { BroadcastService } from '../apps/broadcast/src/broadcast/broadcast.service';
+import { BroadcastProcessor } from '../apps/broadcast/src/broadcast/broadcast.processor';
+import { BroadcastRpcService } from '../apps/broadcast/src/broadcast/broadcast-rpc.service';
+import { OutboxRelay, enqueue } from '../packages/queue/src/outbox.service';
 import { MessageAuth, Message, QUEUES } from '../packages/queue/src/messages';
 
 const enabled = !!process.env.TEST_BROADCAST_DATABASE_URL;
-const db = enabled ? new BroadcastDatabase(process.env.TEST_BROADCAST_DATABASE_URL!) : undefined;
+const db = enabled
+  ? new BroadcastPrismaService({ databaseUrl: process.env.TEST_BROADCAST_DATABASE_URL! })
+  : undefined;
 const ids: string[] = [];
 const auth = new MessageAuth('b'.repeat(64));
 const signed = { raw: '0x1234', txHash: '0x' + 'ab'.repeat(32), encoding: 'hex' as const };
@@ -57,11 +60,14 @@ function job(message: Message, attemptsMade = 0) {
     opts: { attempts: 8 },
   } as unknown as Job;
 }
-function worker(rpc: Partial<BroadcastRpc>, overrides: Partial<typeof config> = {}) {
-  return new BroadcastWorker(db as BroadcastDatabase, auth, rpc as BroadcastRpc, {
-    ...config,
-    ...overrides,
-  });
+function worker(rpc: Partial<BroadcastRpcService>, overrides: Partial<typeof config> = {}) {
+  return new BroadcastProcessor(
+    new BroadcastService(db as BroadcastPrismaService, rpc as BroadcastRpcService, {
+      ...config,
+      ...overrides,
+    }),
+    auth,
+  );
 }
 test(
   'broadcast gate and retry exhaustion preserve signed bytes and publish attention events',
@@ -218,7 +224,9 @@ test(
         if (fail) throw new Error('lost acknowledgement');
       },
     } as unknown as Queue;
-    const relay = new OutboxRelay(db as BroadcastDatabase, auth, queue, queue, queue);
+    const relay = new OutboxRelay(db as BroadcastPrismaService, auth, queue, queue, queue, {
+      outboxIntervalMs: 500,
+    });
     await assert.rejects(() => relay.flush());
     assert.equal(
       (await db!.outbox.findUniqueOrThrow({ where: { dedupe_key: `ack-${tx.id}` } })).published_at,

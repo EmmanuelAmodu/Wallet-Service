@@ -1,7 +1,7 @@
 import { Queue } from 'bullmq';
-import { connection, queuePrefix } from '../packages/queue/src/module';
+import { connection } from '../packages/queue/src/messaging.module';
 import { QUEUES } from '../packages/queue/src/messages';
-import { required } from '../packages/shared/src/http';
+import { required } from '../packages/shared/src/config';
 
 async function main() {
   const [action, name, id] = process.argv.slice(2);
@@ -11,7 +11,7 @@ async function main() {
     );
   const queue = new Queue(name, {
     connection: { ...connection(required('REDIS_URL')), maxRetriesPerRequest: 1 },
-    prefix: queuePrefix(),
+    prefix: process.env.QUEUE_PREFIX ?? 'waas',
   });
   try {
     if (action === 'failed') {

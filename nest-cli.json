@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "monorepo": true,
+  "root": "apps/wallet",
+  "sourceRoot": "apps/wallet/src",
+  "compilerOptions": {
+    "webpack": false,
+    "deleteOutDir": false,
+    "tsConfigPath": "apps/wallet/tsconfig.app.json"
+  },
+  "projects": {
+    "wallet": {
+      "type": "application",
+      "root": "apps/wallet",
+      "entryFile": "main",
+      "sourceRoot": "apps/wallet/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/wallet/tsconfig.app.json"
+      }
+    },
+    "signer": {
+      "type": "application",
+      "root": "apps/signer",
+      "entryFile": "main",
+      "sourceRoot": "apps/signer/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/signer/tsconfig.app.json"
+      }
+    },
+    "broadcast": {
+      "type": "application",
+      "root": "apps/broadcast",
+      "entryFile": "main",
+      "sourceRoot": "apps/broadcast/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/broadcast/tsconfig.app.json"
+      }
+    }
+  }
+}

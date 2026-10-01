@@ -3,10 +3,10 @@
   "version": "1.0.0",
   "description": "NestJS wallet, signer, and broadcast services using Prisma, PostgreSQL, Redis/BullMQ, and Trust Wallet Core",
   "scripts": {
-    "build": "npm run db:generate && tsc -p tsconfig.json",
+    "build": "npm run clean && npm run db:generate && nest build --all && tsc -p tsconfig.tools.json",
     "test": "npm run build && node --test --test-concurrency=1 dist/tests/*.test.js",
-    "dev:signer": "npm run build && node --env-file-if-exists=.env dist/apps/signer/src/main.js",
-    "dev:wallet": "npm run build && node --env-file-if-exists=.env dist/apps/wallet/src/main.js",
+    "dev:signer": "npm run db:generate && nest start signer --watch",
+    "dev:wallet": "npm run db:generate && nest start wallet --watch",
     "start:signer": "node dist/apps/signer/src/main.js",
     "start:wallet": "node dist/apps/wallet/src/main.js",
     "migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
@@ -16,17 +16,22 @@
     "format": "prettier --write eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
     "format:check": "prettier --check eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
     "db:generate": "prisma generate && prisma generate --config prisma.broadcast.config.ts",
-    "dev:broadcast": "npm run build && node --env-file-if-exists=.env dist/apps/broadcast/src/main.js",
+    "dev:broadcast": "npm run db:generate && nest start broadcast --watch",
     "start:broadcast": "node dist/apps/broadcast/src/main.js",
     "queue": "tsx --env-file-if-exists=.env scripts/queue.ts",
     "migrate:wallet": "npm run migrate -- wallet",
-    "migrate:broadcast": "npm run migrate -- broadcast"
+    "migrate:broadcast": "npm run migrate -- broadcast",
+    "build:wallet": "npm run db:generate && nest build wallet",
+    "build:signer": "npm run db:generate && nest build signer",
+    "build:broadcast": "npm run db:generate && nest build broadcast",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
     "@nestjs/bullmq": "^11.0.5",
     "@nestjs/common": "^11.2.7",
+    "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.2.7",
     "@nestjs/platform-express": "^11.2.7",
     "@prisma/adapter-pg": "^7.10.0",
@@ -42,6 +47,8 @@
   "devDependencies": {
     "@bitcoinerlab/secp256k1": "^2.0.0",
     "@eslint/js": "^10.0.1",
+    "@nestjs/cli": "^11.0.24",
+    "@nestjs/testing": "^11.2.7",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.3",
     "@types/pg": "^8.23.1",
@@ -61,7 +68,7 @@
     "packages/*"
   ],
   "engines": {
-    "node": ">=22.12"
+    "node": "^22.13.0 || >=24.0.0"
   },
   "overrides": {
     "@prisma/config": {

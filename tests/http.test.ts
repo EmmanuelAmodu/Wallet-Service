@@ -9,10 +9,10 @@ import { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { Transaction as EthTransaction } from 'ethers';
 import { Queue } from 'bullmq';
-import { BroadcastDatabase } from '../apps/broadcast/src/database';
-import { createDatabase } from '../apps/wallet/src/database';
+import { BroadcastPrismaService } from '../apps/broadcast/src/prisma/prisma.service';
+import { createDatabase } from '../apps/wallet/src/prisma/prisma.service';
 import { migrate } from '../scripts/migrate';
-import { connection } from '../packages/queue/src/module';
+import { connection } from '../packages/queue/src/messaging.module';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages';
 
 async function freePort() {
@@ -58,7 +58,9 @@ test(
     timeout: 60000,
   },
   async () => {
-    const broadcastDb = new BroadcastDatabase(process.env.TEST_BROADCAST_DATABASE_URL!);
+    const broadcastDb = new BroadcastPrismaService({
+      databaseUrl: process.env.TEST_BROADCAST_DATABASE_URL!,
+    });
     await migrate(process.env.TEST_BROADCAST_DATABASE_URL!, 'broadcast');
     const db = createDatabase(process.env.TEST_DATABASE_URL!);
     await migrate(process.env.TEST_DATABASE_URL!);
@@ -189,7 +191,7 @@ test(
       await eventually(
         async () => {
           try {
-            return (await fetch(base)).status;
+            return (await fetch(base + '/v1/wallets/' + randomUUID())).status;
           } catch {
             return 0;
           }

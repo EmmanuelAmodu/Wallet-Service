@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../shared/src/contracts';
-import { matches, token } from '../../shared/src/http';
+import { matches, token } from '../../shared/src/security/tokens';
 
 export const QUEUES = {
   wallet: 'wallet-actions',

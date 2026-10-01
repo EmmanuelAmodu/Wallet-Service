@@ -1,14 +1,12 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { BroadcastModule } from './broadcast.module';
+import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.createApplicationContext(BroadcastModule, {
-    logger: ['warn', 'error'],
-  });
+  const app = await NestFactory.createApplicationContext(AppModule, { logger: ['warn', 'error'] });
   app.enableShutdownHooks();
 }
 bootstrap().catch(() => {
-  console.error('Broadcast startup failed; check database, Redis, and RPC configuration');
+  console.error('Broadcast startup failed; check application configuration and dependencies');
   process.exitCode = 1;
 });

@@ -1,3 +1,9 @@
+export function required(name: string): string {
+  const value = process.env[name];
+  if (!value) throw new Error(`Missing configuration: ${name}`);
+  return value;
+}
+
 export function integerSetting(
   name: string,
   fallback: number,

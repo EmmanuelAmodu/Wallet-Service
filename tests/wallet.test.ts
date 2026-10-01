@@ -1,18 +1,21 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { WalletWorker } from '../apps/wallet/src/worker';
-import { Rpc } from '../packages/chain/src/rpc';
+import { WalletWorkflowService } from '../apps/wallet/src/messaging/wallet-workflow.service';
+import { TransactionsService } from '../apps/wallet/src/transactions/transactions.service';
+import { WalletProcessor } from '../apps/wallet/src/messaging/wallet.processor';
+import { ChainRpcService } from '../packages/chain/src/chain-rpc.service';
 import { Job } from 'bullmq';
-import { Database, createDatabase } from '../apps/wallet/src/database';
+import { WalletPrismaService, createDatabase } from '../apps/wallet/src/prisma/prisma.service';
 import { migrate } from '../scripts/migrate';
-import { WalletService } from '../apps/wallet/src/service';
+import { WalletsService } from '../apps/wallet/src/wallets/wallets.service';
 import { Transfer } from '../packages/shared/src/contracts';
 import { Message, MessageAuth, QUEUES } from '../packages/queue/src/messages';
 
 const enabled = !!process.env.TEST_DATABASE_URL;
 const db = enabled ? createDatabase(process.env.TEST_DATABASE_URL!) : undefined;
-let service: WalletService;
+let service: WalletsService;
+let transactions: TransactionsService;
 const tenant = randomUUID();
 const inboxIds: string[] = [];
 const intent: Transfer = {
@@ -25,7 +28,12 @@ const intent: Transfer = {
 before(async () => {
   if (db) {
     await migrate(process.env.TEST_DATABASE_URL!);
-    service = new WalletService(db, {
+    transactions = new TransactionsService(db, {
+      seedId: 'test',
+      ethereumChainId: '11155111',
+      solanaGenesisHash: 'devnet',
+    });
+    service = new WalletsService(db, {
       seedId: 'test',
       ethereumChainId: '11155111',
       solanaGenesisHash: 'devnet',
@@ -64,7 +72,7 @@ test(
     assert.equal(action.published_at, null);
     await assert.rejects(() => service.getWallet('different-tenant', wallet.id), /not found/);
     await assert.rejects(
-      () => service.createTransaction(tenant, wallet.id, 'payment-1', intent),
+      () => transactions.createTransaction(tenant, wallet.id, 'payment-1', intent),
       /not ready/,
     );
     await db!.wallet.update({
@@ -73,7 +81,7 @@ test(
     });
     const txs = await Promise.all(
       Array.from({ length: 5 }, () =>
-        service.createTransaction(tenant, wallet.id, 'payment-1', intent),
+        transactions.createTransaction(tenant, wallet.id, 'payment-1', intent),
       ),
     );
     assert(txs.every((t) => t.id === txs[0].id));
@@ -81,16 +89,17 @@ test(
     assert.equal(tx.status, 'preparing');
     assert.equal(tx.signed, null);
     assert.equal(await db!.outbox.count({ where: { dedupe_key: `prepare-${tx.id}` } }), 1);
-    await assert.rejects(() => service.getTransaction('different-tenant', tx.id), /not found/);
+    await assert.rejects(() => transactions.getTransaction('different-tenant', tx.id), /not found/);
     await assert.rejects(
-      () => service.createTransaction(tenant, wallet.id, 'payment-1', { ...intent, amount: '2' }),
+      () =>
+        transactions.createTransaction(tenant, wallet.id, 'payment-1', { ...intent, amount: '2' }),
       /different request/,
     );
     await assert.rejects(
-      () => service.createTransaction(tenant, wallet.id, 'payment-2', intent),
+      () => transactions.createTransaction(tenant, wallet.id, 'payment-2', intent),
       /pending transaction/,
     );
-    await assert.rejects(() => service.requestBroadcast(tenant, tx.id), /not signed/);
+    await assert.rejects(() => transactions.requestBroadcast(tenant, tx.id), /not signed/);
     await db!.transaction.update({
       where: { id: tx.id },
       data: {
@@ -100,22 +109,25 @@ test(
       },
     });
     const requests = await Promise.all(
-      Array.from({ length: 5 }, () => service.requestBroadcast(tenant, tx.id)),
+      Array.from({ length: 5 }, () => transactions.requestBroadcast(tenant, tx.id)),
     );
     assert(requests.every((t) => t.status === 'queued' && t.broadcast_generation === 1));
     assert.equal(await db!.outbox.count({ where: { dedupe_key: `broadcast-${tx.id}-1` } }), 1);
     await db!.transaction.update({ where: { id: tx.id }, data: { status: 'attention' } });
     await assert.rejects(
-      () => service.createTransaction(tenant, wallet.id, 'payment-2', intent),
+      () => transactions.createTransaction(tenant, wallet.id, 'payment-2', intent),
       /pending transaction/,
     );
-    assert.equal((await service.requestBroadcast(tenant, tx.id)).broadcast_generation, 2);
+    assert.equal((await transactions.requestBroadcast(tenant, tx.id)).broadcast_generation, 2);
     const auth = new MessageAuth('b'.repeat(64));
-    const worker = new WalletWorker(db as Database, auth, {} as Rpc, {
-      seedId: 'test',
-      ethereumChainId: '11155111',
-      solanaGenesisHash: 'devnet',
-    });
+    const worker = new WalletProcessor(
+      new WalletWorkflowService(db as WalletPrismaService, {} as ChainRpcService, {
+        seedId: 'test',
+        ethereumChainId: '11155111',
+        solanaGenesisHash: 'devnet',
+      }),
+      auth,
+    );
     const deliver = async (
       generation: number,
       revision: number,
@@ -132,24 +144,30 @@ test(
         attempts: 3,
         lastError: null,
       };
-      await worker.process({ id, name: payload.type, data: auth.seal(payload, id) } as Job);
+      await worker.process({
+        id,
+        name: payload.type,
+        data: auth.seal(payload, id),
+        opts: { attempts: 8 },
+        attemptsMade: 0,
+      } as Job);
       return id;
     };
     const eventId = await deliver(2, 3, 'submitted');
     await deliver(2, 3, 'submitted', eventId);
     await deliver(2, 2, 'attention');
     await deliver(1, 100, 'confirmed');
-    assert.equal((await service.getTransaction(tenant, tx.id)).status, 'submitted');
+    assert.equal((await transactions.getTransaction(tenant, tx.id)).status, 'submitted');
     await deliver(2, 4, 'attention');
     await assert.rejects(
-      () => service.createTransaction(tenant, wallet.id, 'payment-2', intent),
+      () => transactions.createTransaction(tenant, wallet.id, 'payment-2', intent),
       /pending transaction/,
     );
     await deliver(2, 5, 'confirmed');
     await deliver(2, 6, 'broadcasting');
-    assert.equal((await service.getTransaction(tenant, tx.id)).status, 'confirmed');
+    assert.equal((await transactions.getTransaction(tenant, tx.id)).status, 'confirmed');
     assert.equal(
-      (await service.createTransaction(tenant, wallet.id, 'payment-2', intent)).status,
+      (await transactions.createTransaction(tenant, wallet.id, 'payment-2', intent)).status,
       'preparing',
     );
   },

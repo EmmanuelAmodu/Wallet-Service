@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { createDatabase } from '../apps/wallet/src/database';
-import { required } from '../packages/shared/src/http';
+import { createDatabase } from '../apps/wallet/src/prisma/prisma.service';
+import { required } from '../packages/shared/src/config';
 
 export async function migrate(url: string, application: 'wallet' | 'broadcast' = 'wallet') {
   if (application === 'broadcast') {

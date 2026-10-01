@@ -20,4 +20,51 @@ export default tseslint.config(
       ],
     },
   },
+  ...['wallet', 'broadcast', 'signer'].map((application) => ({
+    files: [`apps/${application}/src/**/*.ts`],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: ['wallet', 'broadcast', 'signer']
+            .filter((other) => other !== application)
+            .map((other) => ({
+              group: [`**/${other}/src/**`],
+              message:
+                'Applications communicate through queue contracts; do not import another application.',
+            })),
+        },
+      ],
+    },
+  })),
+  {
+    files: ['apps/*/src/**/*.ts'],
+    ignores: ['apps/*/src/config/**'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "MemberExpression[object.name='process'][property.name='env']",
+          message:
+            'Read environment variables in configuration factories and inject validated settings.',
+        },
+      ],
+    },
+  },
+  {
+    files: ['packages/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          patterns: [
+            {
+              group: ['**/apps/**'],
+              message: 'Shared packages cannot depend on application internals.',
+            },
+          ],
+        },
+      ],
+    },
+  },
 );

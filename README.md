@@ -30,6 +30,12 @@ The wallet service does not submit transactions or call the signer over HTTP. Th
 
 **Redis/BullMQ was chosen for action queues with durable jobs, retries, and competing workers.** This does not use Redis Pub/Sub or Nest's ephemeral Redis microservice transport. Kafka is not required for this implementation.
 
+## NestJS organization
+
+Each application has a root `AppModule` that composes feature modules. Wallet exposes separate wallet and transaction controllers/services. Queue processors delegate to application services, configuration is injected through `@nestjs/config`, and each database is encapsulated by its own Prisma module. HTTP authentication uses a global Nest guard, request validation uses DTO schemas with Nest pipes, and error handling uses an injected global filter.
+
+See [the architecture guide](docs/architecture.md) for the module map, dependency rules, lifecycle behavior, and guidance for adding features. `nest-cli.json` defines the three Nest CLI applications. This refactor preserves the HTTP routes, queue payloads, database schemas, and transaction workflow; no new migration is required. Bearer prefixes are now required, and invalid `ALLOW_BROADCAST` values fail startup instead of silently disabling broadcasting.
+
 ## Action flow
 
 1. Creating a wallet atomically stores a `deriving` wallet and a `wallet.derive` outbox command. The signer publishes `wallet.derived`; a wallet worker saves the address and sets `ready`.
@@ -58,7 +64,7 @@ Ethereum atomic multi-recipient batching needs a batch contract or smart-account
 
 ## Local setup
 
-Requires Node.js **22.12+**, PostgreSQL 14+, and Redis 7+. Docker Compose provides PostgreSQL 17 and Redis 7.4 with AOF persistence, synchronous fsync, and `noeviction`.
+Requires Node.js **22.13+ within Node 22, or Node 24+**, PostgreSQL 14+, and Redis 7+. Docker Compose provides PostgreSQL 17 and Redis 7.4 with AOF persistence, synchronous fsync, and `noeviction`.
 
 ```sh
 npm ci
@@ -78,7 +84,7 @@ npm run dev:signer
 npm run dev:broadcast
 ```
 
-These commands compile and start; they are not watch processes. Production start scripts are `start:wallet`, `start:signer`, and `start:broadcast`, with environment variables supplied externally.
+These commands generate Prisma clients and run Nest CLI in watch mode. `npm run build` builds all applications; `npm run build:wallet`, `build:signer`, and `build:broadcast` build one application. Production start scripts are `start:wallet`, `start:signer`, and `start:broadcast`, with environment variables supplied externally.
 
 Only the wallet service exposes HTTP, at `127.0.0.1:3000` by default. Set `WALLET_HOST=0.0.0.0` inside a container when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
 
@@ -200,6 +206,6 @@ npm run lint
 npm audit
 ```
 
-Tests run serially against two dedicated test databases and clean their records. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC only. It exercises offline consumers, async signing, signature recovery, retries, lost responses after acceptance, duplicate result delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. No test sends live funds. CI supplies PostgreSQL and Redis.
+Tests run serially against two dedicated test databases and clean their records. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC only. It exercises offline consumers, async signing, signature recovery, retries, lost responses after acceptance, duplicate result delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. No test sends live funds. Nest module tests additionally exercise dependency injection, tenant guards, DTO/UUID/header pipes, and safe error responses. CI supplies PostgreSQL and Redis.
 
 References: [NestJS queues](https://docs.nestjs.com/techniques/queues), [BullMQ retries](https://docs.bullmq.io/guide/retrying-failing-jobs), [Prisma PostgreSQL integration](https://www.prisma.io/docs/orm/overview/databases/postgresql), [Prisma baselining](https://www.prisma.io/docs/orm/prisma-migrate/workflows/baselining), [Wallet Core usage](https://developer.trustwallet.com/developer/wallet-core/integration-guide/wallet-core-usage).

@@ -5,7 +5,7 @@ const bitcoinPromise = import('bitcoinjs-lib');
 let bitcoin: Awaited<typeof bitcoinPromise>;
 import { verify } from '@bitcoinerlab/secp256k1';
 import { createPublicKey, verify as verifyEd25519 } from 'node:crypto';
-import { SigningCore } from '../apps/signer/src/core';
+import { SigningCore } from '../apps/signer/src/signing/signing.core';
 import { derivationPath, signSchema, transferSchema } from '../packages/shared/src/contracts';
 
 // Public BIP39 test vector. Never use this phrase for funds.
