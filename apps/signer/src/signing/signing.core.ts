@@ -72,142 +72,186 @@ export class SigningCore {
     return this.withKey(request.wallet, (key, address) => {
       if (address !== request.wallet.address)
         throw new BadRequestException('Wallet address does not match derivation');
-      const tx = request.transaction;
-      const coin = this.coin(tx.chain);
-      const valid = (to: string) => {
-        if (!this.core.AnyAddress.isValid(to, coin))
-          throw new BadRequestException('Invalid recipient address');
-      };
       const privateKey = key.data();
-      let encodedInput: Uint8Array | undefined;
       try {
-        if (tx.chain === 'ethereum') {
-          valid(tx.to);
-          if (tx.chainId !== this.ethereumChainId)
-            throw new BadRequestException('Ethereum chain ID not permitted');
-          if (BigInt(tx.maxPriorityFeePerGas) > BigInt(tx.maxFeePerGas))
-            throw new BadRequestException('Priority fee exceeds max fee');
-          const proto = TW.Ethereum.Proto;
-          encodedInput = proto.SigningInput.encode({
-            privateKey,
-            chainId: bytes(tx.chainId),
-            nonce: bytes(tx.nonce),
-            txMode: proto.TransactionMode.Enveloped,
-            gasLimit: bytes(tx.gasLimit),
-            maxFeePerGas: bytes(tx.maxFeePerGas),
-            maxInclusionFeePerGas: bytes(tx.maxPriorityFeePerGas),
-            toAddress: tx.to,
-            transaction: { transfer: { amount: bytes(tx.amount) } },
-          }).finish();
-          const out = proto.SigningOutput.decode(this.core.AnySigner.sign(encodedInput, coin));
-          this.check(out.error, out.encoded.length);
-          return {
-            raw: '0x' + Buffer.from(out.encoded).toString('hex'),
-            txHash: '0x' + Buffer.from(this.core.Hash.keccak256(out.encoded)).toString('hex'),
-            encoding: 'hex',
-          };
+        const tx = request.transaction;
+        switch (tx.chain) {
+          case 'ethereum':
+            return this.signEthereum(tx, privateKey);
+          case 'bitcoin':
+            return this.signBitcoin(tx, request.wallet.address, privateKey);
+          case 'solana':
+            return this.signSolana(tx, request.wallet.address, privateKey);
         }
-        if (tx.chain === 'bitcoin') {
-          tx.outputs.forEach((o) => valid(o.address));
-          if (new Set(tx.utxos.map((u) => `${u.txid}:${u.vout}`)).size !== tx.utxos.length)
-            throw new BadRequestException('Duplicate UTXO');
-          const script = this.core.BitcoinScript.lockScriptForAddress(address, coin);
-          let ownScript: string;
-          try {
-            ownScript = Buffer.from(script.data()).toString('hex');
-          } finally {
-            script.delete();
-          }
-          if (tx.utxos.some((u) => u.script !== ownScript))
-            throw new BadRequestException('UTXO is not owned by this wallet');
-          const proto = TW.Bitcoin.Proto;
-          const input = proto.SigningInput.fromObject({
-            privateKey: [privateKey],
-            coinType: 0,
-            hashType: this.core.BitcoinScript.hashTypeForCoin(coin),
-            amount: tx.outputs[0].amount,
-            toAddress: tx.outputs[0].address,
-            changeAddress: address,
-            byteFee: String(tx.satsPerVbyte),
-            useMaxUtxo: true,
-            extraOutputs: tx.outputs
-              .slice(1)
-              .map((o) => ({ toAddress: o.address, amount: o.amount })),
-            utxo: tx.utxos.map((u) => ({
-              amount: u.amount,
-              script: Buffer.from(u.script, 'hex'),
-              outPoint: {
-                hash: Buffer.from(u.txid, 'hex').reverse(),
-                index: u.vout,
-                sequence: 0xffffffff,
-              },
-            })),
-          });
-          encodedInput = proto.SigningInput.encode(input).finish();
-          const out = proto.SigningOutput.decode(this.core.AnySigner.sign(encodedInput, coin));
-          this.check(out.error, out.encoded.length);
-          return {
-            raw: Buffer.from(out.encoded).toString('hex'),
-            txHash: out.transactionId,
-            encoding: 'hex',
-          };
-        }
-        tx.outputs.forEach((o) => valid(o.address));
-        if (this.core.Base58.decodeNoCheck(tx.recentBlockhash).length !== 32)
-          throw new BadRequestException('Invalid Solana blockhash');
-        const proto = TW.Solana.Proto;
-        const system = '11111111111111111111111111111111';
-        if (tx.outputs.some((o) => o.address === system))
-          throw new BadRequestException('System program cannot be a transfer recipient');
-        const accounts = [
-          address,
-          ...new Set(tx.outputs.map((o) => o.address).filter((a) => a !== address)),
-          system,
-        ];
-        const instructions = tx.outputs.map((o) => {
-          const data = Buffer.alloc(12);
-          data.writeUInt32LE(2, 0);
-          data.writeBigUInt64LE(BigInt(o.amount), 4);
-          return {
-            programId: accounts.length - 1,
-            accounts: [0, accounts.indexOf(o.address)],
-            programData: data,
-          };
-        });
-        const input = proto.SigningInput.fromObject({
-          privateKey,
-          txEncoding: proto.Encoding.Base64,
-          rawMessage: {
-            legacy: {
-              header: {
-                numRequiredSignatures: 1,
-                numReadonlySignedAccounts: 0,
-                numReadonlyUnsignedAccounts: 1,
-              },
-              accountKeys: accounts,
-              recentBlockhash: tx.recentBlockhash,
-              instructions,
-            },
-          },
-        });
-        encodedInput = proto.SigningInput.encode(input).finish();
-        const out = proto.SigningOutput.decode(this.core.AnySigner.sign(encodedInput, coin));
-        this.check(out.error, out.encoded.length);
-        const raw = Buffer.from(out.encoded, 'base64');
-        if (raw.length > 1232)
-          throw new BadRequestException('Solana transaction exceeds legacy packet limit');
-        if (raw[0] !== 1) throw new BadRequestException('Unexpected Solana signature count');
-        return {
-          raw: out.encoded,
-          txHash: this.core.Base58.encodeNoCheck(raw.subarray(1, 65)),
-          encoding: 'base64',
-        };
       } finally {
         privateKey.fill(0);
-        encodedInput?.fill(0);
       }
     });
   }
+
+  private signEthereum(
+    tx: Extract<SignRequest['transaction'], { chain: 'ethereum' }>,
+    privateKey: Uint8Array,
+  ): SignedTransaction {
+    this.assertValidAddress(tx.to, 'ethereum');
+    if (tx.chainId !== this.ethereumChainId)
+      throw new BadRequestException('Ethereum chain ID not permitted');
+    if (BigInt(tx.maxPriorityFeePerGas) > BigInt(tx.maxFeePerGas))
+      throw new BadRequestException('Priority fee exceeds max fee');
+
+    const proto = TW.Ethereum.Proto;
+    const coin = this.coin('ethereum');
+    const encodedInput = proto.SigningInput.encode({
+      privateKey,
+      chainId: bytes(tx.chainId),
+      nonce: bytes(tx.nonce),
+      txMode: proto.TransactionMode.Enveloped,
+      gasLimit: bytes(tx.gasLimit),
+      maxFeePerGas: bytes(tx.maxFeePerGas),
+      maxInclusionFeePerGas: bytes(tx.maxPriorityFeePerGas),
+      toAddress: tx.to,
+      transaction: { transfer: { amount: bytes(tx.amount) } },
+    }).finish();
+    try {
+      const output = proto.SigningOutput.decode(this.core.AnySigner.sign(encodedInput, coin));
+      this.check(output.error, output.encoded.length);
+      return {
+        raw: '0x' + Buffer.from(output.encoded).toString('hex'),
+        txHash: '0x' + Buffer.from(this.core.Hash.keccak256(output.encoded)).toString('hex'),
+        encoding: 'hex',
+      };
+    } finally {
+      encodedInput.fill(0);
+    }
+  }
+
+  private signBitcoin(
+    tx: Extract<SignRequest['transaction'], { chain: 'bitcoin' }>,
+    address: string,
+    privateKey: Uint8Array,
+  ): SignedTransaction {
+    tx.outputs.forEach((output) => this.assertValidAddress(output.address, 'bitcoin'));
+    if (new Set(tx.utxos.map((utxo) => `${utxo.txid}:${utxo.vout}`)).size !== tx.utxos.length)
+      throw new BadRequestException('Duplicate UTXO');
+
+    const coin = this.coin('bitcoin');
+    const script = this.core.BitcoinScript.lockScriptForAddress(address, coin);
+    let ownScript: string;
+    try {
+      ownScript = Buffer.from(script.data()).toString('hex');
+    } finally {
+      script.delete();
+    }
+    if (tx.utxos.some((utxo) => utxo.script !== ownScript))
+      throw new BadRequestException('UTXO is not owned by this wallet');
+
+    const proto = TW.Bitcoin.Proto;
+    const input = proto.SigningInput.fromObject({
+      privateKey: [privateKey],
+      coinType: 0,
+      hashType: this.core.BitcoinScript.hashTypeForCoin(coin),
+      amount: tx.outputs[0].amount,
+      toAddress: tx.outputs[0].address,
+      changeAddress: address,
+      byteFee: String(tx.satsPerVbyte),
+      useMaxUtxo: true,
+      extraOutputs: tx.outputs
+        .slice(1)
+        .map((output) => ({ toAddress: output.address, amount: output.amount })),
+      utxo: tx.utxos.map((utxo) => ({
+        amount: utxo.amount,
+        script: Buffer.from(utxo.script, 'hex'),
+        outPoint: {
+          hash: Buffer.from(utxo.txid, 'hex').reverse(),
+          index: utxo.vout,
+          sequence: 0xffffffff,
+        },
+      })),
+    });
+    const encodedInput = proto.SigningInput.encode(input).finish();
+    try {
+      const output = proto.SigningOutput.decode(this.core.AnySigner.sign(encodedInput, coin));
+      this.check(output.error, output.encoded.length);
+      return {
+        raw: Buffer.from(output.encoded).toString('hex'),
+        txHash: output.transactionId,
+        encoding: 'hex',
+      };
+    } finally {
+      encodedInput.fill(0);
+    }
+  }
+
+  private signSolana(
+    tx: Extract<SignRequest['transaction'], { chain: 'solana' }>,
+    address: string,
+    privateKey: Uint8Array,
+  ): SignedTransaction {
+    tx.outputs.forEach((output) => this.assertValidAddress(output.address, 'solana'));
+    if (this.core.Base58.decodeNoCheck(tx.recentBlockhash).length !== 32)
+      throw new BadRequestException('Invalid Solana blockhash');
+
+    const proto = TW.Solana.Proto;
+    const systemProgram = '11111111111111111111111111111111';
+    if (tx.outputs.some((output) => output.address === systemProgram))
+      throw new BadRequestException('System program cannot be a transfer recipient');
+
+    const accounts = [
+      address,
+      ...new Set(tx.outputs.map((output) => output.address).filter((output) => output !== address)),
+      systemProgram,
+    ];
+    const instructions = tx.outputs.map((output) => {
+      const data = Buffer.alloc(12);
+      data.writeUInt32LE(2, 0);
+      data.writeBigUInt64LE(BigInt(output.amount), 4);
+      return {
+        programId: accounts.length - 1,
+        accounts: [0, accounts.indexOf(output.address)],
+        programData: data,
+      };
+    });
+    const input = proto.SigningInput.fromObject({
+      privateKey,
+      txEncoding: proto.Encoding.Base64,
+      rawMessage: {
+        legacy: {
+          header: {
+            numRequiredSignatures: 1,
+            numReadonlySignedAccounts: 0,
+            numReadonlyUnsignedAccounts: 1,
+          },
+          accountKeys: accounts,
+          recentBlockhash: tx.recentBlockhash,
+          instructions,
+        },
+      },
+    });
+    const encodedInput = proto.SigningInput.encode(input).finish();
+    try {
+      const output = proto.SigningOutput.decode(
+        this.core.AnySigner.sign(encodedInput, this.coin('solana')),
+      );
+      this.check(output.error, output.encoded.length);
+      const raw = Buffer.from(output.encoded, 'base64');
+      if (raw.length > 1232)
+        throw new BadRequestException('Solana transaction exceeds legacy packet limit');
+      if (raw[0] !== 1) throw new BadRequestException('Unexpected Solana signature count');
+      return {
+        raw: output.encoded,
+        txHash: this.core.Base58.encodeNoCheck(raw.subarray(1, 65)),
+        encoding: 'base64',
+      };
+    } finally {
+      encodedInput.fill(0);
+    }
+  }
+
+  private assertValidAddress(address: string, chain: DeriveRequest['chain']) {
+    if (!this.core.AnyAddress.isValid(address, this.coin(chain)))
+      throw new BadRequestException('Invalid recipient address');
+  }
+
   private check(error: number, size: number) {
     if (error !== 0 || size === 0)
       throw new BadRequestException(`Wallet Core could not sign transaction (code ${error})`);
