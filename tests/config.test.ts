@@ -70,9 +70,8 @@ test('application configuration is scoped and rejects unsafe settings at startup
   const { broadcastConfig } = await import('../apps/broadcast/src/config/broadcast.config.js');
   const { signerConfig } = await import('../apps/signer/src/config/signer.config.js');
   const { ledgerConfig } = await import('../apps/ledger/src/config/ledger.config.js');
-  const { activityListenerConfig } = await import(
-    '../apps/activity-listener/src/config/activity-listener.config.js'
-  );
+  const { activityListenerConfig } =
+    await import('../apps/activity-listener/src/config/activity-listener.config.js');
   const names = [
     'WALLET_DATABASE_URL',
     'BROADCAST_DATABASE_URL',
