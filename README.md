@@ -1,6 +1,6 @@
 # Wallet as a Service
 
-A NestJS monorepo with **wallet, signer, and broadcast services**, PostgreSQL through **Prisma 7**, and durable Redis queues through **`@nestjs/bullmq`**. Trust Wallet Core handles derivation and transaction signing.
+A NestJS 12 ESM monorepo with **wallet, signer, and broadcast services**, PostgreSQL through **Prisma 7**, and durable Redis queues through **`@nestjs/bullmq`**. Trust Wallet Core handles derivation and transaction signing.
 
 ## Architecture
 
@@ -34,7 +34,7 @@ The wallet service does not submit transactions or call the signer over HTTP. Th
 
 Each application has a root `AppModule` that composes feature modules. Wallet exposes separate wallet and transaction controllers/services. Queue processors delegate to application services, configuration is injected through `@nestjs/config`, and each database is encapsulated by its own Prisma module. HTTP authentication uses a global Nest guard, request validation uses DTO schemas with Nest pipes, and error handling uses an injected global filter.
 
-See [the architecture guide](docs/architecture.md) for the module map, dependency rules, lifecycle behavior, and guidance for adding features. `nest-cli.json` defines the three Nest CLI applications. This refactor preserves the HTTP routes, queue payloads, database schemas, and transaction workflow; no new migration is required. Bearer prefixes are now required, and invalid `ALLOW_BROADCAST` values fail startup instead of silently disabling broadcasting.
+See [the architecture guide](docs/architecture.md) for the module map, dependency rules, lifecycle behavior, and guidance for adding features. `nest-cli.json` defines the three Nest CLI applications. Chain identifiers and network names are stored as strings, and transaction intents are stored as JSON, so adding an allowlisted chain does not require a database migration. Bearer prefixes are required, and invalid `ALLOW_BROADCAST` values fail startup instead of silently disabling broadcasting.
 
 ## Action flow
 
@@ -56,7 +56,7 @@ The wallet worker deduplicates broadcast events and checks generation and revisi
 | Bitcoin and Bitcoin Cash families (16 coin types) | Wallet Core coin path | Native UTXO transfers, 1–50 outputs plus change | Mainnet, Bitcoin Core-compatible RPC |
 | Solana | `m/44'/501'/account'/0'` | 1–20 native SOL transfer instructions, legacy transaction size checked | Configured genesis hash; default devnet |
 
-The default environment configures Sepolia, Bitcoin mainnet, and Solana devnet. Configure additional supported networks in `CHAIN_NETWORKS`, a JSON object keyed by Wallet Core chain name. EVM entries require `network`, `chainId`, and `rpcUrl`; Bitcoin-family entries require `network: "mainnet"` and a Bitcoin Core-compatible `rpcUrl`. The same map must be supplied to wallet, signer, and broadcast services; signer reads only EVM chain IDs. Optional settings include `rpcUser`, `rpcPassword`, `rpcNetwork`, and `confirmations`.
+The default network identities are Sepolia, Bitcoin mainnet, and Solana devnet; the RPC URLs are blank until configured. Configure additional supported networks in `CHAIN_NETWORKS`, a JSON object keyed by a [supported chain identifier](packages/shared/src/contracts.ts). EVM entries require `network`, `chainId`, and `rpcUrl`; Bitcoin-family entries require `network: "mainnet"` and a Bitcoin Core-compatible `rpcUrl`. The same map must be supplied to wallet, signer, and broadcast services; signer reads only EVM chain IDs. `rpcUser` and `rpcPassword` are used for Bitcoin-family Basic authentication, `rpcNetwork` selects the expected Bitcoin Core network name, and `confirmations` overrides the EVM/Bitcoin confirmation defaults.
 
 For example, configure Polygon and Litecoin with `CHAIN_NETWORKS={"polygon":{"network":"137","chainId":"137","rpcUrl":"https://polygon-rpc.example"},"litecoin":{"network":"mainnet","rpcUrl":"http://127.0.0.1:9332","rpcUser":"wallet","rpcPassword":"replace-me"}}`. Only add endpoints you control or trust. Bitcoin-family callers supply outpoints; the wallet service obtains values and scripts from the node and checks ownership, confirmation, and coinbase maturity. UTXO discovery is not included. Validate each fork’s RPC compatibility and fee policy on a test network before production use.
 
@@ -88,7 +88,7 @@ npm run dev:broadcast
 
 These commands generate Prisma clients and run Nest CLI in watch mode. `npm run build` builds all applications; `npm run build:wallet`, `build:signer`, and `build:broadcast` build one application. Production start scripts are `start:wallet`, `start:signer`, and `start:broadcast`, with environment variables supplied externally.
 
-Only the wallet service exposes HTTP, at `127.0.0.1:3000` by default. Interactive Swagger documentation is available at `/docs` and the OpenAPI JSON at `/docs-json`. Set `WALLET_HOST=0.0.0.0` inside a container when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
+Only the wallet service exposes HTTP, at `127.0.0.1:3000` by default. Interactive Swagger documentation is available publicly at `/docs` and the OpenAPI JSON at `/docs-json`; the wallet and transaction API routes themselves require tenant bearer authentication. Set `WALLET_HOST=0.0.0.0` inside a container when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
 
 ### Database configuration
 
@@ -104,7 +104,7 @@ This changes the broadcast queue contract. Before upgrading an existing deployme
 
 Keep the existing seed, seed ID, and wallet database. Rename `DATABASE_URL` to `WALLET_DATABASE_URL` and provision a fresh, separate `BROADCAST_DATABASE_URL`. No existing database is deleted or copied by these scripts. Add `REDIS_URL`, `QUEUE_PREFIX`, and `QUEUE_AUTH_KEY` to your environment; remove obsolete `SIGNER_URL`, `SIGNER_PORT`, and `SIGNER_HOST`. The old internal `SIGNER_TOKEN` can be renamed to `QUEUE_AUTH_KEY` if it is already a distinct random secret of at least 32 characters. Do not rerun local seed setup on an existing installation.
 
-Run `npm run migrate` before starting the new services. The migration wrapper recognizes the original `schema_migrations` entry for `001_initial.sql`, marks its identical Prisma baseline as applied, then applies the additive event-driven migration. Existing addresses become `ready`; transaction data, derivation accounts, and the sequence are retained. Unknown legacy migration histories are rejected for manual review. Fresh wallet databases apply the full wallet migration history; broadcast has an independent initial migration.
+Run `npm run migrate` before starting the new services. The migration wrapper recognizes the original `schema_migrations` entry for `001_initial.sql`, marks its identical Prisma baseline as applied, then applies `0002_event_driven` and `0003_broadcast_projection`. Existing addresses become `ready`; transaction data, derivation accounts, and the sequence are retained. Unknown legacy migration histories are rejected for manual review. Fresh wallet databases apply the full wallet migration history; broadcast has an independent initial migration.
 
 ## API changes
 
@@ -163,7 +163,7 @@ Wait for `signed`, enable broadcasting on the broadcast service when ready, and 
 - **Reservations:** one pending transaction per wallet, including `attention`, across all replicas. Rejected preparation/signing releases the reservation; uncertain sends do not. This prevents this system's nonce/UTXO conflicts, provided these wallets are not spent from externally.
 - **Workers:** wallet and broadcast concurrency is 8 per replica; signer concurrency is 1 per replica because cryptography is synchronous. Add replicas with the same application-specific database, queue prefix, Redis, network config, and appropriate secret credentials. Distinct environments require distinct databases and queue namespaces.
 - **Retries:** 8 attempts with exponential backoff, starting at `QUEUE_RETRY_DELAY_MS` (default 1,000 ms). Failed jobs are retained for inspection/replay. Completed jobs are retained for up to a day, capped at 10,000 per queue; database guards still apply after queue cleanup.
-- **Monitoring:** delayed confirmation commands default to 30 seconds, with up to 120 reschedules per monitoring run. Ethereum requires 12 confirmations, Bitcoin 6, and Solana `finalized`. Bitcoin Core needs transaction-history lookup, typically `txindex=1`.
+- **Monitoring:** delayed confirmation commands default to 30 seconds, with up to 120 reschedules per monitoring run. EVM networks default to 12 confirmations and Bitcoin-family networks to 6; configure per-chain overrides in `CHAIN_NETWORKS`. Solana waits for `finalized`. Bitcoin Core needs transaction-history lookup, typically `txindex=1`.
 - **Shutdown:** workers drain active jobs before releasing signer/database resources. A terminated worker's stalled job can be recovered by BullMQ.
 
 ```text
@@ -172,7 +172,7 @@ transaction: preparing → signing → signed → queued → broadcasting → su
                    ↘ rejected                                  ↘ attention    ↘ failed
 ```
 
-`failed` denotes finalized on-chain failure. `attention` denotes retry exhaustion, disabled broadcasting, expired Solana blockhash, configuration mismatch, or exhausted monitoring; it **continues to reserve the wallet**. Refresh is available only in `attention` to start another bounded status-check run; queued, broadcasting, and submitted transactions continue their existing automatic polling. After resolving the cause, request broadcast again to enqueue a new generation using the same signed bytes. A refresh gets its own monitoring-run ID, so old completed poll jobs cannot suppress it.
+`failed` denotes a final failure reported by a chain RPC: an EVM receipt with failure status after the configured confirmation depth, or a finalized Solana transaction error. The Bitcoin-family adapter currently reports `unknown`, `submitted`, or `confirmed`, not `failed`. `attention` denotes retry exhaustion, disabled broadcasting, expired Solana blockhash, configuration mismatch, or exhausted monitoring; it **continues to reserve the wallet**. Refresh is available only in `attention` to start another bounded status-check run; queued, broadcasting, and submitted transactions continue their existing automatic polling. When it is safe to retry, request broadcast again to enqueue a new generation using the same signed bytes. An expired Solana blockhash cannot be fixed by rebroadcasting those bytes; it needs operational reconciliation because automatic re-signing is not supported. A refresh gets its own monitoring-run ID, so old completed poll jobs cannot suppress it.
 
 There is no automatic re-signing, fee replacement, reservation deletion, or assumption that a missing transaction failed. Stale-generation jobs cannot update a newer retry. If the original outcome cannot be established, keep the reservation and reconcile operationally.
 

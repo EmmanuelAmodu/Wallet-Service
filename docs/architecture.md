@@ -39,7 +39,7 @@ Prisma schemas and migrations remain under each owning application's `prisma/` d
 
 `AuthModule` registers `TenantAuthGuard` using `APP_GUARD`. The guard requires a Bearer credential and resolves its tenant; `@Tenant()` supplies that identity to controllers. All registered API routes are protected. Unknown routes return Nest's normal 404 response.
 
-Controllers declare their request types in `dto/` and bind `ZodValidationPipe` to bodies and idempotency keys. UUID parameters use Nest's `ParseUUIDPipe`. We retain the existing Zod schemas as the single runtime contract for chain-specific unions, decimal amounts, and strict input objects; duplicating those rules in class-validator DTOs would create two sources of truth. DTO types are inferred from those schemas.
+Controllers declare their request types in `dto/` and bind `ZodValidationPipe` to bodies and idempotency keys. UUID parameters use Nest's `ParseUUIDPipe`. We retain the existing Zod schemas as the single runtime contract for chain-specific unions, decimal amounts, and strict input objects; duplicating those rules in class-validator DTOs would create two sources of truth. DTO types are inferred from those schemas. The `/docs` UI and `/docs-json` OpenAPI document are public; tenant authentication applies to wallet and transaction controller routes.
 
 `SafeErrorsFilter` is registered through `APP_FILTER`. It reports safe validation details and HTTP errors without serializing internal database, SDK, or RPC failures.
 
