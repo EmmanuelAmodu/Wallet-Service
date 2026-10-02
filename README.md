@@ -60,6 +60,13 @@ The default network identities are Sepolia, Bitcoin mainnet, and Solana devnet; 
 
 For example, configure Polygon and Litecoin with `CHAIN_NETWORKS={"polygon":{"network":"137","chainId":"137","rpcUrl":"https://polygon-rpc.example"},"litecoin":{"network":"mainnet","rpcUrl":"http://127.0.0.1:9332","rpcUser":"wallet","rpcPassword":"replace-me"}}`. Only add endpoints you control or trust. Bitcoin-family callers supply outpoints; the wallet service obtains values and scripts from the node and checks ownership, confirmation, and coinbase maturity. UTXO discovery is not included. Validate each fork’s RPC compatibility and fee policy on a test network before production use.
 
+### Preparation and safety checks
+
+- Before preparation and broadcast, the service verifies the RPC network: EVM chain ID, Bitcoin Core network name, or Solana genesis hash must match configuration.
+- EVM preparation reads the pending nonce, estimates gas with 20% headroom, and rejects a wallet balance that cannot cover the transfer plus the maximum gas fee. The priority fee must not exceed the maximum fee.
+- Bitcoin-family requests must provide unique outpoints. The service fetches each UTXO and rejects spent, foreign, or unconfirmed outputs; coinbase outputs require 100 confirmations. Signer rechecks the locking script and recipient addresses before signing.
+- Solana preparation uses a finalized blockhash and records its last-valid height. Broadcast checks expiry and simulates the signed transaction before submission. The signer rejects the system-program address as a recipient and enforces the 1,232-byte legacy packet limit.
+
 Ethereum atomic multi-recipient batching needs a batch contract or smart-account adapter, which is outside this version. ERC-20, SPL tokens, arbitrary calldata, multisig/Taproot, and cross-wallet batching are also outside this version.
 
 **A path does not replace the master seed.** The signer reads a BIP39 mnemonic from a mode-0600 file and keeps its Wallet Core HD wallet in process memory. Derived key objects are deleted and accessible buffers overwritten after use; JS/WASM cannot guarantee erasure of every runtime copy. Never change a mnemonic under an existing `SIGNER_SEED_ID`. All signer replicas consuming the same queue must have the same seed and configuration.
@@ -112,7 +119,7 @@ Tenant bearer keys remain configured with `WALLET_API_KEYS`, a JSON map from ten
 
 Swagger documents all six tenant-authenticated routes, accepted request shapes, asynchronous responses, and the required `Idempotency-Key` header for transfer creation.
 
-**Command endpoints now return `202 Accepted`, not a completed synchronous result.** Poll the corresponding GET endpoint. Wallet creation can return `address: null` with `status: deriving`; wait for `ready` before requesting a transfer.
+**Command endpoints now return `202 Accepted`, not a completed synchronous result.** Poll the corresponding GET endpoint. Wallet creation can return `address: null` with `status: deriving`; wait for `ready` before requesting a transfer. Transaction acceptance does not guarantee preparation or signing succeeded; check the resulting status and generic `last_error` before requesting broadcast.
 
 | Method | Route | Result |
 | --- | --- | --- |
@@ -140,7 +147,7 @@ curl "http://127.0.0.1:3000/v1/wallets/$WALLET_ID/transactions" \
   -H 'Idempotency-Key: payment-001' --data-binary @transfer.json
 ```
 
-Amounts and Ethereum fee values are **decimal strings in base units**. Example bodies below contain placeholder recipients/outpoints that must be replaced.
+Amounts and Ethereum fee values are **decimal strings in base units**: wei for EVM, satoshis for Bitcoin-family chains, and lamports for Solana. Example bodies below contain placeholder recipients/outpoints that must be replaced.
 
 ```json
 {"chain":"ethereum","to":"0xREPLACE_WITH_40_HEX_CHARACTERS","amount":"1000000000000000","maxFeePerGas":"30000000000","maxPriorityFeePerGas":"1000000000"}

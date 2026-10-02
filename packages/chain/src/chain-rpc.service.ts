@@ -7,6 +7,9 @@ import {
   isBitcoinChain,
   isEvmChain,
   isSolanaChain,
+  BitcoinChain,
+  EvmChain,
+  SolanaChain,
   SignRequest,
   SignedTransaction,
   Transfer,
@@ -15,6 +18,13 @@ import {
 import { ChainNetworkMap, ChainNetworkSettings, networkConfig } from './config.js';
 
 const hex = z.string().regex(/^0x[0-9a-fA-F]+$/);
+type EvmTransfer = Extract<Transfer, { chain: EvmChain }>;
+type BitcoinTransfer = Extract<Transfer, { chain: BitcoinChain }>;
+type SolanaTransfer = Extract<Transfer, { chain: SolanaChain }>;
+type EvmTransaction = Extract<SignRequest['transaction'], { chain: EvmChain }>;
+type BitcoinTransaction = Extract<SignRequest['transaction'], { chain: BitcoinChain }>;
+type SolanaTransaction = Extract<SignRequest['transaction'], { chain: SolanaChain }>;
+
 export interface NetworkConfig {
   ethereumUrl?: string;
   ethereumChainId: string;
@@ -118,78 +128,90 @@ export class ChainRpcService {
 
   async prepare(address: string, transfer: Transfer): Promise<SignRequest['transaction']> {
     await this.verifyNetwork(transfer.chain);
-    if ('to' in transfer) {
-      const nonce = hex.parse(
-        await this.call('ethereum', 'eth_getTransactionCount', [address, 'pending']),
-      );
-      if (BigInt(transfer.maxPriorityFeePerGas) > BigInt(transfer.maxFeePerGas))
-        throw new BadRequestException('Priority fee exceeds max fee');
-      const gas = hex.parse(
-        await this.call('ethereum', 'eth_estimateGas', [
-          {
-            from: address,
-            to: transfer.to,
-            value: '0x' + BigInt(transfer.amount).toString(16),
-            maxFeePerGas: '0x' + BigInt(transfer.maxFeePerGas).toString(16),
-            maxPriorityFeePerGas: '0x' + BigInt(transfer.maxPriorityFeePerGas).toString(16),
-          },
-        ]),
-      );
-      // Bounded headroom for recipient contracts; no arbitrary calldata in v1.
-      const gasLimit = ((BigInt(gas) * 120n) / 100n).toString();
-      const balance = hex.parse(
-        await this.call('ethereum', 'eth_getBalance', [address, 'pending']),
-      );
+    if ('to' in transfer) return this.prepareEvm(address, transfer);
+    if ('utxos' in transfer) return this.prepareBitcoin(address, transfer);
+    return this.prepareSolana(transfer);
+  }
+
+  private async prepareEvm(address: string, transfer: EvmTransfer): Promise<EvmTransaction> {
+    const nonce = hex.parse(
+      await this.call(transfer.chain, 'eth_getTransactionCount', [address, 'pending']),
+    );
+    if (BigInt(transfer.maxPriorityFeePerGas) > BigInt(transfer.maxFeePerGas))
+      throw new BadRequestException('Priority fee exceeds max fee');
+    const gas = hex.parse(
+      await this.call(transfer.chain, 'eth_estimateGas', [
+        {
+          from: address,
+          to: transfer.to,
+          value: '0x' + BigInt(transfer.amount).toString(16),
+          maxFeePerGas: '0x' + BigInt(transfer.maxFeePerGas).toString(16),
+          maxPriorityFeePerGas: '0x' + BigInt(transfer.maxPriorityFeePerGas).toString(16),
+        },
+      ]),
+    );
+    // Bounded headroom for recipient contracts; no arbitrary calldata in v1.
+    const gasLimit = ((BigInt(gas) * 120n) / 100n).toString();
+    const balance = hex.parse(
+      await this.call(transfer.chain, 'eth_getBalance', [address, 'pending']),
+    );
+    if (
+      BigInt(balance) <
+      BigInt(transfer.amount) + BigInt(gasLimit) * BigInt(transfer.maxFeePerGas)
+    )
+      throw new BadRequestException('Insufficient ETH for value and maximum fee');
+    return {
+      ...transfer,
+      chainId: this.networkSettings(transfer.chain).chainId!,
+      nonce: BigInt(nonce).toString(),
+      gasLimit,
+    };
+  }
+
+  private async prepareBitcoin(
+    address: string,
+    transfer: BitcoinTransfer,
+  ): Promise<BitcoinTransaction> {
+    if (new Set(transfer.utxos.map((u) => `${u.txid}:${u.vout}`)).size !== transfer.utxos.length)
+      throw new BadRequestException('Duplicate UTXO');
+    const utxos: BitcoinTransaction['utxos'] = [];
+    for (const ref of transfer.utxos) {
+      const result = await this.call(transfer.chain, 'gettxout', [ref.txid, ref.vout, true]);
+      if (result === null) throw new BadRequestException('UTXO is unavailable or already spent');
+      const utxo = z
+        .object({
+          value: z.number().positive(),
+          confirmations: z.number().int(),
+          coinbase: z.boolean(),
+          scriptPubKey: z.object({ hex: z.string().regex(/^[0-9a-f]+$/), address: z.string() }),
+        })
+        .parse(result);
       if (
-        BigInt(balance) <
-        BigInt(transfer.amount) + BigInt(gasLimit) * BigInt(transfer.maxFeePerGas)
+        utxo.scriptPubKey.address !== address ||
+        utxo.confirmations < 1 ||
+        (utxo.coinbase && utxo.confirmations < 100)
       )
-        throw new BadRequestException('Insufficient ETH for value and maximum fee');
-      return {
-        ...transfer,
-        chainId: this.networkSettings(transfer.chain).chainId!,
-        nonce: BigInt(nonce).toString(),
-        gasLimit,
-      };
+        throw new BadRequestException('UTXO must be confirmed, mature, and owned by this wallet');
+      const amount = utxo.value
+        .toFixed(8)
+        .replace('.', '')
+        .replace(/^0+(?=\d)/, '');
+      utxos.push({ ...ref, amount, script: utxo.scriptPubKey.hex });
     }
-    if ('utxos' in transfer) {
-      if (new Set(transfer.utxos.map((u) => `${u.txid}:${u.vout}`)).size !== transfer.utxos.length)
-        throw new BadRequestException('Duplicate UTXO');
-      const utxos = [];
-      for (const ref of transfer.utxos) {
-        const result = await this.call('bitcoin', 'gettxout', [ref.txid, ref.vout, true]);
-        if (result === null) throw new BadRequestException('UTXO is unavailable or already spent');
-        const u = z
-          .object({
-            value: z.number().positive(),
-            confirmations: z.number().int(),
-            coinbase: z.boolean(),
-            scriptPubKey: z.object({ hex: z.string().regex(/^[0-9a-f]+$/), address: z.string() }),
-          })
-          .parse(result);
-        if (
-          u.scriptPubKey.address !== address ||
-          u.confirmations < 1 ||
-          (u.coinbase && u.confirmations < 100)
-        )
-          throw new BadRequestException('UTXO must be confirmed, mature, and owned by this wallet');
-        const amount = u.value
-          .toFixed(8)
-          .replace('.', '')
-          .replace(/^0+(?=\d)/, '');
-        utxos.push({ ...ref, amount, script: u.scriptPubKey.hex });
-      }
-      return { ...transfer, utxos };
-    }
-    const result = z
+    return { ...transfer, utxos };
+  }
+
+  private async prepareSolana(transfer: SolanaTransfer): Promise<SolanaTransaction> {
+    const result = await this.call('solana', 'getLatestBlockhash', [{ commitment: 'finalized' }]);
+    const blockhash = z
       .object({
         value: z.object({ blockhash: z.string(), lastValidBlockHeight: z.number().int() }),
       })
-      .parse(await this.call('solana', 'getLatestBlockhash', [{ commitment: 'finalized' }]));
+      .parse(result).value;
     return {
       ...transfer,
-      recentBlockhash: result.value.blockhash,
-      lastValidBlockHeight: result.value.lastValidBlockHeight,
+      recentBlockhash: blockhash.blockhash,
+      lastValidBlockHeight: blockhash.lastValidBlockHeight,
     };
   }
 
