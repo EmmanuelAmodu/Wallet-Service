@@ -1,6 +1,6 @@
 # Wallet as a Service
 
-A NestJS 12 ESM monorepo with **wallet, signer, and broadcast services**, PostgreSQL through **Prisma 7**, and durable Redis queues through **`@nestjs/bullmq`**. Trust Wallet Core handles derivation and transaction signing.
+A NestJS 12 ESM monorepo with **wallet, signer, broadcast, activity-listener, and ledger services**, PostgreSQL through **Prisma 7**, and durable Redis queues through **`@nestjs/bullmq`**. Trust Wallet Core handles derivation and transaction signing. The provider-facing [blockchain transaction listener](https://github.com/EmmanuelAmodu/blockchain-transaction-listener) remains a separate publisher; this monorepo consumes its Google Cloud Pub/Sub activity topic.
 
 ## Architecture
 
@@ -17,6 +17,13 @@ flowchart LR
   BroadcastDB -->|Transactional outbox / status events| Redis
   Broadcast -->|Reconcile / submit / monitor| Nodes[Blockchain RPC]
   Wallet -->|Nonce / gas / UTXO / blockhash reads| Nodes
+  ProviderListener[Provider webhook listener] -->|on-chain-activity| PubSub[Google Cloud Pub/Sub]
+  PubSub --> Activity[Activity listener]
+  Activity -->|finality checks| Nodes
+  Activity -->|Provisional / final / reversal events| Redis
+  Redis --> Ledger[Ledger service]
+  Ledger --> LedgerDB[(Ledger PostgreSQL / Prisma)]
+  Wallet -->|Authenticated balance API| Ledger
   Signer --> Seed[Read-only master seed]
 ```
 
@@ -25,8 +32,10 @@ flowchart LR
 | `apps/wallet` | Tenant API, wallet records, idempotency, transaction preparation, processing signer results, queuing broadcast/refresh actions | Prisma/PostgreSQL, Redis, read RPCs |
 | `apps/signer` | Consume derivation/signing commands; derive ephemeral keys; publish results | Redis, Wallet Core, seed file; **no database or RPC** |
 | `apps/broadcast` | Reconcile hashes, submit stored signed bytes, exponential retries, Solana simulation/expiry checks, confirmation monitoring | Prisma/PostgreSQL, Redis, RPCs; **no seed or signing responsibilities** |
+| `apps/activity-listener` | Consume provider activities from Pub/Sub, normalize supported wallet identifiers, verify network/transaction state, poll finality, and publish ledger updates | Pub/Sub, Redis, configured chain RPCs; **no database or private keys** |
+| `apps/ledger` | Own the wallet registry, double-entry debit/credit journal, per-entry running balances, and internal balance API | Its own Prisma/PostgreSQL database, Redis; **no signer or provider credentials** |
 
-The wallet service does not submit transactions or call the signer over HTTP. The signer and broadcast services are Nest application contexts with `@Processor` / `WorkerHost` consumers, not HTTP servers. Shared packages contain Prisma access, queue contracts/outbox, input validation, and read-only chain preparation code. Wallet and broadcast each own a separate database, Prisma schema, migration history, and Prisma client. Neither service reads or writes the other database. The signer remains stateless and needs no database. Broadcast status in the wallet API is an eventually consistent projection of queue events.
+The wallet service does not submit transactions or call the signer over HTTP. Signer, broadcast, and activity-listener are Nest application contexts with queue/Pub/Sub consumers, not HTTP servers. Ledger has an internal HTTP API on `127.0.0.1:3010` by default; only Wallet-Service calls it, using `LEDGER_API_KEY`. Wallet, broadcast, and ledger each own a separate database, Prisma schema, migration history, and client. No service queries another service's database. Wallet account registration is sent to Ledger through the wallet database's transactional outbox. The signer remains stateless and needs no database. Broadcast status in Wallet is eventually consistent; balances are served by Ledger.
 
 **Redis/BullMQ was chosen for action queues with durable jobs, retries, and competing workers.** This does not use Redis Pub/Sub or Nest's ephemeral Redis microservice transport. Kafka is not required for this implementation.
 
@@ -34,7 +43,7 @@ The wallet service does not submit transactions or call the signer over HTTP. Th
 
 Each application has a root `AppModule` that composes feature modules. Wallet exposes separate wallet and transaction controllers/services. Queue processors delegate to application services, configuration is injected through `@nestjs/config`, and each database is encapsulated by its own Prisma module. HTTP authentication uses a global Nest guard, request validation uses DTO schemas with Nest pipes, and error handling uses an injected global filter.
 
-See [the architecture guide](docs/architecture.md) for the module map, dependency rules, lifecycle behavior, and guidance for adding features. `nest-cli.json` defines the three Nest CLI applications. Chain identifiers and network names are stored as strings, and transaction intents are stored as JSON, so adding an allowlisted chain does not require a database migration. Bearer prefixes are required, and invalid `ALLOW_BROADCAST` values fail startup instead of silently disabling broadcasting.
+See [the architecture guide](docs/architecture.md) for the module map, dependency rules, lifecycle behavior, and guidance for adding features. `nest-cli.json` defines the five Nest CLI applications. Chain identifiers and network names are stored as strings, and transaction intents are stored as JSON, so adding an allowlisted chain does not require a wallet database migration. Bearer prefixes are required, and invalid `ALLOW_BROADCAST` values fail startup instead of silently disabling broadcasting.
 
 ## Action flow
 
@@ -43,6 +52,8 @@ See [the architecture guide](docs/architecture.md) for the module map, dependenc
 3. The signer returns a `transaction.signed` event. The wallet worker persists the signed bytes and transaction hash, then sets `signed`.
 4. An explicit broadcast request changes the wallet record to `queued` and stores `broadcast.requested` with an immutable signed payload, network, and any Solana expiry height in the wallet outbox.
 5. A broadcast worker reconciles the hash before sending. It only submits the **persisted signed bytes**. It persists the signed payload in its own database, commits revisioned `broadcast.updated` events alongside state changes, and schedules delayed `broadcast.confirm` commands through the outbox until finality or an operator-action state.
+6. `wallet.derived` also queues `ledger.wallet.registered` in the same wallet DB transaction. The Ledger worker stores the wallet/address mapping in its own database.
+7. The external provider listener publishes activity to Pub/Sub. ActivityListener verifies supported network identity/finality and queues provisional, finalized, failed, or reverted updates. Ledger deduplicates by transaction identifier, journals base-unit deltas, and updates provisional/confirmed balance projections.
 
 Private keys and seed phrases are never placed in queue jobs or database records. Queue payloads do contain addresses, paths, transaction intents, and signed bytes; treat Redis as sensitive infrastructure. Commands and results carry versioned, HMAC-authenticated envelopes using `QUEUE_AUTH_KEY`.
 
@@ -56,7 +67,7 @@ The wallet worker deduplicates broadcast events and checks generation and revisi
 | Bitcoin and Bitcoin Cash families (16 coin types) | Wallet Core coin path | Native UTXO transfers, 1–50 outputs plus change | Mainnet, Bitcoin Core-compatible RPC |
 | Solana | `m/44'/501'/account'/0'` | 1–20 native SOL transfer instructions, legacy transaction size checked | Configured genesis hash; default devnet |
 
-The default network identities are Sepolia, Bitcoin mainnet, and Solana devnet; the RPC URLs are blank until configured. Configure additional supported networks in `CHAIN_NETWORKS`, a JSON object keyed by a [supported chain identifier](packages/shared/src/contracts.ts). EVM entries require `network`, `chainId`, and `rpcUrl`; Bitcoin-family entries require `network: "mainnet"` and a Bitcoin Core-compatible `rpcUrl`. The same map must be supplied to wallet, signer, and broadcast services; signer reads only EVM chain IDs. `rpcUser` and `rpcPassword` are used for Bitcoin-family Basic authentication, `rpcNetwork` selects the expected Bitcoin Core network name, and `confirmations` overrides the EVM/Bitcoin confirmation defaults.
+The default network identities are Sepolia, Bitcoin mainnet, and Solana devnet; the RPC URLs are blank until configured. Configure additional supported networks in `CHAIN_NETWORKS`, a JSON object keyed by a [supported chain identifier](packages/shared/src/contracts.ts). EVM entries require `network`, `chainId`, and `rpcUrl`; Bitcoin-family entries require `network: "mainnet"` and a Bitcoin Core-compatible `rpcUrl`. The same map must be supplied to wallet, signer, broadcast, and activity-listener services; signer reads only EVM chain IDs. `rpcUser` and `rpcPassword` are used for Bitcoin-family Basic authentication, `rpcNetwork` selects the expected Bitcoin Core network name, and `confirmations` overrides the EVM/Bitcoin confirmation defaults.
 
 For example, configure Polygon and Litecoin with `CHAIN_NETWORKS={"polygon":{"network":"137","chainId":"137","rpcUrl":"https://polygon-rpc.example"},"litecoin":{"network":"mainnet","rpcUrl":"http://127.0.0.1:9332","rpcUser":"wallet","rpcPassword":"replace-me"}}`. Only add endpoints you control or trust. Bitcoin-family callers supply outpoints; the wallet service obtains values and scripts from the node and checks ownership, confirmation, and coinbase maturity. UTXO discovery is not included. Validate each fork’s RPC compatibility and fee policy on a test network before production use.
 
@@ -67,23 +78,35 @@ For example, configure Polygon and Litecoin with `CHAIN_NETWORKS={"polygon":{"ne
 - Bitcoin-family requests must provide unique outpoints. The service fetches each UTXO and rejects spent, foreign, or unconfirmed outputs; coinbase outputs require 100 confirmations. Signer rechecks the locking script and recipient addresses before signing.
 - Solana preparation uses a finalized blockhash and records its last-valid height. Broadcast checks expiry and simulates the signed transaction before submission. The signer rejects the system-program address as a recipient and enforces the 1,232-byte legacy packet limit.
 
-Ethereum atomic multi-recipient batching needs a batch contract or smart-account adapter, which is outside this version. ERC-20, SPL tokens, arbitrary calldata, multisig/Taproot, and cross-wallet batching are also outside this version.
+## Activity and ledger
+
+The linked provider listener publishes `ProcessorOnChainActivity` messages to Pub/Sub. ActivityListener consumes `PUBSUB_SUBSCRIPTION`, validates the event, maps its `wallet:<chain>:<address>` identifiers, checks the chain/network through configured RPC, then sends updates through the authenticated Ledger queue. It accepts Wallet-Service chain identifiers plus the source listener's `bsc` alias (`smartChain`); networks outside the wallet chain contract, including the source's Tron and XRPL adapters, are retained as failed `activity-actions` jobs rather than written under an incorrect chain.
+
+Ledger has a separate database and uses double-entry journal lines per asset and balance state. Wallet accounts use debit-normal balances; system clearing accounts provide the counter-entry for net inflows/outflows. Every journal line has a positive debit or credit amount, sequence, `balance_after`, account-local previous/next entry links, and an optional reversal reference. Posting lines are immutable; appending a line advances the tail and predecessor link in the same transaction. The balance API reads each wallet account's latest entry instead of trusting a separate balance cache. Activity identifiers deduplicate provider redelivery. EVM defaults to 12 confirmations, Bitcoin-family chains to 6, and Solana to `finalized`; EVM/Bitcoin depths use per-chain `confirmations` overrides. Activity finality polling defaults to 30 seconds for up to 120 checks. A block-hash change appends reversal lines before applying the replacement posting. A failed EVM or Solana transaction posts only its network fee; a reverted Bitcoin transaction reverses its observed posting. Reorgs after the configured finality threshold are not continuously polled and require a new provider event or operator reconciliation.
+
+`GET /v1/wallets/:id/balances` returns `confirmed` and `provisional` decimal strings in the asset's smallest unit. Wallet-Service calls the internal Ledger API with the authenticated tenant identity; it never reads the ledger database. `LEDGER_API_KEY` must be distinct from both tenant API keys and `QUEUE_AUTH_KEY` in production. The local setup script generates a separate key.
+
+Ledger is event-derived, not an on-chain balance snapshot: it starts tracking an address when the wallet is registered and does not backfill earlier history or discover all current token holdings. A newly registered or legacy wallet can therefore report zero until its activity is delivered. EVM spending checks and UTXO availability continue to use chain RPC; Ledger balances are reporting/accounting projections, not spend authorization.
+
+The Wallet-Service transaction API sends native assets only: Ethereum atomic multi-recipient batching needs a batch contract or smart-account adapter; ERC-20/SPL sending, arbitrary calldata, multisig/Taproot, and cross-wallet batching are not implemented. The separate activity listener and ledger may still record token balance changes supplied by the provider listener; these are reported in the asset's base units and are not spend authorization.
 
 **A path does not replace the master seed.** The signer reads a BIP39 mnemonic from a mode-0600 file and keeps its Wallet Core HD wallet in process memory. Derived key objects are deleted and accessible buffers overwritten after use; JS/WASM cannot guarantee erasure of every runtime copy. Never change a mnemonic under an existing `SIGNER_SEED_ID`. All signer replicas consuming the same queue must have the same seed and configuration.
 
 ## Local setup
 
 Requires Node.js **22.22.3+ within Node 22, 24.15+ within Node 24, or Node 26+**, PostgreSQL 14+, and Redis 7+. Docker Compose provides PostgreSQL 17 and Redis 7.4 with AOF persistence, synchronous fsync, and `noeviction`.
+The local stack also includes a third PostgreSQL database for Ledger and the Google Cloud Pub/Sub emulator.
 
 ```sh
 npm ci
 npm run setup:local
-docker compose up -d postgres broadcast-postgres redis
+docker compose up -d postgres broadcast-postgres ledger-postgres redis pubsub
+npm run setup:pubsub
 npm run migrate
 npm run build
 ```
 
-`setup:local` creates a fresh seed in `secrets/local.mnemonic` and distinct random tenant and queue credentials in `.env`, with private file permissions. It refuses to overwrite existing files. Configure RPC URLs and `CHAIN_NETWORKS` for the chains you use. Address derivation uses Wallet Core metadata; transaction preparation requires the configured RPC endpoint.
+`setup:local` creates a fresh seed in `secrets/local.mnemonic` plus distinct random tenant, queue, and Ledger API credentials in `.env`, with private file permissions. It refuses to overwrite existing files. `setup:pubsub` creates the local `on-chain-activity` topic and `wallet-activity` subscription. Configure the linked provider listener to publish to project `wallet-local` and that topic. Its current `NODE_ENV=development` mode writes activities to `./output` instead of Pub/Sub, so local end-to-end ingestion must run the publisher in its Pub/Sub-publishing mode or update that publisher's development behavior. Configure RPC URLs and `CHAIN_NETWORKS` for the chains you use. Address derivation uses Wallet Core metadata; transaction preparation and activity finality checks require configured RPC endpoints.
 
 Run each service in a separate terminal:
 
@@ -91,33 +114,37 @@ Run each service in a separate terminal:
 npm run dev:wallet
 npm run dev:signer
 npm run dev:broadcast
+npm run dev:activity-listener
+npm run dev:ledger
 ```
 
-These commands generate Prisma clients and run Nest CLI in watch mode. `npm run build` builds all applications; `npm run build:wallet`, `build:signer`, and `build:broadcast` build one application. Production start scripts are `start:wallet`, `start:signer`, and `start:broadcast`, with environment variables supplied externally.
+These commands generate Prisma clients and run Nest CLI in watch mode. `npm run build` builds all applications; `npm run build:wallet`, `build:signer`, `build:broadcast`, `build:activity-listener`, and `build:ledger` build one application. Production start scripts are `start:wallet`, `start:signer`, `start:broadcast`, `start:activity-listener`, and `start:ledger`, with environment variables supplied externally.
 
-Only the wallet service exposes HTTP, at `127.0.0.1:3000` by default. Interactive Swagger documentation is available publicly at `/docs` and the OpenAPI JSON at `/docs-json`; the wallet and transaction API routes themselves require tenant bearer authentication. Set `WALLET_HOST=0.0.0.0` inside a container when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
+Wallet-Service exposes the tenant API at `127.0.0.1:3000` by default. Swagger is public at `/docs` and OpenAPI JSON at `/docs-json`; wallet routes require tenant bearer authentication. Ledger exposes its internal API at `127.0.0.1:3010` by default and authenticates Wallet-Service with `LEDGER_API_KEY`. ActivityListener and the signer/broadcast workers expose no HTTP routes. Set `WALLET_HOST` and `LEDGER_HOST` to `0.0.0.0` inside containers when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
 
 ### Database configuration
 
 - Wallet: `WALLET_DATABASE_URL`, local PostgreSQL on port 5432.
 - Broadcast: `BROADCAST_DATABASE_URL`, separate local PostgreSQL on port 5433.
+- Ledger: `LEDGER_DATABASE_URL`, separate local PostgreSQL on port 5434.
 - Signer: no database URL or database access.
+- ActivityListener: no database; it consumes Pub/Sub and publishes through Redis queues.
 
-`npm run migrate` migrates both databases. For independent deployment use `npm run migrate:wallet` or `npm run migrate:broadcast`, supplying only that application's URL. Each service should receive only its own database credentials. Separate databases may live on one PostgreSQL server with separate roles and access restrictions, or on separate servers as in Compose.
+`npm run migrate` migrates wallet, broadcast, and ledger databases. For independent deployment use `npm run migrate:wallet`, `npm run migrate:broadcast`, or `npm run migrate:ledger`, supplying only that application's URL. Each service should receive only its own database credentials. Separate databases may live on one PostgreSQL server with separate roles and access restrictions, or on separate servers as in Compose.
 
 ### Upgrading the earlier version
 
 This changes the broadcast queue contract. Before upgrading an existing deployment, stop accepting new work and drain active broadcasts and confirmation monitoring using the old services. Resolve all `attention` transactions first; do not discard reservations or uncertain payments. Stop the old workers and relays before deploying the new version. Do not mix old and new workers. Retained old broadcast jobs lack signed snapshots and must not be replayed into the new consumers.
 
-Keep the existing seed, seed ID, and wallet database. Rename `DATABASE_URL` to `WALLET_DATABASE_URL` and provision a fresh, separate `BROADCAST_DATABASE_URL`. No existing database is deleted or copied by these scripts. Add `REDIS_URL`, `QUEUE_PREFIX`, and `QUEUE_AUTH_KEY` to your environment; remove obsolete `SIGNER_URL`, `SIGNER_PORT`, and `SIGNER_HOST`. The old internal `SIGNER_TOKEN` can be renamed to `QUEUE_AUTH_KEY` if it is already a distinct random secret of at least 32 characters. Do not rerun local seed setup on an existing installation.
+Keep the existing seed, seed ID, and wallet database. Rename `DATABASE_URL` to `WALLET_DATABASE_URL` and provision fresh, separate `BROADCAST_DATABASE_URL` and `LEDGER_DATABASE_URL` databases. No existing database is deleted or copied by these scripts. Add `REDIS_URL`, `QUEUE_PREFIX`, `QUEUE_AUTH_KEY`, a distinct production `LEDGER_API_KEY`, Pub/Sub project/topic/subscription settings, and provider RPC/network settings; remove obsolete `SIGNER_URL`, `SIGNER_PORT`, and `SIGNER_HOST`. The old internal `SIGNER_TOKEN` can be renamed to `QUEUE_AUTH_KEY` if it is already a distinct random secret of at least 32 characters. Do not rerun local seed setup on an existing installation.
 
-Run `npm run migrate` before starting the new services. The migration wrapper recognizes the original `schema_migrations` entry for `001_initial.sql`, marks its identical Prisma baseline as applied, then applies `0002_event_driven` and `0003_broadcast_projection`. Existing addresses become `ready`; transaction data, derivation accounts, and the sequence are retained. Unknown legacy migration histories are rejected for manual review. Fresh wallet databases apply the full wallet migration history; broadcast has an independent initial migration.
+Run `npm run migrate` before starting the services. The migration wrapper recognizes the original `schema_migrations` entry for `001_initial.sql`, marks its identical Prisma baseline as applied, then applies `0002_event_driven` and `0003_broadcast_projection`. Existing addresses become `ready`; transaction data, derivation accounts, and the sequence are retained. Ledger applies `20261002210703_initial_ledger`, `20261002221045_double_entry_journal`, and `20261002221500_journal_constraints` to `LEDGER_DATABASE_URL`; the journal migration replaces the empty prototype balance table, so preserve/back up any non-empty pre-release ledger prototype before migrating. It does not alter the wallet database. Unknown legacy wallet migration histories are rejected for manual review. Existing wallets are registered with Ledger on the first balance read, but there is no historical activity/balance backfill, so balances begin at the first delivered event.
 
 ## API changes
 
 Tenant bearer keys remain configured with `WALLET_API_KEYS`, a JSON map from tenant ID to key. Tenant identity is derived from authentication, never from request bodies. `QUEUE_AUTH_KEY` must be different from tenant API keys.
 
-Swagger documents all six tenant-authenticated routes, accepted request shapes, asynchronous responses, and the required `Idempotency-Key` header for transfer creation.
+Swagger documents all seven tenant-authenticated routes, accepted request shapes, asynchronous responses, and the required `Idempotency-Key` header for transfer creation.
 
 **Command endpoints now return `202 Accepted`, not a completed synchronous result.** Poll the corresponding GET endpoint. Wallet creation can return `address: null` with `status: deriving`; wait for `ready` before requesting a transfer. Transaction acceptance does not guarantee preparation or signing succeeded; check the resulting status and generic `last_error` before requesting broadcast.
 
@@ -125,6 +152,7 @@ Swagger documents all six tenant-authenticated routes, accepted request shapes, 
 | --- | --- | --- |
 | POST | `/v1/wallets` | Accept or return wallet creation by tenant/external ID/chain/network |
 | GET | `/v1/wallets/:id` | Wallet status, address, derivation metadata |
+| GET | `/v1/wallets/:id/balances` | Confirmed and provisional Ledger balances by asset |
 | POST | `/v1/wallets/:id/transactions` | Accept preparation/signing; requires `Idempotency-Key` |
 | GET | `/v1/transactions/:id` | Intent, prepared/signed data, hash, status, attempt count, generic error |
 | POST | `/v1/transactions/:id/broadcast` | Queue broadcast, or retry an `attention` transaction with a new generation |
@@ -147,6 +175,13 @@ curl "http://127.0.0.1:3000/v1/wallets/$WALLET_ID/transactions" \
   -H 'Idempotency-Key: payment-001' --data-binary @transfer.json
 ```
 
+Read confirmed and provisional balances through the tenant API:
+
+```sh
+curl "http://127.0.0.1:3000/v1/wallets/$WALLET_ID/balances" \
+  -H "Authorization: Bearer $API_KEY"
+```
+
 Amounts and Ethereum fee values are **decimal strings in base units**: wei for EVM, satoshis for Bitcoin-family chains, and lamports for Solana. Example bodies below contain placeholder recipients/outpoints that must be replaced.
 
 ```json
@@ -166,9 +201,10 @@ Wait for `signed`, enable broadcasting on the broadcast service when ready, and 
 ## Delivery, retries, and scale
 
 - **Transactional outbox:** state changes and their next action commit together in PostgreSQL. Wallet and broadcast replicas run relays using `FOR UPDATE SKIP LOCKED`. A Redis outage leaves actions unpublished for a later attempt. Relays publish stable job IDs before marking delivery; a lost acknowledgement can safely cause redelivery.
+- **Pub/Sub handoff:** ActivityListener acknowledges a provider Pub/Sub message only after the activity is accepted into its deterministic BullMQ job. Pub/Sub redelivery therefore reuses the same job ID; the provider listener remains outside this repository.
 - **At-least-once processing:** this is not an exactly-once transport. Deterministic job IDs, durable signer-result inbox records, status checks, generation checks, and a partial unique database index absorb duplicates. Signed bytes remain immutable across broadcast retries.
 - **Reservations:** one pending transaction per wallet, including `attention`, across all replicas. Rejected preparation/signing releases the reservation; uncertain sends do not. This prevents this system's nonce/UTXO conflicts, provided these wallets are not spent from externally.
-- **Workers:** wallet and broadcast concurrency is 8 per replica; signer concurrency is 1 per replica because cryptography is synchronous. Add replicas with the same application-specific database, queue prefix, Redis, network config, and appropriate secret credentials. Distinct environments require distinct databases and queue namespaces.
+- **Workers:** wallet, broadcast, and ledger concurrency is 8 per replica; activity-listener concurrency is 4; signer concurrency is 1 because cryptography is synchronous. Add replicas with the same application-specific database, queue prefix, Redis, Pub/Sub subscription, network config, and appropriate secret credentials. Distinct environments require distinct databases and queue namespaces.
 - **Retries:** 8 attempts with exponential backoff, starting at `QUEUE_RETRY_DELAY_MS` (default 1,000 ms). Failed jobs are retained for inspection/replay. Completed jobs are retained for up to a day, capped at 10,000 per queue; database guards still apply after queue cleanup.
 - **Monitoring:** delayed confirmation commands default to 30 seconds, with up to 120 reschedules per monitoring run. EVM networks default to 12 confirmations and Bitcoin-family networks to 6; configure per-chain overrides in `CHAIN_NETWORKS`. Solana waits for `finalized`. Bitcoin Core needs transaction-history lookup, typically `txindex=1`.
 - **Shutdown:** workers drain active jobs before releasing signer/database resources. A terminated worker's stalled job can be recovered by BullMQ.
@@ -190,15 +226,15 @@ npm run queue -- failed broadcast-actions
 npm run queue -- retry broadcast-actions JOB_ID
 ```
 
-The CLI can also inspect `wallet-actions` and `signer-actions`. Rejected preparation/signing needs a corrected request with a new idempotency key; replaying a command whose database state is already terminal is a no-op. Queue authentication failures require correcting the producer/key configuration, not blindly retrying.
+The CLI can also inspect `wallet-actions`, `signer-actions`, `activity-actions`, and `ledger-actions`. Rejected preparation/signing needs a corrected request with a new idempotency key; replaying a command whose database state is already terminal is a no-op. Queue authentication failures require correcting the producer/key configuration, not blindly retrying.
 
 PostgreSQL outbox/inbox records are retained for recovery and currently have no automatic cleanup policy. Redis persistence/backups remain necessary: the outbox protects the database-to-queue handoff, not total loss of acknowledged Redis data. Restore Redis or deliberately replay affected outbox actions after such a loss. Do not flush production queues. The shared queue key authenticates internal messages; it is not an independent tenant spending-policy engine.
 
 ## Prisma and deployment
 
-`apps/wallet/prisma` and `apps/broadcast/prisma` contain independent schemas and migrations. `prisma.config.ts` configures wallet; `prisma.broadcast.config.ts` configures broadcast. `npm run db:generate` generates both clients. Ordinary queries and writes use Prisma Client with the PostgreSQL adapter. Database sessions use UTC so delayed actions retain their intended timestamps. Small parameterized raw queries remain for row/advisory locks, `SKIP LOCKED`, and the existing non-recycling account sequence. Partial unique indexes and CHECK constraints are maintained in migration SQL; do not replace migrations with `db push`.
+`apps/wallet/prisma`, `apps/broadcast/prisma`, and `apps/ledger/prisma` contain independent schemas and migrations. `prisma.config.ts`, `prisma.broadcast.config.ts`, and `prisma.ledger.config.ts` configure them. `npm run db:generate` generates all three clients. Ordinary queries and writes use Prisma Client with the PostgreSQL adapter. Database sessions use UTC so delayed actions retain their intended timestamps. Small parameterized raw queries remain for row/advisory locks, `SKIP LOCKED`, and the existing non-recycling account sequence. Partial unique indexes and CHECK constraints are maintained in migration SQL; do not replace migrations with `db push`.
 
-The Dockerfile provides a non-root runtime for any service. Override its command for signer or broadcast. Build the `migrate` target to run `node dist/scripts/migrate.js` with the Prisma CLI available. Mount the seed read-only only in signer containers, owned by UID 1000 with mode 0600. Do not mount it in wallet or broadcast containers.
+The Dockerfile provides a non-root runtime for any service. Override its command for signer, broadcast, activity-listener, or ledger. Build the `migrate` target to run `node dist/scripts/migrate.js` with the Prisma CLI available. Mount the seed read-only only in signer containers, owned by UID 1000 with mode 0600. Do not mount it in wallet, broadcast, activity-listener, or ledger containers.
 
 Use managed credentials, Redis ACLs/TLS (`rediss://` supported), private network access, backups, and monitoring in deployment. Production seed-vault/HSM/MPC integration, independent payment policies, audit events/webhooks, automated replacement/reorg recovery, and token adapters remain follow-up work. The included Compose credentials are local-development defaults.
 
@@ -208,15 +244,16 @@ Prisma CLI transitive dependencies `deepmerge-ts` and `mysql2` are pinned throug
 
 ```sh
 npm test
-# Use a dedicated test database and Redis; DB/queue tests otherwise skip explicitly.
+# Use dedicated test databases and Redis; integration tests otherwise skip explicitly.
 TEST_DATABASE_URL=postgresql://user:password@localhost:5432/wallet_test \
 TEST_BROADCAST_DATABASE_URL=postgresql://user:password@localhost:5433/broadcast_test \
+TEST_LEDGER_DATABASE_URL=postgresql://user:password@localhost:5434/ledger_test \
 TEST_REDIS_URL=redis://localhost:6379 npm test
 npm run format:check
 npm run lint
 npm audit
 ```
 
-Tests run serially against two dedicated test databases and clean their records. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC only. It exercises offline consumers, async signing, signature recovery, retries, lost responses after acceptance, duplicate result delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. No test sends live funds. Nest module tests additionally exercise dependency injection, tenant guards, DTO/UUID/header pipes, and safe error responses. CI supplies PostgreSQL and Redis.
+Tests run serially against three dedicated test databases and clean their records. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC. Ledger integration tests cover deduplication, provisional-to-confirmed promotion, attention recovery, and reorg reversal; ActivityListener tests cover finality mapping and RPC retry exhaustion. It exercises offline consumers, async signing, signature verification, retries, lost responses after acceptance, duplicate delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. Pub/Sub ingestion is unit-tested; no test sends live funds. CI supplies all three PostgreSQL databases and Redis.
 
 References: [NestJS queues](https://docs.nestjs.com/techniques/queues), [BullMQ retries](https://docs.bullmq.io/guide/retrying-failing-jobs), [Prisma PostgreSQL integration](https://www.prisma.io/docs/orm/overview/databases/postgresql), [Prisma baselining](https://www.prisma.io/docs/orm/prisma-migrate/workflows/baselining), [Wallet Core usage](https://developer.trustwallet.com/developer/wallet-core/integration-guide/wallet-core-usage).

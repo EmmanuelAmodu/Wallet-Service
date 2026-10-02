@@ -14,6 +14,7 @@ import { WalletPrismaService } from '../apps/wallet/src/prisma/prisma.service.js
 import { walletConfig, WalletSettings } from '../apps/wallet/src/config/wallet.config.js';
 import { SafeErrorsFilter } from '../packages/shared/src/http/safe-errors.filter.js';
 import { setupOpenApi } from '../apps/wallet/src/openapi.js';
+import { LedgerClient } from '../apps/wallet/src/ledger/ledger-client.service.js';
 
 const settings: WalletSettings = {
   apiKeys: { tenantA: 'a'.repeat(64), tenantB: 'b'.repeat(64) },
@@ -24,6 +25,8 @@ const settings: WalletSettings = {
   ethereumChainId: '11155111',
   solanaGenesisHash: 'devnet',
   chainNetworks: {},
+  ledgerUrl: 'http://127.0.0.1:3010',
+  ledgerApiKey: 'c'.repeat(64),
 };
 @Global()
 @Module({
@@ -34,6 +37,8 @@ class TestSettingsModule {}
 
 test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency headers and safe errors', async () => {
   const calls: unknown[][] = [];
+  const balanceCalls: unknown[] = [];
+  const balanceWalletId = randomUUID();
   const module = await Test.createTestingModule({
     imports: [TestSettingsModule, AuthModule, WalletsModule, TransactionsModule],
     providers: [{ provide: APP_FILTER, useClass: SafeErrorsFilter }],
@@ -46,8 +51,22 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
         calls.push(args);
         return { status: 'deriving' };
       },
-      getWallet: () => {
+      getWallet: (_tenant: string, id: string) => {
+        if (id === balanceWalletId)
+          return {
+            id,
+            chain: 'ethereum',
+            network: '11155111',
+            address: '0x' + '11'.repeat(20),
+          };
         throw new Error('PRIVATE DATABASE CONNECTION DETAILS');
+      },
+    })
+    .overrideProvider(LedgerClient)
+    .useValue({
+      balances: (request: unknown) => {
+        balanceCalls.push(request);
+        return { balances: [] };
       },
     })
     .overrideProvider(TransactionsService)
@@ -79,6 +98,7 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
       '/v1/transactions/{id}/refresh',
       '/v1/wallets',
       '/v1/wallets/{id}',
+      '/v1/wallets/{id}/balances',
       '/v1/wallets/{id}/transactions',
     ]);
     assert.ok(openApi.components.securitySchemes.tenantBearer);
@@ -105,6 +125,17 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
     );
     assert.equal(created.status, 202);
     assert.deepEqual(calls[0], ['tenantA', 'ethereum', 'alice']);
+    const balances = await request(`/v1/wallets/${balanceWalletId}/balances`, undefined, {
+      authorization,
+    });
+    assert.equal(balances.status, 200);
+    assert.deepEqual(balanceCalls[0], {
+      walletId: balanceWalletId,
+      tenantId: 'tenantA',
+      chain: 'ethereum',
+      network: '11155111',
+      address: '0x' + '11'.repeat(20),
+    });
     const invalidId = await request('/v1/wallets/not-a-uuid', undefined, { authorization });
     assert.equal(invalidId.status, 400);
     const failed = await request(`/v1/wallets/${randomUUID()}`, undefined, { authorization });

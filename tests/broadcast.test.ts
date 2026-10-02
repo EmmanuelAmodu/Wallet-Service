@@ -228,9 +228,16 @@ test(
         if (fail) throw new Error('lost acknowledgement');
       },
     } as unknown as Queue;
-    const relay = new OutboxRelay(db as BroadcastPrismaService, auth, queue, queue, queue, {
-      outboxIntervalMs: 500,
-    });
+    const relay = new OutboxRelay(
+      db as BroadcastPrismaService,
+      auth,
+      queue,
+      queue,
+      queue,
+      queue,
+      queue,
+      { outboxIntervalMs: 500 },
+    );
     await assert.rejects(() => relay.flush());
     assert.equal(
       (await db!.outbox.findUniqueOrThrow({ where: { dedupe_key: `ack-${tx.id}` } })).published_at,

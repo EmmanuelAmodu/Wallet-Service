@@ -1,5 +1,9 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import {
+  ledgerActivitySchema,
+  processorActivitySchema,
+} from '../../shared/src/activity-contracts.js';
 import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../shared/src/contracts.js';
 import { matches, token } from '../../shared/src/security/tokens.js';
 
@@ -7,6 +11,8 @@ export const QUEUES = {
   wallet: 'wallet-actions',
   signer: 'signer-actions',
   broadcast: 'broadcast-actions',
+  activity: 'activity-actions',
+  ledger: 'ledger-actions',
 } as const;
 export const broadcastSnapshotSchema = z
   .object({
@@ -74,6 +80,41 @@ export const messageSchema = z.discriminatedUnion('type', [
       lastError: z.string().nullable(),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal('activity.received'),
+      pubsubMessageId: z.string().min(1),
+      activity: processorActivitySchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('activity.check-finality'),
+      activity: processorActivitySchema,
+      poll: z.number().int().nonnegative(),
+      blockHash: z.string().optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('activity.invalid'),
+      pubsubMessageId: z.string().min(1),
+      reason: z.string().min(1).max(500),
+      digest: z.string().regex(/^[a-f0-9]{64}$/),
+      payload: z.string().max(65536),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('ledger.wallet.registered'),
+      walletId: z.uuid(),
+      tenantId: z.string().min(1),
+      chain: chainSchema,
+      network: z.string().min(1),
+      address: z.string().min(1),
+    })
+    .strict(),
+  z.object({ type: z.literal('ledger.activity.update'), activity: ledgerActivitySchema }).strict(),
 ]);
 export type Message = z.infer<typeof messageSchema>;
 export function canonical(value: unknown): string {

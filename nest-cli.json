@@ -36,6 +36,24 @@
       "compilerOptions": {
         "tsConfigPath": "apps/broadcast/tsconfig.app.json"
       }
+    },
+    "activity-listener": {
+      "type": "application",
+      "root": "apps/activity-listener",
+      "entryFile": "main",
+      "sourceRoot": "apps/activity-listener/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/activity-listener/tsconfig.app.json"
+      }
+    },
+    "ledger": {
+      "type": "application",
+      "root": "apps/ledger",
+      "entryFile": "main",
+      "sourceRoot": "apps/ledger/src",
+      "compilerOptions": {
+        "tsConfigPath": "apps/ledger/tsconfig.app.json"
+      }
     }
   }
 }

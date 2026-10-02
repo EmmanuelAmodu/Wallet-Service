@@ -74,13 +74,27 @@ export class WalletWorkflowService {
         });
       } else if (message.type === 'wallet.derived') {
         const wallet = await db.wallet.findUnique({ where: { id: message.walletId } });
-        if (wallet?.status === 'deriving') {
+        if (wallet && ['deriving', 'ready'].includes(wallet.status)) {
           if (message.path !== wallet.path)
             throw new ActionRejectedError('Signer derivation mismatch');
-          await db.wallet.update({
-            where: { id: wallet.id },
-            data: { status: 'ready', address: message.address, last_error: null },
-          });
+          if (wallet.status === 'deriving')
+            await db.wallet.update({
+              where: { id: wallet.id },
+              data: { status: 'ready', address: message.address, last_error: null },
+            });
+          await enqueue(
+            db,
+            QUEUES.ledger,
+            {
+              type: 'ledger.wallet.registered',
+              walletId: wallet.id,
+              tenantId: wallet.tenant_id,
+              chain: chainSchema.parse(wallet.chain),
+              network: wallet.network,
+              address: message.address,
+            },
+            `ledger-wallet-${wallet.id}`,
+          );
         }
       } else if (message.type === 'wallet.rejected') {
         await db.wallet.updateMany({

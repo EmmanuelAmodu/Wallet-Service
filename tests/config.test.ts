@@ -69,9 +69,15 @@ test('application configuration is scoped and rejects unsafe settings at startup
   const { walletConfig } = await import('../apps/wallet/src/config/wallet.config.js');
   const { broadcastConfig } = await import('../apps/broadcast/src/config/broadcast.config.js');
   const { signerConfig } = await import('../apps/signer/src/config/signer.config.js');
+  const { ledgerConfig } = await import('../apps/ledger/src/config/ledger.config.js');
+  const { activityListenerConfig } = await import(
+    '../apps/activity-listener/src/config/activity-listener.config.js'
+  );
   const names = [
     'WALLET_DATABASE_URL',
     'BROADCAST_DATABASE_URL',
+    'LEDGER_DATABASE_URL',
+    'LEDGER_API_KEY',
     'WALLET_API_KEYS',
     'QUEUE_AUTH_KEY',
     'SIGNER_SEED_FILE',
@@ -81,6 +87,10 @@ test('application configuration is scoped and rejects unsafe settings at startup
     'CHAIN_NETWORKS',
     'ALLOW_BROADCAST',
     'WALLET_PORT',
+    'PUBSUB_PROJECT_ID',
+    'PUBSUB_SUBSCRIPTION',
+    'PUBSUB_API_ENDPOINT',
+    'NODE_ENV',
   ];
   const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   t.after(() => {
@@ -95,6 +105,21 @@ test('application configuration is scoped and rejects unsafe settings at startup
     SIGNER_SEED_ID: 'test',
     ETH_CHAIN_ID: '11155111',
   });
+  Object.assign(process.env, {
+    LEDGER_DATABASE_URL: 'postgresql://localhost/ledger',
+    LEDGER_API_KEY: 'c'.repeat(64),
+    QUEUE_AUTH_KEY: 'b'.repeat(64),
+    PUBSUB_PROJECT_ID: 'test-project',
+    PUBSUB_SUBSCRIPTION: 'test-subscription',
+    PUBSUB_API_ENDPOINT: '127.0.0.1:8086',
+  });
+  assert.equal(ledgerConfig().apiKey, 'c'.repeat(64));
+  assert.equal(activityListenerConfig().pubsubSubscription, 'test-subscription');
+  process.env.NODE_ENV = 'production';
+  process.env.LEDGER_API_KEY = 'b'.repeat(64);
+  process.env.QUEUE_AUTH_KEY = 'b'.repeat(64);
+  assert.throws(() => ledgerConfig(), /distinct ledger API key/);
+  process.env.NODE_ENV = 'test';
   assert.equal(signerConfig().seedId, 'test');
   delete process.env.SIGNER_SEED_FILE;
   delete process.env.SIGNER_SEED_ID;

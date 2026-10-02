@@ -35,14 +35,34 @@ export interface NetworkConfig {
   solanaGenesisHash: string;
   chainNetworks?: ChainNetworkMap;
 }
+
+export interface ChainObservation {
+  state: 'observed' | 'finalized' | 'failed' | 'reverted';
+  blockHash?: string;
+  blockHeight?: string;
+  feeAmount?: string;
+}
+
 export class RpcFailure extends BadGatewayException {
   constructor(readonly rpcCode?: number) {
     super('Blockchain RPC operation failed');
   }
 }
+
+export interface ChainObservation {
+  state: 'observed' | 'finalized' | 'failed' | 'reverted';
+  blockHash?: string;
+  blockHeight?: string;
+  feeAmount?: string;
+}
+
 @Injectable()
 export class ChainRpcService {
   constructor(@Inject(networkConfig.KEY) private readonly config: NetworkConfig) {}
+
+  networkIdentity(chain: Chain) {
+    return this.networkSettings(chain).network;
+  }
 
   protected networkSettings(chain: Chain): ChainNetworkSettings {
     const configured = this.config.chainNetworks?.[chain];
@@ -124,6 +144,98 @@ export class ChainRpcService {
       if ((await this.call(chain, 'getGenesisHash', [])) !== settings.genesisHash)
         throw new BadGatewayException('Solana RPC network mismatch');
     }
+  }
+
+  async observeTransaction(chain: Chain, hash: string): Promise<ChainObservation> {
+    await this.verifyNetwork(chain);
+    const settings = this.networkSettings(chain);
+    if (isEvmChain(chain)) {
+      const raw = await this.call(chain, 'eth_getTransactionReceipt', [hash]);
+      if (raw === null) return { state: 'observed' };
+      const receipt = z
+        .object({
+          blockHash: z.string(),
+          blockNumber: hex,
+          status: z.enum(['0x0', '0x1']),
+          gasUsed: hex,
+          effectiveGasPrice: hex.optional(),
+        })
+        .parse(raw);
+      const head = hex.parse(await this.call(chain, 'eth_blockNumber', []));
+      const confirmations = BigInt(head) - BigInt(receipt.blockNumber) + 1n;
+      const feeAmount = receipt.effectiveGasPrice
+        ? (BigInt(receipt.gasUsed) * BigInt(receipt.effectiveGasPrice)).toString()
+        : undefined;
+      if (confirmations < BigInt(settings.confirmations ?? 12))
+        return {
+          state: 'observed',
+          blockHash: receipt.blockHash,
+          blockHeight: BigInt(receipt.blockNumber).toString(),
+          feeAmount,
+        };
+      return {
+        state: receipt.status === '0x1' ? 'finalized' : 'failed',
+        blockHash: receipt.blockHash,
+        blockHeight: BigInt(receipt.blockNumber).toString(),
+        feeAmount,
+      };
+    }
+    if (isBitcoinChain(chain)) {
+      try {
+        const transaction = z
+          .object({
+            confirmations: z.number().int(),
+            blockhash: z.string().optional(),
+            blockheight: z.number().int().nonnegative().optional(),
+          })
+          .parse(await this.call(chain, 'getrawtransaction', [hash, true]));
+        if (transaction.confirmations < 0) return { state: 'reverted' };
+        return {
+          state:
+            transaction.confirmations >= (settings.confirmations ?? 6) ? 'finalized' : 'observed',
+          ...(transaction.blockhash ? { blockHash: transaction.blockhash } : {}),
+          ...(transaction.blockheight !== undefined
+            ? { blockHeight: String(transaction.blockheight) }
+            : {}),
+        };
+      } catch (error) {
+        if (error instanceof RpcFailure && error.rpcCode === -5) return { state: 'observed' };
+        throw error;
+      }
+    }
+
+    const result = z
+      .object({
+        value: z.array(
+          z
+            .object({
+              err: z.unknown(),
+              confirmationStatus: z.string().nullable(),
+              slot: z.number().int().nonnegative(),
+            })
+            .nullable(),
+        ),
+      })
+      .parse(
+        await this.call(chain, 'getSignatureStatuses', [
+          [hash],
+          { searchTransactionHistory: true },
+        ]),
+      );
+    const status = result.value[0];
+    if (!status) return { state: 'observed' };
+    if (status.confirmationStatus !== 'finalized')
+      return { state: 'observed', blockHeight: String(status.slot) };
+    const block = await this.call(chain, 'getBlock', [
+      status.slot,
+      { commitment: 'finalized', rewards: false, transactionDetails: 'none' },
+    ]);
+    const blockHash = z.object({ blockhash: z.string() }).safeParse(block);
+    return {
+      state: status.err ? 'failed' : 'finalized',
+      blockHeight: String(status.slot),
+      ...(blockHash.success ? { blockHash: blockHash.data.blockhash } : {}),
+    };
   }
 
   async prepare(address: string, transfer: Transfer): Promise<SignRequest['transaction']> {

@@ -59,6 +59,8 @@ export class OutboxRelay implements OnModuleInit, OnModuleDestroy {
     @InjectQueue(QUEUES.wallet) private readonly wallet: Queue,
     @InjectQueue(QUEUES.signer) private readonly signer: Queue,
     @InjectQueue(QUEUES.broadcast) private readonly broadcast: Queue,
+    @InjectQueue(QUEUES.activity) private readonly activity: Queue,
+    @InjectQueue(QUEUES.ledger) private readonly ledger: Queue,
     @Inject(queueConfig.KEY) private readonly config: Pick<QueueConfig, 'outboxIntervalMs'>,
   ) {}
 
@@ -95,6 +97,8 @@ export class OutboxRelay implements OnModuleInit, OnModuleDestroy {
           [QUEUES.wallet]: this.wallet,
           [QUEUES.signer]: this.signer,
           [QUEUES.broadcast]: this.broadcast,
+          [QUEUES.activity]: this.activity,
+          [QUEUES.ledger]: this.ledger,
         }[row.queue];
         if (!queue) throw new Error('Unknown outbox queue');
         const payload = messageSchema.parse(row.payload);

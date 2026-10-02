@@ -36,7 +36,7 @@ export default tseslint.config(
       ],
     },
   },
-  ...['wallet', 'broadcast', 'signer'].map((application) => ({
+  ...['wallet', 'broadcast', 'signer', 'activity-listener', 'ledger'].map((application) => ({
     files: [`apps/${application}/src/**/*.ts`],
     rules: {
       'no-restricted-imports': [

@@ -23,7 +23,8 @@ async function setup() {
       '.env',
       template
         .replace('REPLACE_WITH_RANDOM_32_BYTE_TOKEN', randomBytes(32).toString('hex'))
-        .replace('REPLACE_WITH_A_DIFFERENT_RANDOM_TOKEN', randomBytes(32).toString('hex')),
+        .replace('REPLACE_WITH_A_DIFFERENT_RANDOM_TOKEN', randomBytes(32).toString('hex'))
+        .replace('REPLACE_WITH_A_THIRD_RANDOM_TOKEN', randomBytes(32).toString('hex')),
       { mode: 0o600, flag: 'wx' },
     );
     console.log(

@@ -7,7 +7,7 @@ async function main() {
   const [action, name, id] = process.argv.slice(2);
   if (!Object.values(QUEUES).some((q) => q === name) || !['failed', 'retry'].includes(action))
     throw new Error(
-      'Usage: npm run queue -- failed|retry wallet-actions|signer-actions|broadcast-actions [job-id]',
+      'Usage: npm run queue -- failed|retry wallet-actions|signer-actions|broadcast-actions|activity-actions|ledger-actions [job-id]',
     );
   const queue = new Queue(name, {
     connection: { ...connection(required('REDIS_URL')), maxRetriesPerRequest: 1 },

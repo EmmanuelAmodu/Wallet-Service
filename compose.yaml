@@ -29,6 +29,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  ledger-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ledger
+      POSTGRES_PASSWORD: ledger_local_only
+      POSTGRES_DB: ledger
+    ports:
+      - '127.0.0.1:5434:5432'
+    volumes:
+      - ledger-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ledger -d ledger']
+      interval: 5s
+      timeout: 3s
+      retries: 10
   redis:
     image: redis:7.4-alpine
     command:
@@ -50,7 +65,22 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  pubsub:
+    image: google/cloud-sdk:emulators
+    command:
+      [
+        'gcloud',
+        'beta',
+        'emulators',
+        'pubsub',
+        'start',
+        '--host-port=0.0.0.0:8086',
+        '--project=wallet-local',
+      ]
+    ports:
+      - '127.0.0.1:8086:8086'
 volumes:
   postgres-data:
   broadcast-postgres-data:
+  ledger-postgres-data:
   redis-data:
