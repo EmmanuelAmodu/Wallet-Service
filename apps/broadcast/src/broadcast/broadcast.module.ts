@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
-import { MessagingModule } from '../../../../packages/queue/src/messaging.module';
-import { BroadcastPrismaModule } from '../prisma/prisma.module';
-import { BroadcastProcessor } from './broadcast.processor';
-import { BroadcastService } from './broadcast.service';
-import { BroadcastRpcService } from './broadcast-rpc.service';
+import { MessagingModule } from '../../../../packages/queue/src/messaging.module.js';
+import { BroadcastPrismaModule } from '../prisma/prisma.module.js';
+import { BroadcastProcessor } from './broadcast.processor.js';
+import { BroadcastService } from './broadcast.service.js';
+import { BroadcastRpcService } from './broadcast-rpc.service.js';
 @Module({
   imports: [MessagingModule, BroadcastPrismaModule],
   providers: [BroadcastProcessor, BroadcastService, BroadcastRpcService],

@@ -1,9 +1,9 @@
-import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error';
+import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { Inject, BeforeApplicationShutdown } from '@nestjs/common';
 import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, Queue, UnrecoverableError } from 'bullmq';
-import { Message, MessageAuth, QUEUES } from '../../../../packages/queue/src/messages';
-import { SigningService } from './signing.service';
+import { Message, MessageAuth, QUEUES } from '../../../../packages/queue/src/messages.js';
+import { SigningService } from './signing.service.js';
 
 @Processor(QUEUES.signer, { concurrency: 1 })
 export class SignerProcessor extends WorkerHost implements BeforeApplicationShutdown {
@@ -14,9 +14,11 @@ export class SignerProcessor extends WorkerHost implements BeforeApplicationShut
   ) {
     super();
   }
+
   async beforeApplicationShutdown() {
     await this.worker.close();
   }
+
   async process(job: Job) {
     let action: Message;
     try {

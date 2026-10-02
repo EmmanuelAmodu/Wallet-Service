@@ -2,13 +2,13 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Job, Queue } from 'bullmq';
-import { BroadcastPrismaService } from '../apps/broadcast/src/prisma/prisma.service';
-import { migrate } from '../scripts/migrate';
-import { BroadcastService } from '../apps/broadcast/src/broadcast/broadcast.service';
-import { BroadcastProcessor } from '../apps/broadcast/src/broadcast/broadcast.processor';
-import { BroadcastRpcService } from '../apps/broadcast/src/broadcast/broadcast-rpc.service';
-import { OutboxRelay, enqueue } from '../packages/queue/src/outbox.service';
-import { MessageAuth, Message, QUEUES } from '../packages/queue/src/messages';
+import { BroadcastPrismaService } from '../apps/broadcast/src/prisma/prisma.service.js';
+import { migrate } from '../scripts/migrate.js';
+import { BroadcastService } from '../apps/broadcast/src/broadcast/broadcast.service.js';
+import { BroadcastProcessor } from '../apps/broadcast/src/broadcast/broadcast.processor.js';
+import { BroadcastRpcService } from '../apps/broadcast/src/broadcast/broadcast-rpc.service.js';
+import { OutboxRelay, enqueue } from '../packages/queue/src/outbox.service.js';
+import { MessageAuth, Message, QUEUES } from '../packages/queue/src/messages.js';
 
 const enabled = !!process.env.TEST_BROADCAST_DATABASE_URL;
 const db = enabled
@@ -38,6 +38,7 @@ after(async () => {
   }
 });
 const snapshot = { chain: 'ethereum' as const, network: '11155111', signed };
+
 async function fixture() {
   const id = randomUUID();
   ids.push(id);
@@ -50,6 +51,7 @@ async function fixture() {
     },
   });
 }
+
 function job(message: Message, attemptsMade = 0) {
   const id = randomUUID();
   return {
@@ -60,6 +62,7 @@ function job(message: Message, attemptsMade = 0) {
     opts: { attempts: 8 },
   } as unknown as Job;
 }
+
 function worker(rpc: Partial<BroadcastRpcService>, overrides: Partial<typeof config> = {}) {
   return new BroadcastProcessor(
     new BroadcastService(db as BroadcastPrismaService, rpc as BroadcastRpcService, {
@@ -69,6 +72,7 @@ function worker(rpc: Partial<BroadcastRpcService>, overrides: Partial<typeof con
     auth,
   );
 }
+
 test(
   'broadcast gate and retry exhaustion preserve signed bytes and publish attention events',
   { skip: !enabled },

@@ -1,6 +1,6 @@
 import { registerAs, ConfigType } from '@nestjs/config';
-import { integerSetting, required } from '../../shared/src/config';
-import { token } from '../../shared/src/security/tokens';
+import { integerSetting, required } from '../../shared/src/config.js';
+import { token } from '../../shared/src/security/tokens.js';
 
 export const queueConfig = registerAs('queue', () => ({
   redisUrl: required('REDIS_URL'),

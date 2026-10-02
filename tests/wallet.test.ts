@@ -1,16 +1,17 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { WalletWorkflowService } from '../apps/wallet/src/messaging/wallet-workflow.service';
-import { TransactionsService } from '../apps/wallet/src/transactions/transactions.service';
-import { WalletProcessor } from '../apps/wallet/src/messaging/wallet.processor';
-import { ChainRpcService } from '../packages/chain/src/chain-rpc.service';
+import { WalletWorkflowService } from '../apps/wallet/src/messaging/wallet-workflow.service.js';
+import { TransactionsService } from '../apps/wallet/src/transactions/transactions.service.js';
+import { WalletProcessor } from '../apps/wallet/src/messaging/wallet.processor.js';
+import { ChainRpcService } from '../packages/chain/src/chain-rpc.service.js';
 import { Job } from 'bullmq';
-import { WalletPrismaService, createDatabase } from '../apps/wallet/src/prisma/prisma.service';
-import { migrate } from '../scripts/migrate';
-import { WalletsService } from '../apps/wallet/src/wallets/wallets.service';
-import { Transfer } from '../packages/shared/src/contracts';
-import { Message, MessageAuth, QUEUES } from '../packages/queue/src/messages';
+import { WalletPrismaService, createDatabase } from '../apps/wallet/src/prisma/prisma.service.js';
+import { migrate } from '../scripts/migrate.js';
+import { WalletsService } from '../apps/wallet/src/wallets/wallets.service.js';
+import { Transfer } from '../packages/shared/src/contracts.js';
+import { Message, MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 
 const enabled = !!process.env.TEST_DATABASE_URL;
 const db = enabled ? createDatabase(process.env.TEST_DATABASE_URL!) : undefined;
@@ -25,6 +26,56 @@ const intent: Transfer = {
   maxFeePerGas: '2',
   maxPriorityFeePerGas: '1',
 };
+
+test('confirmation refresh is limited to attention and never resends signed bytes', async () => {
+  const outboxRows: { queue: string; payload: Message; dedupe_key: string }[] = [];
+  const transaction = {
+    id: randomUUID(),
+    status: 'attention',
+    signed: { raw: '0x1234', txHash: '0x' + 'ab'.repeat(32), encoding: 'hex' },
+    broadcast_generation: 4,
+    prepared: null,
+    wallet: { chain: 'ethereum', network: '11155111' },
+  };
+  const transactionDb = {
+    $queryRaw: async () => [],
+    transaction: { findFirst: async () => transaction },
+    outbox: {
+      upsert: async ({ create }: { create: (typeof outboxRows)[number] }) => {
+        outboxRows.push(create);
+        return create;
+      },
+    },
+  };
+  const database = {
+    $transaction: async (operation: (db: typeof transactionDb) => Promise<unknown>) =>
+      operation(transactionDb),
+  } as unknown as PrismaClient;
+  const service = new TransactionsService(database, {
+    seedId: 'test',
+    ethereumChainId: '11155111',
+    solanaGenesisHash: 'devnet',
+  });
+
+  for (const status of ['signed', 'queued', 'broadcasting', 'submitted']) {
+    transaction.status = status;
+    await assert.rejects(
+      () => service.requestRefresh('tenant', transaction.id),
+      /requiring attention/,
+    );
+  }
+  assert.equal(outboxRows.length, 0);
+
+  transaction.status = 'attention';
+  await service.requestRefresh('tenant', transaction.id);
+  assert.equal(outboxRows.length, 1);
+  assert.equal(outboxRows[0].queue, QUEUES.broadcast);
+  const payload = outboxRows[0].payload;
+  assert.equal(payload.type, 'broadcast.confirm');
+  if (payload.type === 'broadcast.confirm') assert.equal(payload.poll, 0);
+  assert.equal(transaction.status, 'attention');
+});
+
 before(async () => {
   if (db) {
     await migrate(process.env.TEST_DATABASE_URL!);
@@ -113,6 +164,7 @@ test(
     );
     assert(requests.every((t) => t.status === 'queued' && t.broadcast_generation === 1));
     assert.equal(await db!.outbox.count({ where: { dedupe_key: `broadcast-${tx.id}-1` } }), 1);
+    await assert.rejects(() => transactions.requestRefresh(tenant, tx.id), /requiring attention/);
     await db!.transaction.update({ where: { id: tx.id }, data: { status: 'attention' } });
     await assert.rejects(
       () => transactions.createTransaction(tenant, wallet.id, 'payment-2', intent),
@@ -158,7 +210,14 @@ test(
     await deliver(2, 2, 'attention');
     await deliver(1, 100, 'confirmed');
     assert.equal((await transactions.getTransaction(tenant, tx.id)).status, 'submitted');
+    await assert.rejects(() => transactions.requestRefresh(tenant, tx.id), /requiring attention/);
     await deliver(2, 4, 'attention');
+    const refreshed = await transactions.requestRefresh(tenant, tx.id);
+    assert.equal(refreshed.status, 'attention');
+    assert.equal(
+      await db!.outbox.count({ where: { dedupe_key: { contains: `refresh-${tx.id}-` } } }),
+      1,
+    );
     await assert.rejects(
       () => transactions.createTransaction(tenant, wallet.id, 'payment-2', intent),
       /pending transaction/,

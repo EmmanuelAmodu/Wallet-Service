@@ -1,9 +1,18 @@
 import { Inject, Injectable, BadGatewayException, BadRequestException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { Chain, SignRequest, SignedTransaction, Transfer } from '../../shared/src/contracts';
+import {
+  Chain,
+  chainFamily,
+  isBitcoinChain,
+  isEvmChain,
+  isSolanaChain,
+  SignRequest,
+  SignedTransaction,
+  Transfer,
+} from '../../shared/src/contracts.js';
 
-import { networkConfig } from './config';
+import { ChainNetworkMap, ChainNetworkSettings, networkConfig } from './config.js';
 
 const hex = z.string().regex(/^0x[0-9a-fA-F]+$/);
 export interface NetworkConfig {
@@ -14,6 +23,7 @@ export interface NetworkConfig {
   bitcoinPassword?: string;
   solanaUrl?: string;
   solanaGenesisHash: string;
+  chainNetworks?: ChainNetworkMap;
 }
 export class RpcFailure extends BadGatewayException {
   constructor(readonly rpcCode?: number) {
@@ -23,16 +33,47 @@ export class RpcFailure extends BadGatewayException {
 @Injectable()
 export class ChainRpcService {
   constructor(@Inject(networkConfig.KEY) private readonly config: NetworkConfig) {}
+
+  protected networkSettings(chain: Chain): ChainNetworkSettings {
+    const configured = this.config.chainNetworks?.[chain];
+    if (configured) return configured;
+    const family = chainFamily(chain);
+    if (family === 'ethereum' && chain === 'ethereum')
+      return {
+        network: this.config.ethereumChainId,
+        chainId: this.config.ethereumChainId,
+        rpcUrl: this.config.ethereumUrl,
+      };
+    if (family === 'bitcoin' && chain === 'bitcoin')
+      return {
+        network: 'mainnet',
+        rpcNetwork: 'main',
+        rpcUrl: this.config.bitcoinUrl,
+        rpcUser: this.config.bitcoinUser,
+        rpcPassword: this.config.bitcoinPassword,
+        confirmations: 6,
+      };
+    if (family === 'solana' && chain === 'solana')
+      return {
+        network: this.config.solanaGenesisHash,
+        genesisHash: this.config.solanaGenesisHash,
+        rpcUrl: this.config.solanaUrl,
+      };
+    throw new BadRequestException(`${chain} network is not configured`);
+  }
+
   async call(chain: Chain, method: string, params: unknown[]): Promise<unknown> {
-    const url = this.config[`${chain}Url`];
+    const settings = this.networkSettings(chain);
+    const family = chainFamily(chain);
+    const url = settings.rpcUrl;
     if (!url) throw new BadRequestException(`${chain} RPC is not configured`);
     const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (chain === 'bitcoin' && this.config.bitcoinUser)
+    const rpcUser = settings.rpcUser ?? (chain === 'bitcoin' ? this.config.bitcoinUser : undefined);
+    const rpcPassword =
+      settings.rpcPassword ?? (chain === 'bitcoin' ? this.config.bitcoinPassword : undefined);
+    if (family === 'bitcoin' && rpcUser)
       headers.authorization =
-        'Basic ' +
-        Buffer.from(`${this.config.bitcoinUser}:${this.config.bitcoinPassword ?? ''}`).toString(
-          'base64',
-        );
+        'Basic ' + Buffer.from(`${rpcUser}:${rpcPassword ?? ''}`).toString('base64');
     try {
       const id = randomUUID();
       const response = await fetch(url, {
@@ -56,25 +97,28 @@ export class ChainRpcService {
       throw new RpcFailure();
     }
   }
+
   async verifyNetwork(chain: Chain) {
-    if (chain === 'ethereum') {
+    const settings = this.networkSettings(chain);
+    if (isEvmChain(chain)) {
       const id = hex.parse(await this.call(chain, 'eth_chainId', []));
-      if (BigInt(id).toString() !== this.config.ethereumChainId)
-        throw new BadGatewayException('Ethereum RPC network mismatch');
-    } else if (chain === 'bitcoin') {
+      if (BigInt(id).toString() !== settings.chainId)
+        throw new BadGatewayException(`${chain} RPC network mismatch`);
+    } else if (isBitcoinChain(chain)) {
       const info = z
         .object({ chain: z.string() })
         .parse(await this.call(chain, 'getblockchaininfo', []));
-      if (info.chain !== 'main')
-        throw new BadGatewayException('Bitcoin v1 supports mainnet addresses only');
+      if (info.chain !== (settings.rpcNetwork ?? 'main'))
+        throw new BadGatewayException(`${chain} RPC network mismatch`);
     } else {
-      if ((await this.call(chain, 'getGenesisHash', [])) !== this.config.solanaGenesisHash)
+      if ((await this.call(chain, 'getGenesisHash', [])) !== settings.genesisHash)
         throw new BadGatewayException('Solana RPC network mismatch');
     }
   }
+
   async prepare(address: string, transfer: Transfer): Promise<SignRequest['transaction']> {
     await this.verifyNetwork(transfer.chain);
-    if (transfer.chain === 'ethereum') {
+    if ('to' in transfer) {
       const nonce = hex.parse(
         await this.call('ethereum', 'eth_getTransactionCount', [address, 'pending']),
       );
@@ -103,12 +147,12 @@ export class ChainRpcService {
         throw new BadRequestException('Insufficient ETH for value and maximum fee');
       return {
         ...transfer,
-        chainId: this.config.ethereumChainId,
+        chainId: this.networkSettings(transfer.chain).chainId!,
         nonce: BigInt(nonce).toString(),
         gasLimit,
       };
     }
-    if (transfer.chain === 'bitcoin') {
+    if ('utxos' in transfer) {
       if (new Set(transfer.utxos.map((u) => `${u.txid}:${u.vout}`)).size !== transfer.utxos.length)
         throw new BadRequestException('Duplicate UTXO');
       const utxos = [];
@@ -117,7 +161,7 @@ export class ChainRpcService {
         if (result === null) throw new BadRequestException('UTXO is unavailable or already spent');
         const u = z
           .object({
-            value: z.number().positive().max(21_000_000),
+            value: z.number().positive(),
             confirmations: z.number().int(),
             coinbase: z.boolean(),
             scriptPubKey: z.object({ hex: z.string().regex(/^[0-9a-f]+$/), address: z.string() }),
@@ -148,8 +192,9 @@ export class ChainRpcService {
       lastValidBlockHeight: result.value.lastValidBlockHeight,
     };
   }
+
   async preflight(chain: Chain, signed: SignedTransaction) {
-    if (chain !== 'solana') return;
+    if (!isSolanaChain(chain)) return;
     const result = z
       .object({ value: z.object({ err: z.unknown() }) })
       .parse(

@@ -1,6 +1,7 @@
 import { initWasm } from '@trustwallet/wallet-core';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
+
 async function setup() {
   for (const path of ['.env', 'secrets/local.mnemonic']) {
     const exists = await access(path).then(
@@ -32,6 +33,7 @@ async function setup() {
     wallet.delete();
   }
 }
+
 setup().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;

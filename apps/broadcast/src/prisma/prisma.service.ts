@@ -1,8 +1,14 @@
-import { broadcastConfig } from '../config/broadcast.config';
+import { broadcastConfig } from '../config/broadcast.config.js';
 import { ConfigType } from '@nestjs/config';
 import { Inject, Injectable, OnModuleInit, OnApplicationShutdown } from '@nestjs/common';
-import { PrismaClient } from '.prisma/broadcast-client';
+import { createRequire } from 'node:module';
+import type { PrismaClient as BroadcastPrismaClient } from '.prisma/broadcast-client';
 import { PrismaPg } from '@prisma/adapter-pg';
+
+const PrismaClient = createRequire(import.meta.url)('.prisma/broadcast-client')
+  .PrismaClient as new (
+  ...args: ConstructorParameters<typeof BroadcastPrismaClient>
+) => BroadcastPrismaClient;
 
 @Injectable()
 export class BroadcastPrismaService
@@ -22,9 +28,11 @@ export class BroadcastPrismaService
       transactionOptions: { maxWait: 10000, timeout: 10000 },
     });
   }
+
   async onModuleInit() {
     await this.$connect();
   }
+
   async onApplicationShutdown() {
     await this.$disconnect();
   }

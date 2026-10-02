@@ -1,9 +1,9 @@
-import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error';
+import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { BeforeApplicationShutdown } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, UnrecoverableError } from 'bullmq';
-import { MessageAuth, QUEUES } from '../../../../packages/queue/src/messages';
-import { BroadcastService } from './broadcast.service';
+import { MessageAuth, QUEUES } from '../../../../packages/queue/src/messages.js';
+import { BroadcastService } from './broadcast.service.js';
 
 @Processor(QUEUES.broadcast, { concurrency: 8 })
 export class BroadcastProcessor extends WorkerHost implements BeforeApplicationShutdown {
@@ -13,9 +13,11 @@ export class BroadcastProcessor extends WorkerHost implements BeforeApplicationS
   ) {
     super();
   }
+
   async beforeApplicationShutdown() {
     await this.worker.close();
   }
+
   async process(job: Job) {
     let message;
     try {

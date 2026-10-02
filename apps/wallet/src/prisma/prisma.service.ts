@@ -1,4 +1,4 @@
-import { walletConfig } from '../config/wallet.config';
+import { walletConfig } from '../config/wallet.config.js';
 import { ConfigType } from '@nestjs/config';
 import { Inject, Injectable, OnModuleInit, OnApplicationShutdown } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
@@ -34,9 +34,11 @@ export class WalletPrismaService
       transactionOptions: { maxWait: 10000, timeout: 10000 },
     });
   }
+
   async onModuleInit() {
     await this.$connect();
   }
+
   async onApplicationShutdown() {
     await this.$disconnect();
   }

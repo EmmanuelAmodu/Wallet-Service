@@ -7,18 +7,18 @@ import {
 } from '@nestjs/common';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
-import { WalletPrismaService } from '../prisma/prisma.service';
-import { lock, lockTransaction } from '../../../../packages/database/src/locks';
-import { Transfer } from '../../../../packages/shared/src/contracts';
+import { WalletPrismaService } from '../prisma/prisma.service.js';
+import { lock, lockTransaction } from '../../../../packages/database/src/locks.js';
+import { Transfer } from '../../../../packages/shared/src/contracts.js';
 import {
   broadcastSnapshotSchema,
   canonical,
   QUEUES,
-} from '../../../../packages/queue/src/messages';
-import { enqueue } from '../../../../packages/queue/src/outbox.service';
-import { networkFor } from '../../../../packages/chain/src/config';
+} from '../../../../packages/queue/src/messages.js';
+import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
+import { networkFor } from '../../../../packages/chain/src/config.js';
 
-import { walletConfig, WalletConfig } from '../config/wallet.config';
+import { walletConfig, WalletConfig } from '../config/wallet.config.js';
 
 export const pendingStatuses = [
   'preparing',
@@ -35,6 +35,7 @@ export class TransactionsService {
     @Inject(WalletPrismaService) readonly db: PrismaClient,
     @Inject(walletConfig.KEY) private readonly config: WalletConfig,
   ) {}
+
   async createTransaction(
     tenant: string,
     walletId: string,
@@ -86,11 +87,13 @@ export class TransactionsService {
       return tx;
     });
   }
+
   async getTransaction(tenant: string, id: string) {
     const tx = await this.db.transaction.findFirst({ where: { id, tenant_id: tenant } });
     if (!tx) throw new NotFoundException('Transaction not found');
     return tx;
   }
+
   private snapshot(tx: {
     wallet: { chain: string; network: string };
     signed: unknown;
@@ -106,6 +109,7 @@ export class TransactionsService {
         : {}),
     });
   }
+
   async requestBroadcast(tenant: string, id: string) {
     return this.db.$transaction(async (db) => {
       await lockTransaction(db, id);
@@ -141,6 +145,7 @@ export class TransactionsService {
       return updated;
     });
   }
+
   async requestRefresh(tenant: string, id: string) {
     return this.db.$transaction(async (db) => {
       await lockTransaction(db, id);
@@ -150,8 +155,10 @@ export class TransactionsService {
       });
       if (!tx) throw new NotFoundException('Transaction not found');
       if (['confirmed', 'failed'].includes(tx.status)) return tx;
-      if (!tx.signed || !['queued', 'broadcasting', 'submitted', 'attention'].includes(tx.status))
-        throw new ConflictException('Transaction has not been queued for broadcast');
+      if (!tx.signed || tx.status !== 'attention')
+        throw new ConflictException(
+          'Confirmation monitoring can only be restarted for transactions requiring attention',
+        );
       await enqueue(
         db,
         QUEUES.broadcast,

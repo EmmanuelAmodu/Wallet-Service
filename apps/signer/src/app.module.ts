@@ -1,8 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { queueConfig } from '../../../packages/queue/src/queue.config';
-import { signerConfig } from './config/signer.config';
-import { SigningModule } from './signing/signing.module';
+import { queueConfig } from '../../../packages/queue/src/queue.config.js';
+import { signerConfig } from './config/signer.config.js';
+import { SigningModule } from './signing/signing.module.js';
 
 @Module({
   imports: [

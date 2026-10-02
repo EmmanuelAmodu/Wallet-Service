@@ -1,16 +1,121 @@
 import { z } from 'zod';
 
-export const chainSchema = z.enum(['ethereum', 'bitcoin', 'solana']);
+export const evmChains = [
+  'callisto',
+  'ethereum',
+  'ethereumClassic',
+  'goChain',
+  'poanetwork',
+  'thunderCore',
+  'viction',
+  'wanchain',
+  'smartChainLegacy',
+  'smartChain',
+  'polygon',
+  'optimism',
+  'zksync',
+  'arbitrum',
+  'ecochain',
+  'avalancheCChain',
+  'xdai',
+  'fantom',
+  'celo',
+  'cronosChain',
+  'smartBitcoinCash',
+  'kuCoinCommunityChain',
+  'boba',
+  'metis',
+  'aurora',
+  'evmos',
+  'moonriver',
+  'moonbeam',
+  'kavaEvm',
+  'kaia',
+  'meter',
+  'okxchain',
+  'polygonzkEVM',
+  'ioTeXEVM',
+  'scroll',
+  'rootstock',
+  'thetaFuel',
+  'confluxeSpace',
+  'acalaEVM',
+  'opBNB',
+  'neon',
+  'base',
+  'arbitrumNova',
+  'linea',
+  'mantle',
+  'zenEON',
+  'mantaPacific',
+  'zetaEVM',
+  'merlin',
+  'lightlink',
+  'blast',
+  'bounceBit',
+  'zkLinkNova',
+  'sonic',
+  'plasma',
+  'monad',
+  'megaETH',
+  'seiEVM',
+  'hyperEVM',
+  'robinhoodChain',
+  'arc',
+] as const;
+export const bitcoinChains = [
+  'bitcoin',
+  'bitcoinGold',
+  'pivx',
+  'dash',
+  'digiByte',
+  'dogecoin',
+  'litecoin',
+  'monacoin',
+  'qtum',
+  'viacoin',
+  'firo',
+  'ravencoin',
+  'syscoin',
+  'stratis',
+  'bitcoinCash',
+  'ecash',
+] as const;
+export const solanaChains = ['solana'] as const;
+export const supportedChains = [...evmChains, ...bitcoinChains, ...solanaChains] as const;
+export const chainSchema = z.enum(supportedChains);
 export type Chain = z.infer<typeof chainSchema>;
+export type EvmChain = (typeof evmChains)[number];
+export type BitcoinChain = (typeof bitcoinChains)[number];
+export type SolanaChain = (typeof solanaChains)[number];
+export type ChainFamily = 'ethereum' | 'bitcoin' | 'solana';
+
+const evmChainSet = new Set<string>(evmChains);
+const bitcoinChainSet = new Set<string>(bitcoinChains);
+export function isEvmChain(chain: Chain): chain is EvmChain {
+  return evmChainSet.has(chain);
+}
+
+export function isBitcoinChain(chain: Chain): chain is BitcoinChain {
+  return bitcoinChainSet.has(chain);
+}
+
+export function isSolanaChain(chain: Chain): chain is SolanaChain {
+  return (solanaChains as readonly string[]).includes(chain);
+}
+
+export function chainFamily(chain: Chain): ChainFamily {
+  if (isEvmChain(chain)) return 'ethereum';
+  if (isBitcoinChain(chain)) return 'bitcoin';
+  return 'solana';
+}
+
 const uint = z
   .string()
   .regex(/^(0|[1-9][0-9]*)$/)
   .max(78)
   .pipe(z.string().refine((v) => BigInt(v) < 1n << 256n, 'Exceeds uint256'));
 const positive = uint.pipe(z.string().refine((v) => BigInt(v) > 0n, 'Must be positive'));
-const sats = positive.pipe(
-  z.string().refine((v) => BigInt(v) <= 2_100_000_000_000_000n, 'Exceeds Bitcoin supply'),
-);
 const u64 = positive.pipe(
   z.string().refine((v) => BigInt(v) <= 18_446_744_073_709_551_615n, 'Exceeds uint64'),
 );
@@ -28,7 +133,7 @@ export const walletRequest = z
 export const transferSchema = z.discriminatedUnion('chain', [
   z
     .object({
-      chain: z.literal('ethereum'),
+      chain: z.enum(evmChains),
       to: ethAddress,
       amount: positive,
       maxFeePerGas: positive,
@@ -37,9 +142,9 @@ export const transferSchema = z.discriminatedUnion('chain', [
     .strict(),
   z
     .object({
-      chain: z.literal('bitcoin'),
+      chain: z.enum(bitcoinChains),
       outputs: z
-        .array(z.object({ address, amount: sats }).strict())
+        .array(z.object({ address, amount: u64 }).strict())
         .min(1)
         .max(50),
       utxos: z.array(outpoint).min(1).max(100),
@@ -48,7 +153,7 @@ export const transferSchema = z.discriminatedUnion('chain', [
     .strict(),
   z
     .object({
-      chain: z.literal('solana'),
+      chain: z.enum(solanaChains),
       outputs: z
         .array(z.object({ address, amount: u64 }).strict())
         .min(1)
@@ -68,7 +173,7 @@ export const signSchema = z
     transaction: z.discriminatedUnion('chain', [
       z
         .object({
-          chain: z.literal('ethereum'),
+          chain: z.enum(evmChains),
           chainId: positive,
           nonce: uint,
           to: ethAddress,
@@ -80,15 +185,15 @@ export const signSchema = z
         .strict(),
       z
         .object({
-          chain: z.literal('bitcoin'),
+          chain: z.enum(bitcoinChains),
           outputs: z
-            .array(z.object({ address, amount: sats }).strict())
+            .array(z.object({ address, amount: u64 }).strict())
             .min(1)
             .max(50),
           utxos: z
             .array(
               outpoint.extend({
-                amount: sats,
+                amount: u64,
                 script: z
                   .string()
                   .regex(/^[0-9a-f]+$/)
@@ -102,7 +207,7 @@ export const signSchema = z
         .strict(),
       z
         .object({
-          chain: z.literal('solana'),
+          chain: z.enum(solanaChains),
           outputs: z
             .array(z.object({ address, amount: u64 }).strict())
             .min(1)

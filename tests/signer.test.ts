@@ -5,22 +5,32 @@ const bitcoinPromise = import('bitcoinjs-lib');
 let bitcoin: Awaited<typeof bitcoinPromise>;
 import { verify } from '@bitcoinerlab/secp256k1';
 import { createPublicKey, verify as verifyEd25519 } from 'node:crypto';
-import { SigningCore } from '../apps/signer/src/signing/signing.core';
-import { derivationPath, signSchema, transferSchema } from '../packages/shared/src/contracts';
+import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
+import { initWasm } from '@trustwallet/wallet-core';
+import {
+  derivationPath,
+  signSchema,
+  supportedChains,
+  transferSchema,
+} from '../packages/shared/src/contracts.js';
 
 // Public BIP39 test vector. Never use this phrase for funds.
 const mnemonic =
   'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about';
 let core: SigningCore;
+let walletCore: Awaited<ReturnType<typeof initWasm>>;
 before(async () => {
   bitcoin = await bitcoinPromise;
+  walletCore = await initWasm();
   core = await SigningCore.create(mnemonic, 'test', '11155111');
 });
 after(() => core.close());
+
 function wallet(chain: 'ethereum' | 'bitcoin' | 'solana') {
   const { path: _path, ...w } = core.derive({ chain, account: 0, seedId: 'test' });
   return w;
 }
+
 test('canonical BIP44/BIP84 and fully hardened Solana derivation', () => {
   assert.equal(wallet('ethereum').address, '0x9858EfFD232B4033E47d90003D41EC34EcaEda94');
   assert.equal(wallet('bitcoin').address, 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu');
@@ -33,6 +43,66 @@ test('canonical BIP44/BIP84 and fully hardened Solana derivation', () => {
   assert.throws(() => derivationPath('ethereum', -1));
   assert.throws(() => derivationPath('ethereum', 2147483648));
 });
+
+test('every enabled Wallet Core coin derives a wallet address', () => {
+  for (const chain of supportedChains) {
+    const derived = core.derive({ chain, account: 0, seedId: 'test' });
+    assert.ok(derived.address, chain);
+    assert.ok(derived.path.startsWith('m/'), chain);
+  }
+});
+
+test('EVM family derives and signs Polygon transactions with its configured chain ID', async () => {
+  const evmCore = await SigningCore.create(mnemonic, 'test', '11155111', {
+    ethereum: '11155111',
+    polygon: '137',
+  });
+  try {
+    const { path, ...polygonWallet } = evmCore.derive({
+      chain: 'polygon',
+      account: 0,
+      seedId: 'test',
+    });
+    assert.equal(path, "m/44'/60'/0'/0/0");
+    const signed = evmCore.sign({
+      wallet: polygonWallet,
+      transaction: {
+        chain: 'polygon',
+        chainId: '137',
+        nonce: '0',
+        to: polygonWallet.address,
+        amount: '1',
+        gasLimit: '21000',
+        maxFeePerGas: '2',
+        maxPriorityFeePerGas: '1',
+      },
+    });
+    const parsed = EthTransaction.from(signed.raw);
+    assert.equal(parsed.from, polygonWallet.address);
+    assert.equal(parsed.chainId, 137n);
+    assert.equal(parsed.hash, signed.txHash);
+    assert.throws(
+      () =>
+        core.sign({
+          wallet: polygonWallet,
+          transaction: {
+            chain: 'polygon',
+            chainId: '137',
+            nonce: '0',
+            to: polygonWallet.address,
+            amount: '1',
+            gasLimit: '21000',
+            maxFeePerGas: '2',
+            maxPriorityFeePerGas: '1',
+          },
+        }),
+      /chain ID/,
+    );
+  } finally {
+    evmCore.close();
+  }
+});
+
 test('Ethereum EIP1559 bytes recover the expected signer and chain', () => {
   const w = wallet('ethereum');
   const signed = core.sign({
@@ -102,6 +172,38 @@ test('Bitcoin batch includes both recipients and correct change, with a valid Se
     ),
   );
 });
+
+test('Bitcoin Cash family signs using its coin-specific address and Wallet Core coin type', () => {
+  const { path: _path, ...cashWallet } = core.derive({
+    chain: 'bitcoinCash',
+    account: 0,
+    seedId: 'test',
+  });
+  const recipient = core.derive({ chain: 'bitcoinCash', account: 1, seedId: 'test' }).address;
+  const script = walletCore.BitcoinScript.lockScriptForAddress(
+    cashWallet.address,
+    walletCore.CoinType.bitcoinCash,
+  );
+  let ownScript: string;
+  try {
+    ownScript = Buffer.from(script.data()).toString('hex');
+  } finally {
+    script.delete();
+  }
+  const signed = core.sign({
+    wallet: cashWallet,
+    transaction: {
+      chain: 'bitcoinCash',
+      outputs: [{ address: recipient, amount: '10000' }],
+      utxos: [{ txid: '02'.repeat(32), vout: 0, amount: '100000', script: ownScript }],
+      satsPerVbyte: 2,
+    },
+  });
+  assert.equal(signed.encoding, 'hex');
+  assert.match(signed.raw, /^[0-9a-f]+$/);
+  assert.match(signed.txHash, /^[0-9a-f]{64}$/);
+});
+
 test('Solana signed transfer verifies and preserves lamports', () => {
   const w = wallet('solana');
   const signed = core.sign({

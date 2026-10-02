@@ -18,6 +18,22 @@ export default tseslint.config(
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
       ],
+      'max-len': [
+        'error',
+        {
+          code: 100,
+          ignoreComments: true,
+          ignoreStrings: true,
+          ignoreTemplateLiterals: true,
+          ignoreUrls: true,
+        },
+      ],
+      'lines-between-class-members': ['error', 'always', { exceptAfterSingleLine: true }],
+      'padding-line-between-statements': [
+        'error',
+        { blankLine: 'always', prev: '*', next: 'function' },
+        { blankLine: 'always', prev: 'function', next: '*' },
+      ],
     },
   },
   ...['wallet', 'broadcast', 'signer'].map((application) => ({

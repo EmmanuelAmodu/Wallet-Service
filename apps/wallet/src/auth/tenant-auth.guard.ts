@@ -5,9 +5,9 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { matches } from '../../../../packages/shared/src/security/tokens';
-import { walletConfig, WalletSettings } from '../config/wallet.config';
-import { TenantRequest } from './tenant.decorator';
+import { matches } from '../../../../packages/shared/src/security/tokens.js';
+import { walletConfig, WalletSettings } from '../config/wallet.config.js';
+import { TenantRequest } from './tenant.decorator.js';
 
 @Injectable()
 export class TenantAuthGuard implements CanActivate {

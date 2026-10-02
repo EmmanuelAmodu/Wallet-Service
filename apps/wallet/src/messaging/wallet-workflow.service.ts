@@ -1,14 +1,18 @@
 import { Inject, Injectable, HttpException } from '@nestjs/common';
-import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error';
+import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { Prisma } from '@prisma/client';
-import { WalletPrismaService } from '../prisma/prisma.service';
-import { lock, lockTransaction } from '../../../../packages/database/src/locks';
-import { Message, QUEUES } from '../../../../packages/queue/src/messages';
-import { enqueue } from '../../../../packages/queue/src/outbox.service';
-import { ChainRpcService } from '../../../../packages/chain/src/chain-rpc.service';
-import { networkFor } from '../../../../packages/chain/src/config';
-import { chainSchema, signSchema, transferSchema } from '../../../../packages/shared/src/contracts';
-import { walletConfig, WalletConfig } from '../config/wallet.config';
+import { WalletPrismaService } from '../prisma/prisma.service.js';
+import { lock, lockTransaction } from '../../../../packages/database/src/locks.js';
+import { Message, QUEUES } from '../../../../packages/queue/src/messages.js';
+import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
+import { ChainRpcService } from '../../../../packages/chain/src/chain-rpc.service.js';
+import { networkFor } from '../../../../packages/chain/src/config.js';
+import {
+  chainSchema,
+  signSchema,
+  transferSchema,
+} from '../../../../packages/shared/src/contracts.js';
+import { walletConfig, WalletConfig } from '../config/wallet.config.js';
 
 @Injectable()
 export class WalletWorkflowService {
@@ -17,6 +21,7 @@ export class WalletWorkflowService {
     @Inject(ChainRpcService) private readonly rpc: ChainRpcService,
     @Inject(walletConfig.KEY) private readonly config: WalletConfig,
   ) {}
+
   async handle(message: Message, messageId: string, finalAttempt: boolean) {
     if (message.type === 'transaction.prepare') {
       try {
@@ -101,6 +106,7 @@ export class WalletWorkflowService {
       await db.inbox.create({ data: { id: messageId } });
     });
   }
+
   private async prepare(id: string) {
     const tx = await this.db.transaction.findUnique({ where: { id }, include: { wallet: true } });
     if (!tx || tx.status !== 'preparing') return;

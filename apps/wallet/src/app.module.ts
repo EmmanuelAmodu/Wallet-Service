@@ -1,17 +1,17 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
-import { queueConfig } from '../../../packages/queue/src/queue.config';
-import { walletConfig } from './config/wallet.config';
-import { networkConfig } from '../../../packages/chain/src/config';
-import { OutboxModule } from '../../../packages/queue/src/outbox.module';
-import { WalletPrismaModule } from './prisma/prisma.module';
-import { WalletPrismaService } from './prisma/prisma.service';
+import { queueConfig } from '../../../packages/queue/src/queue.config.js';
+import { walletConfig } from './config/wallet.config.js';
+import { networkConfig } from '../../../packages/chain/src/config.js';
+import { OutboxModule } from '../../../packages/queue/src/outbox.module.js';
+import { WalletPrismaModule } from './prisma/prisma.module.js';
+import { WalletPrismaService } from './prisma/prisma.service.js';
 import { APP_FILTER } from '@nestjs/core';
-import { SafeErrorsFilter } from '../../../packages/shared/src/http/safe-errors.filter';
-import { AuthModule } from './auth/auth.module';
-import { WalletsModule } from './wallets/wallets.module';
-import { TransactionsModule } from './transactions/transactions.module';
-import { WalletMessagingModule } from './messaging/wallet-messaging.module';
+import { SafeErrorsFilter } from '../../../packages/shared/src/http/safe-errors.filter.js';
+import { AuthModule } from './auth/auth.module.js';
+import { WalletsModule } from './wallets/wallets.module.js';
+import { TransactionsModule } from './transactions/transactions.module.js';
+import { WalletMessagingModule } from './messaging/wallet-messaging.module.js';
 
 @Module({
   imports: [

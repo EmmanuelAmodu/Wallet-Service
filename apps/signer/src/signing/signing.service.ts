@@ -1,7 +1,7 @@
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
-import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error';
-import { Message } from '../../../../packages/queue/src/messages';
-import { SigningCore } from './signing.core';
+import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
+import { Message } from '../../../../packages/queue/src/messages.js';
+import { SigningCore } from './signing.core.js';
 
 @Injectable()
 export class SigningService implements OnApplicationShutdown {
@@ -33,6 +33,7 @@ export class SigningService implements OnApplicationShutdown {
     } else throw new ActionRejectedError('Unsupported signer action');
     return result;
   }
+
   onApplicationShutdown() {
     this.core.close();
   }

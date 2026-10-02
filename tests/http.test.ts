@@ -9,11 +9,11 @@ import { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { Transaction as EthTransaction } from 'ethers';
 import { Queue } from 'bullmq';
-import { BroadcastPrismaService } from '../apps/broadcast/src/prisma/prisma.service';
-import { createDatabase } from '../apps/wallet/src/prisma/prisma.service';
-import { migrate } from '../scripts/migrate';
-import { connection } from '../packages/queue/src/messaging.module';
-import { MessageAuth, QUEUES } from '../packages/queue/src/messages';
+import { BroadcastPrismaService } from '../apps/broadcast/src/prisma/prisma.service.js';
+import { createDatabase } from '../apps/wallet/src/prisma/prisma.service.js';
+import { migrate } from '../scripts/migrate.js';
+import { connection } from '../packages/queue/src/messaging.module.js';
+import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 
 async function freePort() {
   const server = createServer();
@@ -22,6 +22,7 @@ async function freePort() {
   await new Promise<void>((r) => server.close(() => r()));
   return port;
 }
+
 async function eventually<T>(
   read: () => Promise<T>,
   accept: (value: T) => boolean,
@@ -36,6 +37,7 @@ async function eventually<T>(
   } while (Date.now() - started < timeout);
   throw new Error('Timed out waiting for state: ' + JSON.stringify(last));
 }
+
 async function stop(child: ChildProcess) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   await new Promise<void>((r) => {
@@ -151,6 +153,7 @@ test(
     };
     const children: ChildProcess[] = [];
     let logs = '';
+
     function start(name: string, overrides: Record<string, string> = {}) {
       const child = spawn(process.execPath, [resolve(`dist/apps/${name}/src/main.js`)], {
         env: {
@@ -172,6 +175,7 @@ test(
       children.push(child);
       return child;
     }
+
     const queues = Object.values(QUEUES).map(
       (name) => new Queue(name, { connection: connection(process.env.TEST_REDIS_URL!), prefix }),
     );

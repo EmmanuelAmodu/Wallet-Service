@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../shared/src/contracts';
-import { matches, token } from '../../shared/src/security/tokens';
+import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../shared/src/contracts.js';
+import { matches, token } from '../../shared/src/security/tokens.js';
 
 export const QUEUES = {
   wallet: 'wallet-actions',
@@ -93,10 +93,12 @@ export class MessageAuth {
   constructor(private readonly key: string) {
     token(key);
   }
+
   seal(payload: Message, id: string = randomUUID()) {
     const body = { version: 1 as const, id, payload };
     return { ...body, mac: createHmac('sha256', this.key).update(canonical(body)).digest('hex') };
   }
+
   open(data: unknown, jobId: string, name: string): Message {
     const envelope = z
       .object({

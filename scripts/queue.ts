@@ -1,7 +1,7 @@
 import { Queue } from 'bullmq';
-import { connection } from '../packages/queue/src/messaging.module';
-import { QUEUES } from '../packages/queue/src/messages';
-import { required } from '../packages/shared/src/config';
+import { connection } from '../packages/queue/src/messaging.module.js';
+import { QUEUES } from '../packages/queue/src/messages.js';
+import { required } from '../packages/shared/src/config.js';
 
 async function main() {
   const [action, name, id] = process.argv.slice(2);
@@ -39,6 +39,7 @@ async function main() {
     await queue.close();
   }
 }
+
 main().catch((error) => {
   console.error(error instanceof Error ? error.message : 'Queue operation failed');
   process.exitCode = 1;

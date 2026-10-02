@@ -1,9 +1,9 @@
-import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error';
+import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { BeforeApplicationShutdown } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, UnrecoverableError } from 'bullmq';
-import { MessageAuth, QUEUES } from '../../../../packages/queue/src/messages';
-import { WalletWorkflowService } from './wallet-workflow.service';
+import { MessageAuth, QUEUES } from '../../../../packages/queue/src/messages.js';
+import { WalletWorkflowService } from './wallet-workflow.service.js';
 
 @Processor(QUEUES.wallet, { concurrency: 8 })
 export class WalletProcessor extends WorkerHost implements BeforeApplicationShutdown {
@@ -13,9 +13,11 @@ export class WalletProcessor extends WorkerHost implements BeforeApplicationShut
   ) {
     super();
   }
+
   async beforeApplicationShutdown() {
     await this.worker.close();
   }
+
   async process(job: Job) {
     let message;
     try {

@@ -1,6 +1,6 @@
 import { DynamicModule, Module, Type } from '@nestjs/common';
-import { MessagingModule } from './messaging.module';
-import { OUTBOX_DATABASE, OutboxRelay } from './outbox.service';
+import { MessagingModule } from './messaging.module.js';
+import { OUTBOX_DATABASE, OutboxRelay } from './outbox.service.js';
 
 @Module({})
 export class OutboxModule {

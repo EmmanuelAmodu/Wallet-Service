@@ -1,7 +1,8 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
-import { createDatabase } from '../apps/wallet/src/prisma/prisma.service';
-import { required } from '../packages/shared/src/config';
+import { pathToFileURL } from 'node:url';
+import { createDatabase } from '../apps/wallet/src/prisma/prisma.service.js';
+import { required } from '../packages/shared/src/config.js';
 
 export async function migrate(url: string, application: 'wallet' | 'broadcast' = 'wallet') {
   if (application === 'broadcast') {
@@ -25,6 +26,7 @@ export async function migrate(url: string, application: 'wallet' | 'broadcast' =
     await db.$disconnect();
   }
 }
+
 function run(args: string[], url: string, application = 'wallet') {
   const result = spawnSync(
     process.execPath,
@@ -41,7 +43,8 @@ function run(args: string[], url: string, application = 'wallet') {
   );
   if (result.status !== 0) throw new Error('Prisma migration command failed');
 }
-if (require.main === module) {
+
+if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
   const application = process.argv[2];
   const runMigrations = async () => {
     if (application && application !== 'wallet' && application !== 'broadcast')

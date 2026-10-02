@@ -5,14 +5,15 @@ import { randomUUID } from 'node:crypto';
 import { Global, Module } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
-import { AuthModule } from '../apps/wallet/src/auth/auth.module';
-import { WalletsModule } from '../apps/wallet/src/wallets/wallets.module';
-import { TransactionsModule } from '../apps/wallet/src/transactions/transactions.module';
-import { WalletsService } from '../apps/wallet/src/wallets/wallets.service';
-import { TransactionsService } from '../apps/wallet/src/transactions/transactions.service';
-import { WalletPrismaService } from '../apps/wallet/src/prisma/prisma.service';
-import { walletConfig, WalletSettings } from '../apps/wallet/src/config/wallet.config';
-import { SafeErrorsFilter } from '../packages/shared/src/http/safe-errors.filter';
+import { AuthModule } from '../apps/wallet/src/auth/auth.module.js';
+import { WalletsModule } from '../apps/wallet/src/wallets/wallets.module.js';
+import { TransactionsModule } from '../apps/wallet/src/transactions/transactions.module.js';
+import { WalletsService } from '../apps/wallet/src/wallets/wallets.service.js';
+import { TransactionsService } from '../apps/wallet/src/transactions/transactions.service.js';
+import { WalletPrismaService } from '../apps/wallet/src/prisma/prisma.service.js';
+import { walletConfig, WalletSettings } from '../apps/wallet/src/config/wallet.config.js';
+import { SafeErrorsFilter } from '../packages/shared/src/http/safe-errors.filter.js';
+import { setupOpenApi } from '../apps/wallet/src/openapi.js';
 
 const settings: WalletSettings = {
   apiKeys: { tenantA: 'a'.repeat(64), tenantB: 'b'.repeat(64) },
@@ -22,6 +23,7 @@ const settings: WalletSettings = {
   seedId: 'test',
   ethereumChainId: '11155111',
   solanaGenesisHash: 'devnet',
+  chainNetworks: {},
 };
 @Global()
 @Module({
@@ -57,6 +59,7 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
     })
     .compile();
   const app = module.createNestApplication({ logger: false });
+  setupOpenApi(app);
   await app.listen(0, '127.0.0.1');
   const base = await app.getUrl();
   const request = (path: string, body?: unknown, headers: Record<string, string> = {}) =>
@@ -67,6 +70,18 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
     });
   const authorization = `Bearer ${settings.apiKeys.tenantA}`;
   try {
+    const documentation = await request('/docs-json');
+    assert.equal(documentation.status, 200);
+    const openApi = await documentation.json();
+    assert.deepEqual(Object.keys(openApi.paths).sort(), [
+      '/v1/transactions/{id}',
+      '/v1/transactions/{id}/broadcast',
+      '/v1/transactions/{id}/refresh',
+      '/v1/wallets',
+      '/v1/wallets/{id}',
+      '/v1/wallets/{id}/transactions',
+    ]);
+    assert.ok(openApi.components.securitySchemes.tenantBearer);
     for (const value of ['', settings.apiKeys.tenantA, 'Bearer wrong']) {
       const response = await request(
         '/v1/wallets',

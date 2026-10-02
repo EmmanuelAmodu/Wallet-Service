@@ -52,11 +52,13 @@ The wallet worker deduplicates broadcast events and checks generation and revisi
 
 | Chain | Derivation | Implemented transfers | Network |
 | --- | --- | --- | --- |
-| Ethereum | `m/44'/60'/account'/0/0` | Native ETH, EIP-1559 | Configured chain ID; default Sepolia |
-| Bitcoin | `m/84'/0'/account'/0/0` | Native SegWit, 1–50 payment outputs plus change | Mainnet only |
+| EVM family (61 Wallet Core coin types) | Wallet Core coin path | Native asset, EIP-1559 | Configure each chain ID and RPC endpoint |
+| Bitcoin and Bitcoin Cash families (16 coin types) | Wallet Core coin path | Native UTXO transfers, 1–50 outputs plus change | Mainnet, Bitcoin Core-compatible RPC |
 | Solana | `m/44'/501'/account'/0'` | 1–20 native SOL transfer instructions, legacy transaction size checked | Configured genesis hash; default devnet |
 
-Bitcoin callers supply outpoints. The wallet service obtains values and scripts from the node and checks ownership, confirmation, and coinbase maturity. Wallet Core signs and constructs the batch/change outputs. UTXO discovery is not yet included.
+The default environment configures Sepolia, Bitcoin mainnet, and Solana devnet. Configure additional supported networks in `CHAIN_NETWORKS`, a JSON object keyed by Wallet Core chain name. EVM entries require `network`, `chainId`, and `rpcUrl`; Bitcoin-family entries require `network: "mainnet"` and a Bitcoin Core-compatible `rpcUrl`. The same map must be supplied to wallet, signer, and broadcast services; signer reads only EVM chain IDs. Optional settings include `rpcUser`, `rpcPassword`, `rpcNetwork`, and `confirmations`.
+
+For example, configure Polygon and Litecoin with `CHAIN_NETWORKS={"polygon":{"network":"137","chainId":"137","rpcUrl":"https://polygon-rpc.example"},"litecoin":{"network":"mainnet","rpcUrl":"http://127.0.0.1:9332","rpcUser":"wallet","rpcPassword":"replace-me"}}`. Only add endpoints you control or trust. Bitcoin-family callers supply outpoints; the wallet service obtains values and scripts from the node and checks ownership, confirmation, and coinbase maturity. UTXO discovery is not included. Validate each fork’s RPC compatibility and fee policy on a test network before production use.
 
 Ethereum atomic multi-recipient batching needs a batch contract or smart-account adapter, which is outside this version. ERC-20, SPL tokens, arbitrary calldata, multisig/Taproot, and cross-wallet batching are also outside this version.
 
@@ -64,7 +66,7 @@ Ethereum atomic multi-recipient batching needs a batch contract or smart-account
 
 ## Local setup
 
-Requires Node.js **22.13+ within Node 22, or Node 24+**, PostgreSQL 14+, and Redis 7+. Docker Compose provides PostgreSQL 17 and Redis 7.4 with AOF persistence, synchronous fsync, and `noeviction`.
+Requires Node.js **22.22.3+ within Node 22, 24.15+ within Node 24, or Node 26+**, PostgreSQL 14+, and Redis 7+. Docker Compose provides PostgreSQL 17 and Redis 7.4 with AOF persistence, synchronous fsync, and `noeviction`.
 
 ```sh
 npm ci
@@ -74,7 +76,7 @@ npm run migrate
 npm run build
 ```
 
-`setup:local` creates a fresh seed in `secrets/local.mnemonic` and distinct random tenant and queue credentials in `.env`, with private file permissions. It refuses to overwrite existing files. Configure the RPC URLs for the chains you use. Address derivation needs no RPC; transaction preparation does.
+`setup:local` creates a fresh seed in `secrets/local.mnemonic` and distinct random tenant and queue credentials in `.env`, with private file permissions. It refuses to overwrite existing files. Configure RPC URLs and `CHAIN_NETWORKS` for the chains you use. Address derivation uses Wallet Core metadata; transaction preparation requires the configured RPC endpoint.
 
 Run each service in a separate terminal:
 
@@ -86,7 +88,7 @@ npm run dev:broadcast
 
 These commands generate Prisma clients and run Nest CLI in watch mode. `npm run build` builds all applications; `npm run build:wallet`, `build:signer`, and `build:broadcast` build one application. Production start scripts are `start:wallet`, `start:signer`, and `start:broadcast`, with environment variables supplied externally.
 
-Only the wallet service exposes HTTP, at `127.0.0.1:3000` by default. Set `WALLET_HOST=0.0.0.0` inside a container when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
+Only the wallet service exposes HTTP, at `127.0.0.1:3000` by default. Interactive Swagger documentation is available at `/docs` and the OpenAPI JSON at `/docs-json`. Set `WALLET_HOST=0.0.0.0` inside a container when appropriate. `ALLOW_BROADCAST=false` is enforced by the **broadcast service**. An action submitted while broadcasting is disabled reaches `attention` without sending funds.
 
 ### Database configuration
 
@@ -108,6 +110,8 @@ Run `npm run migrate` before starting the new services. The migration wrapper re
 
 Tenant bearer keys remain configured with `WALLET_API_KEYS`, a JSON map from tenant ID to key. Tenant identity is derived from authentication, never from request bodies. `QUEUE_AUTH_KEY` must be different from tenant API keys.
 
+Swagger documents all six tenant-authenticated routes, accepted request shapes, asynchronous responses, and the required `Idempotency-Key` header for transfer creation.
+
 **Command endpoints now return `202 Accepted`, not a completed synchronous result.** Poll the corresponding GET endpoint. Wallet creation can return `address: null` with `status: deriving`; wait for `ready` before requesting a transfer.
 
 | Method | Route | Result |
@@ -117,7 +121,7 @@ Tenant bearer keys remain configured with `WALLET_API_KEYS`, a JSON map from ten
 | POST | `/v1/wallets/:id/transactions` | Accept preparation/signing; requires `Idempotency-Key` |
 | GET | `/v1/transactions/:id` | Intent, prepared/signed data, hash, status, attempt count, generic error |
 | POST | `/v1/transactions/:id/broadcast` | Queue broadcast, or retry an `attention` transaction with a new generation |
-| POST | `/v1/transactions/:id/refresh` | Queue a fresh confirmation-monitoring run |
+| POST | `/v1/transactions/:id/refresh` | Restart bounded confirmation monitoring for a signed `attention` transaction |
 
 For example:
 
@@ -168,7 +172,7 @@ transaction: preparing → signing → signed → queued → broadcasting → su
                    ↘ rejected                                  ↘ attention    ↘ failed
 ```
 
-`failed` denotes finalized on-chain failure. `attention` denotes retry exhaustion, disabled broadcasting, expired Solana blockhash, configuration mismatch, or exhausted monitoring; it **continues to reserve the wallet**. Refresh to discover the existing payment's outcome. After resolving the cause, request broadcast again to enqueue a new generation using the same signed bytes. A refresh gets its own monitoring-run ID, so old completed poll jobs cannot suppress it.
+`failed` denotes finalized on-chain failure. `attention` denotes retry exhaustion, disabled broadcasting, expired Solana blockhash, configuration mismatch, or exhausted monitoring; it **continues to reserve the wallet**. Refresh is available only in `attention` to start another bounded status-check run; queued, broadcasting, and submitted transactions continue their existing automatic polling. After resolving the cause, request broadcast again to enqueue a new generation using the same signed bytes. A refresh gets its own monitoring-run ID, so old completed poll jobs cannot suppress it.
 
 There is no automatic re-signing, fee replacement, reservation deletion, or assumption that a missing transaction failed. Stale-generation jobs cannot update a newer retry. If the original outcome cannot be established, keep the reservation and reconcile operationally.
 

@@ -1,19 +1,19 @@
-import { BroadcastPrismaService } from '../prisma/prisma.service';
+import { BroadcastPrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '.prisma/broadcast-client';
 import { Inject, Injectable } from '@nestjs/common';
-import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error';
-import { lock, lockTransaction } from '../../../../packages/database/src/locks';
+import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
+import { lock, lockTransaction } from '../../../../packages/database/src/locks.js';
 import {
   broadcastSnapshotSchema,
   canonical,
   Message,
   QUEUES,
-} from '../../../../packages/queue/src/messages';
-import { enqueue } from '../../../../packages/queue/src/outbox.service';
-import { networkFor } from '../../../../packages/chain/src/config';
-import { BroadcastRpcService } from './broadcast-rpc.service';
+} from '../../../../packages/queue/src/messages.js';
+import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
+import { networkFor } from '../../../../packages/chain/src/config.js';
+import { BroadcastRpcService } from './broadcast-rpc.service.js';
 
-import { broadcastConfig, BroadcastConfig } from '../config/broadcast.config';
+import { broadcastConfig, BroadcastConfig } from '../config/broadcast.config.js';
 
 type Action = Extract<Message, { type: 'broadcast.requested' | 'broadcast.confirm' }>;
 const active = ['queued', 'broadcasting', 'submitted', 'attention'];
@@ -24,6 +24,7 @@ export class BroadcastService {
     @Inject(BroadcastRpcService) private readonly rpc: BroadcastRpcService,
     @Inject(broadcastConfig.KEY) private readonly config: BroadcastConfig,
   ) {}
+
   async execute(message: Message, finalAttempt: boolean) {
     if (message.type !== 'broadcast.requested' && message.type !== 'broadcast.confirm')
       throw new ActionRejectedError('Unsupported broadcast action');
@@ -42,6 +43,7 @@ export class BroadcastService {
       throw new Error('Broadcast/confirmation RPC operation failed', { cause: error });
     }
   }
+
   private async accept(action: Action) {
     await this.db.$transaction(async (db) => {
       await lock(db, `broadcast-${action.transactionId}`);
@@ -77,6 +79,7 @@ export class BroadcastService {
       }
     });
   }
+
   private async emit(
     db: Prisma.TransactionClient,
     tx: {
@@ -104,6 +107,7 @@ export class BroadcastService {
       `broadcast-result-${tx.id}-${tx.broadcast_generation}-${tx.revision}`,
     );
   }
+
   private async change(action: Action, data: Prisma.TransactionUpdateInput) {
     await this.db.$transaction(async (db) => {
       await lockTransaction(db, action.transactionId);
@@ -120,6 +124,7 @@ export class BroadcastService {
       await this.emit(db, updated);
     });
   }
+
   private async handle(action: Action) {
     const tx = await this.db.transaction.findUnique({
       where: { id: action.transactionId },
@@ -168,6 +173,7 @@ export class BroadcastService {
     await this.rpc.broadcast(chain, signed);
     await this.record(action, 'submitted', 0);
   }
+
   private async record(
     action: Action,
     status?: 'submitted' | 'confirmed' | 'failed',

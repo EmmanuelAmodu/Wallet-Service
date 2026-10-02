@@ -3,8 +3,8 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
-import { Message, MessageAuth, messageSchema, QUEUES } from './messages';
-import { queueConfig, QueueConfig } from './queue.config';
+import { Message, MessageAuth, messageSchema, QUEUES } from './messages.js';
+import { queueConfig, QueueConfig } from './queue.config.js';
 
 export const OUTBOX_DATABASE = Symbol('OUTBOX_DATABASE');
 type OutboxRow = { id: string; queue: string; payload: unknown };
@@ -61,10 +61,12 @@ export class OutboxRelay implements OnModuleInit, OnModuleDestroy {
     @InjectQueue(QUEUES.broadcast) private readonly broadcast: Queue,
     @Inject(queueConfig.KEY) private readonly config: Pick<QueueConfig, 'outboxIntervalMs'>,
   ) {}
+
   onModuleInit() {
     this.timer = setInterval(() => this.tick(), this.config.outboxIntervalMs);
     this.tick();
   }
+
   private tick() {
     if (!this.running)
       this.running = this.flush()
@@ -75,10 +77,12 @@ export class OutboxRelay implements OnModuleInit, OnModuleDestroy {
           this.running = undefined;
         });
   }
+
   async onModuleDestroy() {
     if (this.timer) clearInterval(this.timer);
     await this.running;
   }
+
   async flush() {
     for (let count = 0; count < 50; count++) {
       const found = await this.db.$transaction(async (db) => {

@@ -1,14 +1,15 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { WalletPrismaService } from '../prisma/prisma.service';
-import { lock } from '../../../../packages/database/src/locks';
-import { Chain, derivationPath } from '../../../../packages/shared/src/contracts';
-import { canonical, QUEUES } from '../../../../packages/queue/src/messages';
-import { enqueue } from '../../../../packages/queue/src/outbox.service';
-import { networkFor } from '../../../../packages/chain/src/config';
+import { WalletPrismaService } from '../prisma/prisma.service.js';
+import { lock } from '../../../../packages/database/src/locks.js';
+import { Chain } from '../../../../packages/shared/src/contracts.js';
+import { canonical, QUEUES } from '../../../../packages/queue/src/messages.js';
+import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
+import { networkFor } from '../../../../packages/chain/src/config.js';
+import { getWalletCore, walletCoreMetadata } from '../../../../packages/chain/src/coin-metadata.js';
 
-import { walletConfig, WalletConfig } from '../config/wallet.config';
+import { walletConfig, WalletConfig } from '../config/wallet.config.js';
 
 @Injectable()
 export class WalletsService {
@@ -16,8 +17,10 @@ export class WalletsService {
     @Inject(WalletPrismaService) readonly db: PrismaClient,
     @Inject(walletConfig.KEY) private readonly config: WalletConfig,
   ) {}
+
   async createWallet(tenant: string, chain: Chain, externalId: string) {
     const network = networkFor(chain, this.config);
+    const core = await getWalletCore();
     return this.db.$transaction(async (db) => {
       await lock(db, canonical(['wallet', tenant, chain, network, externalId]));
       const existing = await db.wallet.findFirst({
@@ -29,6 +32,7 @@ export class WalletsService {
       >`SELECT nextval('wallet_account_seq') AS account`;
       const account = Number(sequence.account),
         id = randomUUID();
+      const path = walletCoreMetadata(core, chain, account).path;
       const wallet = await db.wallet.create({
         data: {
           id,
@@ -38,7 +42,7 @@ export class WalletsService {
           network,
           seed_id: this.config.seedId,
           account,
-          path: derivationPath(chain, account),
+          path,
           status: 'deriving',
         },
       });
@@ -55,6 +59,7 @@ export class WalletsService {
       return wallet;
     });
   }
+
   async getWallet(tenant: string, id: string) {
     const wallet = await this.db.wallet.findFirst({ where: { id, tenant_id: tenant } });
     if (!wallet) throw new NotFoundException('Wallet not found');

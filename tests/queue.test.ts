@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { MessageAuth } from '../packages/queue/src/messages';
+import { MessageAuth } from '../packages/queue/src/messages.js';
 
 test('queue envelopes reject tampering, wrong job IDs, action substitution and wrong keys', () => {
   const auth = new MessageAuth('a'.repeat(64));

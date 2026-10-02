@@ -1,6 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { integerSetting } from '../packages/shared/src/config';
+import {
+  chainNetworksFromEnv,
+  chainNetworkOverridesFromEnv,
+  networkFor,
+} from '../packages/chain/src/config.js';
+import { integerSetting } from '../packages/shared/src/config.js';
 
 test('integer settings use defaults and reject malformed or out-of-range values', (t) => {
   const original = process.env.TEST_INTEGER_SETTING;
@@ -24,6 +29,42 @@ test('integer settings use defaults and reject malformed or out-of-range values'
   assert.equal(integerSetting('TEST_INTEGER_SETTING', 3000, 1, 65535), 8080);
 });
 
+test('chain network settings require per-chain RPC and EVM chain identifiers', (t) => {
+  const original = process.env.CHAIN_NETWORKS;
+  t.after(() => {
+    if (original === undefined) delete process.env.CHAIN_NETWORKS;
+    else process.env.CHAIN_NETWORKS = original;
+  });
+
+  process.env.CHAIN_NETWORKS = JSON.stringify({
+    polygon: { network: '137', chainId: '137', rpcUrl: 'https://polygon.example' },
+    litecoin: { network: 'mainnet', rpcUrl: 'https://litecoin.example' },
+  });
+  const chainNetworks = chainNetworksFromEnv('11155111', 'devnet');
+  assert.equal(
+    networkFor('polygon', {
+      ethereumChainId: '11155111',
+      solanaGenesisHash: 'devnet',
+      chainNetworks,
+    }),
+    '137',
+  );
+  assert.equal(chainNetworks.litecoin.rpcUrl, 'https://litecoin.example');
+
+  process.env.CHAIN_NETWORKS = JSON.stringify({
+    polygon: { network: '137', rpcUrl: 'https://polygon.example' },
+  });
+  assert.throws(() => chainNetworkOverridesFromEnv(), /chainId/);
+
+  process.env.CHAIN_NETWORKS = JSON.stringify({
+    polygon: { network: '137', chainId: '137' },
+  });
+  assert.throws(() => chainNetworksFromEnv('11155111', 'devnet'), /rpcUrl/);
+
+  process.env.CHAIN_NETWORKS = '{';
+  assert.throws(() => chainNetworkOverridesFromEnv(), /valid JSON/);
+});
+
 test('application configuration is scoped and rejects unsafe settings at startup', async (t) => {
   const { walletConfig } = await import('../apps/wallet/src/config/wallet.config.js');
   const { broadcastConfig } = await import('../apps/broadcast/src/config/broadcast.config.js');
@@ -37,6 +78,7 @@ test('application configuration is scoped and rejects unsafe settings at startup
     'SIGNER_SEED_ID',
     'ETH_CHAIN_ID',
     'SOLANA_GENESIS_HASH',
+    'CHAIN_NETWORKS',
     'ALLOW_BROADCAST',
     'WALLET_PORT',
   ];

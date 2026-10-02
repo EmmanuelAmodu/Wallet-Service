@@ -1,8 +1,8 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bullmq';
 import { JobsOptions, ConnectionOptions } from 'bullmq';
-import { queueConfig, QueueConfig } from './queue.config';
-import { MessageAuth, QUEUES } from './messages';
+import { queueConfig, QueueConfig } from './queue.config.js';
+import { MessageAuth, QUEUES } from './messages.js';
 
 export function connection(url: string): ConnectionOptions {
   const parsed = new URL(url);

@@ -1,13 +1,16 @@
 import { BadRequestException } from '@nestjs/common';
 import { initWasm, TW, WalletCore } from '@trustwallet/wallet-core';
 import { readFileSync, statSync } from 'node:fs';
+import { walletCoreMetadata } from '../../../../packages/chain/src/coin-metadata.js';
 import {
   DeriveRequest,
-  derivationPath,
+  BitcoinChain,
+  EvmChain,
   SignedTransaction,
   SignRequest,
+  SolanaChain,
   signSchema,
-} from '../../../../packages/shared/src/contracts';
+} from '../../../../packages/shared/src/contracts.js';
 
 function bytes(value: string): Uint8Array {
   const n = BigInt(value);
@@ -16,20 +19,39 @@ function bytes(value: string): Uint8Array {
   if (hex.length % 2) hex = '0' + hex;
   return Buffer.from(hex, 'hex');
 }
+
 export class SigningCore {
   private constructor(
     private readonly core: WalletCore,
     private readonly hd: ReturnType<WalletCore['HDWallet']['createWithMnemonic']>,
     readonly seedId: string,
     readonly ethereumChainId: string,
+    readonly ethereumChainIds: Record<string, string>,
   ) {}
-  static async fromFile(path: string, seedId: string, ethereumChainId: string) {
+
+  static async fromFile(
+    path: string,
+    seedId: string,
+    ethereumChainId: string,
+    ethereumChainIds: Record<string, string> = { ethereum: ethereumChainId },
+  ) {
     const stat = statSync(path);
     if (!stat.isFile() || (stat.mode & 0o077) !== 0)
       throw new Error('Seed file must be a regular file with mode 0600 or stricter');
-    return this.create(readFileSync(path, 'utf8').trim(), seedId, ethereumChainId);
+    return this.create(
+      readFileSync(path, 'utf8').trim(),
+      seedId,
+      ethereumChainId,
+      ethereumChainIds,
+    );
   }
-  static async create(mnemonic: string, seedId: string, ethereumChainId: string) {
+
+  static async create(
+    mnemonic: string,
+    seedId: string,
+    ethereumChainId: string,
+    ethereumChainIds: Record<string, string> = { ethereum: ethereumChainId },
+  ) {
     const core = await initWasm();
     if (!core.Mnemonic.isValid(mnemonic)) throw new Error('Invalid BIP39 mnemonic');
     return new SigningCore(
@@ -37,36 +59,40 @@ export class SigningCore {
       core.HDWallet.createWithMnemonic(mnemonic, ''),
       seedId,
       ethereumChainId,
+      ethereumChainIds,
     );
   }
+
   close() {
     this.hd.delete();
   }
+
   private coin(chain: DeriveRequest['chain']) {
     return this.core.CoinType[chain];
   }
+
   private withKey<T>(
     request: DeriveRequest,
-    fn: (key: ReturnType<typeof this.hd.getKey>, address: string) => T,
+    fn: (key: ReturnType<typeof this.hd.getKey>, address: string, path: string) => T,
   ): T {
     if (request.seedId !== this.seedId) throw new BadRequestException('Unknown seed ID');
-    const key = this.hd.getKey(
-      this.coin(request.chain),
-      derivationPath(request.chain, request.account),
-    );
+    const { coin, path } = walletCoreMetadata(this.core, request.chain, request.account);
+    const key = this.hd.getKey(coin, path);
     try {
-      return fn(key, this.core.CoinTypeExt.deriveAddress(this.coin(request.chain), key));
+      return fn(key, this.core.CoinTypeExt.deriveAddress(coin, key), path);
     } finally {
       key.delete();
     }
   }
+
   derive(request: DeriveRequest) {
-    return this.withKey(request, (_, address) => ({
+    return this.withKey(request, (_, address, path) => ({
       ...request,
       address,
-      path: derivationPath(request.chain, request.account),
+      path,
     }));
   }
+
   sign(request: SignRequest): SignedTransaction {
     request = signSchema.parse(request);
     return this.withKey(request.wallet, (key, address) => {
@@ -75,14 +101,9 @@ export class SigningCore {
       const privateKey = key.data();
       try {
         const tx = request.transaction;
-        switch (tx.chain) {
-          case 'ethereum':
-            return this.signEthereum(tx, privateKey);
-          case 'bitcoin':
-            return this.signBitcoin(tx, request.wallet.address, privateKey);
-          case 'solana':
-            return this.signSolana(tx, request.wallet.address, privateKey);
-        }
+        if ('to' in tx) return this.signEthereum(tx, privateKey);
+        if ('utxos' in tx) return this.signBitcoin(tx, request.wallet.address, privateKey);
+        return this.signSolana(tx, request.wallet.address, privateKey);
       } finally {
         privateKey.fill(0);
       }
@@ -90,17 +111,17 @@ export class SigningCore {
   }
 
   private signEthereum(
-    tx: Extract<SignRequest['transaction'], { chain: 'ethereum' }>,
+    tx: Extract<SignRequest['transaction'], { chain: EvmChain }>,
     privateKey: Uint8Array,
   ): SignedTransaction {
-    this.assertValidAddress(tx.to, 'ethereum');
-    if (tx.chainId !== this.ethereumChainId)
-      throw new BadRequestException('Ethereum chain ID not permitted');
+    this.assertValidAddress(tx.to, tx.chain);
+    if (tx.chainId !== this.ethereumChainIds[tx.chain])
+      throw new BadRequestException('EVM chain ID not permitted');
     if (BigInt(tx.maxPriorityFeePerGas) > BigInt(tx.maxFeePerGas))
       throw new BadRequestException('Priority fee exceeds max fee');
 
     const proto = TW.Ethereum.Proto;
-    const coin = this.coin('ethereum');
+    const coin = this.coin(tx.chain);
     const encodedInput = proto.SigningInput.encode({
       privateKey,
       chainId: bytes(tx.chainId),
@@ -126,15 +147,15 @@ export class SigningCore {
   }
 
   private signBitcoin(
-    tx: Extract<SignRequest['transaction'], { chain: 'bitcoin' }>,
+    tx: Extract<SignRequest['transaction'], { chain: BitcoinChain }>,
     address: string,
     privateKey: Uint8Array,
   ): SignedTransaction {
-    tx.outputs.forEach((output) => this.assertValidAddress(output.address, 'bitcoin'));
+    tx.outputs.forEach((output) => this.assertValidAddress(output.address, tx.chain));
     if (new Set(tx.utxos.map((utxo) => `${utxo.txid}:${utxo.vout}`)).size !== tx.utxos.length)
       throw new BadRequestException('Duplicate UTXO');
 
-    const coin = this.coin('bitcoin');
+    const coin = this.coin(tx.chain);
     const script = this.core.BitcoinScript.lockScriptForAddress(address, coin);
     let ownScript: string;
     try {
@@ -148,7 +169,7 @@ export class SigningCore {
     const proto = TW.Bitcoin.Proto;
     const input = proto.SigningInput.fromObject({
       privateKey: [privateKey],
-      coinType: 0,
+      coinType: coin.value,
       hashType: this.core.BitcoinScript.hashTypeForCoin(coin),
       amount: tx.outputs[0].amount,
       toAddress: tx.outputs[0].address,
@@ -183,7 +204,7 @@ export class SigningCore {
   }
 
   private signSolana(
-    tx: Extract<SignRequest['transaction'], { chain: 'solana' }>,
+    tx: Extract<SignRequest['transaction'], { chain: SolanaChain }>,
     address: string,
     privateKey: Uint8Array,
   ): SignedTransaction {
