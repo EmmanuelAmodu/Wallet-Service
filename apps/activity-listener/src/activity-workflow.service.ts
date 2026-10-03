@@ -145,18 +145,17 @@ export class ActivityWorkflowService {
     const canonicalReconciliation = previousBlockHash !== undefined || current.state === 'reverted';
 
     if (current.state === 'observed') {
-      const state = poll >= this.config.finalityMaxPolls ? 'attention' : 'observed';
       await this.publishLedgerUpdate(
         activity,
         chain,
         transactionHash,
-        state,
+        'observed',
         current,
         activity.balanceChanges,
         observationSequence,
         canonicalReconciliation,
       );
-      if (state === 'attention')
+      if (poll >= this.config.finalityMaxPolls)
         this.logger.warn(`Finality polling requires recovery for ${activity.identifier}`);
     } else {
       await this.publishSettledActivity(

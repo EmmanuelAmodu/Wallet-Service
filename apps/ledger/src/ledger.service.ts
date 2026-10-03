@@ -134,8 +134,12 @@ export class LedgerService {
           activity.blockHash !== undefined;
         const bothUnmined = !existing.block_hash && !activity.blockHash;
         const terminal = ['finalized', 'failed', 'reverted'].includes(existing.state);
+        const restoredFinality =
+          existing.state === 'reverted' &&
+          ['finalized', 'failed'].includes(activity.state) &&
+          activity.blockHash !== undefined;
 
-        if (terminal && (sameBlock || bothUnmined))
+        if (terminal && activity.state === existing.state && (sameBlock || bothUnmined))
           return tx.ledgerActivity.update({
             where: { identifier: activity.identifier },
             data: {
@@ -143,7 +147,8 @@ export class LedgerService {
               canonical_reconciliation: activity.canonicalReconciliation ?? false,
             },
           });
-        if (terminal && !(activity.canonicalReconciliation ?? false)) return existing;
+        if (terminal && !restoredFinality && !(activity.canonicalReconciliation ?? false))
+          return existing;
         if (terminal && activity.state === 'attention') return existing;
         if (activity.state === 'attention' && ['observed', 'attention'].includes(existing.state))
           return tx.ledgerActivity.update({
@@ -207,7 +212,7 @@ export class LedgerService {
       revision,
       observation_sequence: BigInt(activity.observationSequence ?? '0'),
       canonical_reconciliation: activity.canonicalReconciliation ?? false,
-      block_hash: activity.blockHash,
+      block_hash: activity.blockHash ?? null,
       block_height: activity.blockHeight ? BigInt(activity.blockHeight) : null,
       completed_at_ms: BigInt(Math.trunc(activity.completedAtTimestamp)),
       source_status: activity.sourceStatus,

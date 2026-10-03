@@ -336,17 +336,17 @@ test('exhausted RPC retries publish attention without dropping provisional chang
   }
 });
 
-test('activity listener keeps exhausted finality checks recoverable at a slower interval', async () => {
+test('successful late observations remain provisional while checks use the recovery interval', async () => {
   const state = workflow([{ state: 'observed', blockHash: '0xblock', blockHeight: '10' }]);
   await state.service.resumeFinality(activity(), 3, '0xblock');
-  const attention = state.auth.open(
+  const observation = state.auth.open(
     state.ledgerJobs[0].data,
     state.ledgerJobs[0].options.jobId,
     state.ledgerJobs[0].name,
   );
-  assert.equal(attention.type, 'ledger.activity.update');
-  if (attention.type === 'ledger.activity.update')
-    assert.equal(attention.activity.state, 'attention');
+  assert.equal(observation.type, 'ledger.activity.update');
+  if (observation.type === 'ledger.activity.update')
+    assert.equal(observation.activity.state, 'observed');
   assert.equal(state.activityJobs[0].options.delay, 300000);
 });
 

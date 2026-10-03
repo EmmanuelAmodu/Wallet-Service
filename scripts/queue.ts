@@ -27,7 +27,7 @@ export async function reconcileActivity(queue: Queue, identifier: string, auth: 
   if (!candidate) throw new Error('No retained finality check found for this activity');
   if (candidate.state === 'waiting' || candidate.state === 'active')
     return 'Activity reconciliation is already queued or active';
-  if (candidate.state === 'delayed') await candidate.job.changeDelay(Date.now());
+  if (candidate.state === 'delayed') await candidate.job.promote();
   else if (candidate.state === 'failed' || candidate.state === 'completed')
     await candidate.job.retry(candidate.state, {
       resetAttemptsMade: true,

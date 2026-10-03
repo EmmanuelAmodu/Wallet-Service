@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { Pool } from 'pg';
 import { Prisma } from '@prisma/client';
 import { LedgerPrismaService } from '../apps/ledger/src/prisma/prisma.service.js';
+import { LedgerService } from '../apps/ledger/src/ledger.service.js';
 import { migrate } from '../scripts/migrate.js';
 
 const testUrl = process.env.TEST_LEDGER_DATABASE_URL;
@@ -35,6 +36,7 @@ test(
 
       const walletId = randomUUID();
       const activityId = `transaction:ethereum:${randomUUID()}`;
+      const legacyEntryId = randomUUID();
       const address = `0x${'11'.repeat(20)}`;
       const asset = 'token:ethereum:native';
       await legacy.query(
@@ -44,22 +46,23 @@ test(
       );
       await legacy.query(
         `INSERT INTO ledger_activities
-          (identifier, chain, network, transaction_hash, state, completed_at_ms, source_status, payload, updated_at)
-         VALUES ($1, 'ethereum', '11155111', 'legacy', 'finalized', 1, 'success', '{}'::jsonb, now())`,
+          (identifier, chain, network, transaction_hash, state, revision, block_hash, block_height,
+           completed_at_ms, source_status, payload, updated_at)
+         VALUES ($1, 'ethereum', '11155111', 'legacy', 'observed', 4, '0xlegacy-block', 10,
+                 1, 'success', '{}'::jsonb, now())`,
         [activityId],
       );
       await legacy.query(
         `INSERT INTO ledger_entries
           (id, activity_identifier, revision, wallet_id, asset, amount, kind)
          VALUES
-          ($1, $3, 0, $2, $4, 100, 'confirmed'),
-          ($5, $3, 0, $2, $4, 20, 'provisional')`,
-        [randomUUID(), walletId, activityId, asset, randomUUID()],
+          ($1, $3, 4, $2, $4, 100, 'provisional')`,
+        [legacyEntryId, walletId, activityId, asset],
       );
       await legacy.query(
         `INSERT INTO ledger_balances
           (wallet_id, asset, confirmed_amount, provisional_amount, updated_at)
-         VALUES ($1, $2, 100, 20, now())`,
+         VALUES ($1, $2, 0, 100, now())`,
         [walletId, asset],
       );
       await legacy.end();
@@ -90,7 +93,7 @@ test(
           (SELECT count(*) FROM ledger_legacy_entries) AS entries,
           (SELECT count(*) FROM ledger_legacy_balances) AS balances
       `;
-      assert.equal(archived[0].entries, 2n);
+      assert.equal(archived[0].entries, 1n);
       assert.equal(archived[0].balances, 1n);
 
       const accountTable = await db.$queryRaw<{ table_name: string | null }[]>`
@@ -109,7 +112,12 @@ test(
             `${entry.balance_state}:${entry.balance_after.toFixed(0)}`,
           );
       }
-      assert.deepEqual([...openingBalances.values()].sort(), ['confirmed:100', 'provisional:20']);
+      assert.deepEqual([...openingBalances.values()].sort(), ['provisional:100']);
+      const migratedPosting = await db.ledgerEntry.findUniqueOrThrow({
+        where: { id: legacyEntryId },
+      });
+      assert.equal(migratedPosting.activity_identifier, activityId);
+      assert.equal(migratedPosting.revision, 4);
 
       const journal = await db.ledgerEntry.findMany();
       const debits = journal
@@ -118,9 +126,32 @@ test(
       const credits = journal
         .filter((entry) => entry.side === 'credit')
         .reduce((total, entry) => total.plus(entry.amount), new Prisma.Decimal(0));
-      assert.equal(journal.length, 4);
-      assert.equal(debits.toFixed(0), '120');
-      assert.equal(credits.toFixed(0), '120');
+      assert.equal(journal.length, 2);
+      assert.equal(debits.toFixed(0), '100');
+      assert.equal(credits.toFixed(0), '100');
+
+      const service = new LedgerService(db);
+      await service.applyActivity({
+        identifier: activityId,
+        chain: 'ethereum',
+        network: '11155111',
+        transactionHash: 'legacy',
+        sourceStatus: 'success',
+        state: 'finalized',
+        completedAtTimestamp: 1,
+        observationSequence: '1',
+        canonicalReconciliation: true,
+        blockHash: '0xlegacy-block',
+        blockHeight: '10',
+        changes: [{ wallet: `wallet:ethereum:${address}`, asset, amount: '100' }],
+      });
+      const balances = await service.balances(walletId, 'migration-test');
+      assert.equal(balances.balances[0].confirmed, '100');
+      assert.equal(balances.balances[0].provisional, '0');
+      const migratedActivity = await db.ledgerActivity.findUniqueOrThrow({
+        where: { identifier: activityId },
+      });
+      assert.equal(migratedActivity.revision, 5);
     } finally {
       await legacy?.end();
       await db?.$disconnect();

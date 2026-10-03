@@ -39,19 +39,21 @@ test('activity reconciliation retries the latest retained check and releases del
   const job = (poll: number, state: string) => {
     const id = randomUUID();
     let retried: string | undefined;
-    let releasedAt: number | undefined;
+    let promoted = false;
+    let currentState = state;
     return {
       id,
       name: 'activity.check-finality',
       data: auth.seal({ type: 'activity.check-finality', activity, poll }, id),
-      getState: async () => state,
+      getState: async () => currentState,
       retry: async (finishedState: string) => {
         retried = finishedState;
       },
-      changeDelay: async (timestamp: number) => {
-        releasedAt = timestamp;
+      promote: async () => {
+        promoted = true;
+        currentState = 'waiting';
       },
-      read: () => ({ retried, releasedAt }),
+      read: () => ({ retried, promoted }),
     };
   };
 
@@ -63,7 +65,7 @@ test('activity reconciliation retries the latest retained check and releases del
     'Queued finality reconciliation at poll 5',
   );
   assert.equal(latest.read().retried, 'completed');
-  assert.equal(older.read().releasedAt, undefined);
+  assert.equal(older.read().promoted, false);
 
   const delayed = job(6, 'delayed');
   const delayedQueue = { getJobs: async () => [delayed] } as never;
@@ -71,7 +73,7 @@ test('activity reconciliation retries the latest retained check and releases del
     await reconcileActivity(delayedQueue, identifier, auth),
     'Queued finality reconciliation at poll 6',
   );
-  assert.ok(delayed.read().releasedAt);
+  assert.equal(delayed.read().promoted, true);
 });
 
 test(
@@ -113,6 +115,27 @@ test(
         'Queued finality reconciliation at poll 5',
       );
       assert.equal(await job.getState(), 'waiting');
+
+      const delayedIdentifier = `transaction:ethereum:${randomUUID()}`;
+      const delayedJobId = randomUUID();
+      const delayedJob = await queue.add(
+        'activity.check-finality',
+        auth.seal(
+          {
+            type: 'activity.check-finality',
+            activity: { ...activity, identifier: delayedIdentifier },
+            poll: 6,
+          },
+          delayedJobId,
+        ),
+        { jobId: delayedJobId, delay: 60000 },
+      );
+      assert.equal(await delayedJob.getState(), 'delayed');
+      assert.equal(
+        await reconcileActivity(queue, delayedIdentifier, auth),
+        'Queued finality reconciliation at poll 6',
+      );
+      assert.equal(await delayedJob.getState(), 'waiting');
     } finally {
       await worker.close();
       await queue.obliterate({ force: true });

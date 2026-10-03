@@ -104,6 +104,125 @@ ALTER TABLE "ledger_accounts"
 
 DO $$
 DECLARE
+  legacy_group RECORD;
+  legacy_entry RECORD;
+  wallet_account RECORD;
+  clearing_account RECORD;
+  target_state TEXT;
+  wallet_key TEXT;
+  clearing_key TEXT;
+  previous_balance NUMERIC;
+  clearing_delta NUMERIC;
+  wallet_entry_id UUID;
+  clearing_entry_id UUID;
+  side TEXT;
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM "ledger_legacy_entries"
+    WHERE "kind" NOT IN ('confirmed', 'provisional')
+       OR "amount" = 0
+       OR "amount" <> trunc("amount")
+       OR abs("amount") >= power(10::numeric, 78)
+  ) THEN
+    RAISE EXCEPTION 'Ledger upgrade stopped: legacy entries contain unsupported kinds or amounts';
+  END IF;
+
+  FOR legacy_group IN
+    SELECT e."activity_identifier", e."revision", e."kind", e."asset", e."wallet_id",
+           w."chain", w."network", min(e."created_at") AS first_entry_at
+    FROM "ledger_legacy_entries" e
+    JOIN "ledger_wallets" w ON w."wallet_id" = e."wallet_id"
+    GROUP BY e."activity_identifier", e."revision", e."kind", e."asset", e."wallet_id", w."chain", w."network"
+    ORDER BY min(e."created_at"), e."activity_identifier", e."revision", e."kind", e."asset"
+  LOOP
+    target_state := legacy_group."kind";
+    wallet_key := 'wallet:' || legacy_group."wallet_id"::text || ':' || legacy_group."asset" || ':' || target_state;
+    clearing_key := 'clearing:' || legacy_group."chain" || ':' || legacy_group."network" || ':' || legacy_group."asset" || ':' || target_state;
+    INSERT INTO "ledger_accounts" (
+      "account_key", "account_kind", "normal_side", "balance_state", "chain", "network", "asset", "wallet_id"
+    ) VALUES (
+      wallet_key, 'wallet', 'debit', target_state, legacy_group."chain", legacy_group."network",
+      legacy_group."asset", legacy_group."wallet_id"
+    ) ON CONFLICT ("account_key") DO NOTHING;
+    SELECT * INTO wallet_account FROM "ledger_accounts"
+    WHERE "account_key" = wallet_key FOR UPDATE;
+    clearing_delta := 0;
+
+    FOR legacy_entry IN
+      SELECT e.* FROM "ledger_legacy_entries" e
+      WHERE e."activity_identifier" = legacy_group."activity_identifier"
+        AND e."revision" = legacy_group."revision"
+        AND e."kind" = legacy_group."kind"
+        AND e."asset" = legacy_group."asset"
+      ORDER BY e."created_at", e."id"
+    LOOP
+      previous_balance := 0;
+      IF wallet_account."last_entry_id" IS NOT NULL THEN
+        SELECT e."balance_after" INTO previous_balance FROM "ledger_entries" e
+        WHERE e."id" = wallet_account."last_entry_id";
+      END IF;
+      side := CASE WHEN legacy_entry."amount" > 0 THEN 'debit' ELSE 'credit' END;
+      wallet_entry_id := legacy_entry."id";
+      INSERT INTO "ledger_entries" (
+        "id", "activity_identifier", "revision", "account_key", "sequence", "wallet_id", "asset",
+        "account_kind", "side", "amount", "balance_after", "balance_state", "entry_kind",
+        "previous_entry_id", "created_at"
+      ) VALUES (
+        wallet_entry_id, legacy_entry."activity_identifier", legacy_entry."revision", wallet_key,
+        wallet_account."next_sequence", legacy_entry."wallet_id", legacy_entry."asset", 'wallet', side,
+        abs(legacy_entry."amount"), previous_balance + legacy_entry."amount", target_state, 'wallet',
+        wallet_account."last_entry_id", legacy_entry."created_at"
+      );
+      IF wallet_account."last_entry_id" IS NOT NULL THEN
+        UPDATE "ledger_entries" SET "next_entry_id" = wallet_entry_id
+        WHERE "id" = wallet_account."last_entry_id";
+      END IF;
+      UPDATE "ledger_accounts"
+      SET "next_sequence" = "next_sequence" + 1, "last_entry_id" = wallet_entry_id
+      WHERE "account_key" = wallet_key
+      RETURNING * INTO wallet_account;
+      clearing_delta := clearing_delta + legacy_entry."amount";
+    END LOOP;
+
+    IF clearing_delta <> 0 THEN
+      INSERT INTO "ledger_accounts" (
+        "account_key", "account_kind", "normal_side", "balance_state", "chain", "network", "asset"
+      ) VALUES (
+        clearing_key, 'clearing', 'credit', target_state, legacy_group."chain", legacy_group."network",
+        legacy_group."asset"
+      ) ON CONFLICT ("account_key") DO NOTHING;
+      SELECT * INTO clearing_account FROM "ledger_accounts"
+      WHERE "account_key" = clearing_key FOR UPDATE;
+      previous_balance := 0;
+      IF clearing_account."last_entry_id" IS NOT NULL THEN
+        SELECT e."balance_after" INTO previous_balance FROM "ledger_entries" e
+        WHERE e."id" = clearing_account."last_entry_id";
+      END IF;
+      side := CASE WHEN clearing_delta > 0 THEN 'credit' ELSE 'debit' END;
+      clearing_entry_id := gen_random_uuid();
+      INSERT INTO "ledger_entries" (
+        "id", "activity_identifier", "revision", "account_key", "sequence", "asset", "account_kind",
+        "side", "amount", "balance_after", "balance_state", "entry_kind", "previous_entry_id"
+      ) VALUES (
+        clearing_entry_id, legacy_group."activity_identifier", legacy_group."revision", clearing_key,
+        clearing_account."next_sequence", legacy_group."asset", 'clearing', side,
+        abs(clearing_delta), previous_balance + clearing_delta, target_state, 'clearing',
+        clearing_account."last_entry_id"
+      );
+      IF clearing_account."last_entry_id" IS NOT NULL THEN
+        UPDATE "ledger_entries" SET "next_entry_id" = clearing_entry_id
+        WHERE "id" = clearing_account."last_entry_id";
+      END IF;
+      UPDATE "ledger_accounts"
+      SET "next_sequence" = "next_sequence" + 1, "last_entry_id" = clearing_entry_id
+      WHERE "account_key" = clearing_key;
+    END IF;
+  END LOOP;
+
+END $$;
+
+DO $$
+DECLARE
   legacy RECORD;
   target_state TEXT;
   balance_amount NUMERIC;
@@ -116,6 +235,7 @@ DECLARE
   previous_balance NUMERIC;
   clearing_delta NUMERIC;
   clearing_balance NUMERIC;
+  current_balance NUMERIC;
 BEGIN
   FOR legacy IN
     SELECT b."wallet_id", b."asset", b."confirmed_amount", b."provisional_amount",
@@ -129,6 +249,13 @@ BEGIN
         WHEN 'confirmed' THEN legacy."confirmed_amount"
         ELSE legacy."provisional_amount"
       END;
+      wallet_key := 'wallet:' || legacy."wallet_id"::text || ':' || legacy."asset" || ':' || target_state;
+      current_balance := 0;
+      SELECT e."balance_after" INTO current_balance
+      FROM "ledger_accounts" a
+      LEFT JOIN "ledger_entries" e ON e."id" = a."last_entry_id"
+      WHERE a."account_key" = wallet_key;
+      balance_amount := balance_amount - coalesce(current_balance, 0);
       IF balance_amount = 0 THEN
         CONTINUE;
       END IF;

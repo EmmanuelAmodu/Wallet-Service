@@ -411,6 +411,22 @@ test(
     });
     balances = await service.balances(walletIds[0], tenantId);
     assert.equal(BigInt(balances.balances[0].confirmed), confirmedBeforeFinality);
+    assert.equal(
+      (await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier: identifiers[7] } }))
+        .block_hash,
+      null,
+    );
+    await service.applyActivity({
+      ...finalized,
+      state: 'finalized',
+      observationSequence: '7',
+    });
+    balances = await service.balances(walletIds[0], tenantId);
+    assert.equal(BigInt(balances.balances[0].confirmed), confirmedAfterFinality);
+    assert.equal(
+      BigInt(balances.balances[0].provisional),
+      beforeLargePostings - 1_000_000_000_000_000_000_000n - 1n,
+    );
 
     await Promise.all([
       service.applyActivity(activity(8, 'observed', '0xconcurrent-a')),
