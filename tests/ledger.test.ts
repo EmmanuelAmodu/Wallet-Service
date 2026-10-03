@@ -26,6 +26,21 @@ const walletAddresses = [randomBytes(20).toString('hex'), randomBytes(20).toStri
 const identifiers = Array.from({ length: 10 }, () => `transaction:ethereum:${randomUUID()}`);
 let service: LedgerService;
 
+async function waitForLedgerActivity(
+  identifier: string,
+  state: LedgerActivity['state'],
+  afterSequence: bigint,
+) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const activity = await db!.ledgerActivity.findUnique({ where: { identifier } });
+    if (activity && activity.state === state && activity.observation_sequence > afterSequence)
+      return activity;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for Ledger activity ${identifier} to become ${state}`);
+}
+
 test('ledger processor returns a JSON-safe void acknowledgement after commit', async () => {
   const auth = new MessageAuth('f'.repeat(64));
   const message = {
@@ -66,6 +81,17 @@ test(
     const processor = new LedgerProcessor(service, auth);
     const worker = new Worker(QUEUES.ledger, (job) => processor.process(job), options);
     const identifier = `transaction:ethereum:${randomUUID()}`;
+    const observations = [
+      { state: 'observed' as const, transactionFound: true, blockHash: '0xflow-block' },
+      { state: 'observed' as const, transactionFound: true, blockHash: '0xflow-block' },
+      { state: 'observed' as const, transactionFound: false },
+      {
+        state: 'finalized' as const,
+        transactionFound: true,
+        blockHash: '0xflow-block',
+        blockHeight: '10',
+      },
+    ];
     const source: ProcessorActivity = {
       identifier,
       completedAtTimestamp: 1000,
@@ -86,17 +112,13 @@ test(
       pubsubSubscription: 'test-subscription',
       pubsubApiEndpoint: undefined,
       finalityPollMs: 30000,
-      finalityMaxPolls: 3,
+      finalityMaxPolls: 120,
       reconciliationPollMs: 300000,
     };
     const listener = new ActivityWorkflowService(
       {
         networkIdentity: () => '11155111',
-        observeTransaction: async () => ({
-          state: 'finalized' as const,
-          blockHash: '0xflow-block',
-          blockHeight: '10',
-        }),
+        observeTransaction: async () => observations.shift()!,
       } as never,
       auth,
       activityQueue,
@@ -106,30 +128,67 @@ test(
     try {
       await worker.waitUntilReady();
       await listener.receive(source, 'pubsub-ledger-integration');
-      let completed: Job | undefined;
-      const deadline = Date.now() + 10000;
-      while (!completed && Date.now() < deadline) {
-        const jobs = await ledgerQueue.getJobs(['completed'], 0, 100);
-        completed = jobs.find((job) => {
-          const message = auth.open(job.data, job.id!, job.name) as Message;
-          return (
-            message.type === 'ledger.activity.update' && message.activity.identifier === identifier
-          );
-        });
-        if (!completed) await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      assert(completed, 'Ledger queue job should complete');
-      assert.equal(completed.returnvalue, null);
-      const after = BigInt(
-        (await service.balances(walletIds[0], tenantId)).balances.find(
-          (balance) => balance.asset === asset,
-        )!.confirmed,
-      );
-      assert.equal(after, before - 1_000_000_000_000_000_000_001n);
+      let record = await waitForLedgerActivity(identifier, 'observed', 0n);
+      let balances = await service.balances(walletIds[0], tenantId);
       assert.equal(
-        (await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier } })).state,
-        'finalized',
+        BigInt(balances.balances.find((balance) => balance.asset === asset)!.provisional),
+        before - 1_000_000_000_000_000_000_001n,
       );
+      assert.equal(
+        BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
+        before,
+      );
+
+      const initialSequence = record.observation_sequence;
+      await listener.resumeFinality(source, 120, '0xflow-block');
+      record = await waitForLedgerActivity(identifier, 'observed', initialSequence);
+      const lateSequence = record.observation_sequence;
+      balances = await service.balances(walletIds[0], tenantId);
+      assert.equal(
+        BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
+        before,
+      );
+      const delayedChecks = await activityQueue.getJobs(['delayed'], 0, 100);
+      const recoveryCheck = delayedChecks.find((job) => {
+        const message = auth.open(job.data, job.id!, job.name) as Message;
+        return message.type === 'activity.check-finality' && message.poll === 121;
+      });
+      assert.equal(recoveryCheck?.opts.delay, 300000);
+
+      await listener.resumeFinality(source, 121, '0xflow-block');
+      record = await waitForLedgerActivity(identifier, 'reverted', lateSequence);
+      balances = await service.balances(walletIds[0], tenantId);
+      assert.equal(
+        BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
+        before,
+      );
+      assert.equal(
+        BigInt(balances.balances.find((balance) => balance.asset === asset)!.provisional),
+        0n,
+      );
+
+      const revertedSequence = record.observation_sequence;
+      await listener.resumeFinality(source, 122, '0xflow-block');
+      await waitForLedgerActivity(identifier, 'finalized', revertedSequence);
+      balances = await service.balances(walletIds[0], tenantId);
+      assert.equal(
+        BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
+        before - 1_000_000_000_000_000_000_001n,
+      );
+      assert.equal(
+        BigInt(balances.balances.find((balance) => balance.asset === asset)!.provisional),
+        0n,
+      );
+
+      const completedUpdates = await ledgerQueue.getJobs(['completed'], 0, 100);
+      const activityUpdates = completedUpdates.filter((job) => {
+        const message = auth.open(job.data, job.id!, job.name) as Message;
+        return (
+          message.type === 'ledger.activity.update' && message.activity.identifier === identifier
+        );
+      });
+      assert.equal(activityUpdates.length, 4);
+      assert(activityUpdates.every((job) => job.returnvalue === null));
     } finally {
       await worker.close();
       await activityQueue.obliterate({ force: true });
