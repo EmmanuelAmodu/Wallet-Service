@@ -93,7 +93,8 @@ export type ChainFamily = 'ethereum' | 'bitcoin' | 'solana';
 const chainAliases: Record<string, Chain> = { bsc: 'smartChain' };
 
 export function resolveChainIdentifier(identifier: string): Chain | undefined {
-  return chainAliases[identifier] ?? chainSchema.safeParse(identifier).data;
+  if (Object.hasOwn(chainAliases, identifier)) return chainAliases[identifier];
+  return chainSchema.safeParse(identifier).data;
 }
 
 const evmChainSet = new Set<string>(evmChains);

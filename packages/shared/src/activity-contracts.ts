@@ -73,7 +73,10 @@ export const ledgerActivitySchema = z
     sourceStatus: z.enum(['success', 'failed']),
     state: ledgerActivityStateSchema,
     completedAtTimestamp: z.number().finite().nonnegative(),
-    observationSequence: z.number().int().nonnegative().optional(),
+    observationSequence: z
+      .string()
+      .regex(/^(0|[1-9][0-9]*)$/)
+      .optional(),
     canonicalReconciliation: z.boolean().optional(),
     blockHash: z.string().min(1).max(256).optional(),
     blockHeight: z

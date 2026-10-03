@@ -6,7 +6,11 @@ import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 import { required } from '../packages/shared/src/config.js';
 
 export async function reconcileActivity(queue: Queue, identifier: string, auth: MessageAuth) {
-  const jobs = await queue.getJobs(['waiting', 'active', 'delayed', 'failed', 'completed'], 0, 9999);
+  const jobs = await queue.getJobs(
+    ['waiting', 'active', 'delayed', 'failed', 'completed'],
+    0,
+    9999,
+  );
   const candidates = [];
   for (const job of jobs) {
     try {
@@ -70,9 +74,7 @@ async function main() {
       console.log('Queued retry of existing action; signed bytes are unchanged');
     } else {
       if (!id) throw new Error('An activity identifier is required');
-      console.log(
-        await reconcileActivity(queue, id, new MessageAuth(required('QUEUE_AUTH_KEY'))),
-      );
+      console.log(await reconcileActivity(queue, id, new MessageAuth(required('QUEUE_AUTH_KEY'))));
     }
   } finally {
     await queue.close();

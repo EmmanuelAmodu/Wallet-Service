@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { MessageAuth } from '../packages/queue/src/messages.js';
+import { Queue, Worker } from 'bullmq';
+import { connection } from '../packages/queue/src/messaging.module.js';
+import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 import { reconcileActivity } from '../scripts/queue.js';
 
 test('queue envelopes reject tampering, wrong job IDs, action substitution and wrong keys', () => {
@@ -71,3 +73,50 @@ test('activity reconciliation retries the latest retained check and releases del
   );
   assert.ok(delayed.read().releasedAt);
 });
+
+test(
+  'activity reconciliation requeues a completed BullMQ finality check',
+  { skip: !process.env.TEST_REDIS_URL, timeout: 10000 },
+  async () => {
+    const prefix = `activity-reconcile-${randomUUID()}`;
+    const options = { connection: connection(process.env.TEST_REDIS_URL!), prefix };
+    const queue = new Queue(QUEUES.activity, options);
+    const worker = new Worker(QUEUES.activity, async () => undefined, options);
+    const auth = new MessageAuth('e'.repeat(64));
+    const identifier = `transaction:ethereum:${randomUUID()}`;
+    const activity = {
+      identifier,
+      completedAtTimestamp: 1,
+      metadata: {},
+      status: 'success' as const,
+      transfers: [],
+      tokenIdentifiers: [],
+      fee: { amount: 0, feePayer: [] },
+      balanceChanges: [],
+    };
+    const jobId = randomUUID();
+    try {
+      await worker.waitUntilReady();
+      const job = await queue.add(
+        'activity.check-finality',
+        auth.seal({ type: 'activity.check-finality', activity, poll: 5 }, jobId),
+        { jobId },
+      );
+      const deadline = Date.now() + 5000;
+      while ((await job.getState()) !== 'completed' && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(await job.getState(), 'completed');
+      await worker.close();
+
+      assert.equal(
+        await reconcileActivity(queue, identifier, auth),
+        'Queued finality reconciliation at poll 5',
+      );
+      assert.equal(await job.getState(), 'waiting');
+    } finally {
+      await worker.close();
+      await queue.obliterate({ force: true });
+      await queue.close();
+    }
+  },
+);

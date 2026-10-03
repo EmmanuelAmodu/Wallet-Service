@@ -38,6 +38,7 @@ export interface NetworkConfig {
 
 export interface ChainObservation {
   state: 'observed' | 'finalized' | 'failed' | 'reverted';
+  transactionFound?: boolean;
   blockHash?: string;
   blockHeight?: string;
   feeAmount?: string;
@@ -47,13 +48,6 @@ export class RpcFailure extends BadGatewayException {
   constructor(readonly rpcCode?: number) {
     super('Blockchain RPC operation failed');
   }
-}
-
-export interface ChainObservation {
-  state: 'observed' | 'finalized' | 'failed' | 'reverted';
-  blockHash?: string;
-  blockHeight?: string;
-  feeAmount?: string;
 }
 
 @Injectable()
@@ -151,7 +145,10 @@ export class ChainRpcService {
     const settings = this.networkSettings(chain);
     if (isEvmChain(chain)) {
       const raw = await this.call(chain, 'eth_getTransactionReceipt', [hash]);
-      if (raw === null) return { state: 'observed' };
+      if (raw === null) {
+        const transaction = await this.call(chain, 'eth_getTransactionByHash', [hash]);
+        return { state: 'observed', transactionFound: transaction !== null };
+      }
       const receipt = z
         .object({
           blockHash: z.string(),
@@ -169,12 +166,14 @@ export class ChainRpcService {
       if (confirmations < BigInt(settings.confirmations ?? 12))
         return {
           state: 'observed',
+          transactionFound: true,
           blockHash: receipt.blockHash,
           blockHeight: BigInt(receipt.blockNumber).toString(),
           feeAmount,
         };
       return {
         state: receipt.status === '0x1' ? 'finalized' : 'failed',
+        transactionFound: true,
         blockHash: receipt.blockHash,
         blockHeight: BigInt(receipt.blockNumber).toString(),
         feeAmount,
@@ -196,13 +195,15 @@ export class ChainRpcService {
             (transaction.confirmations ?? 0) >= (settings.confirmations ?? 6)
               ? 'finalized'
               : 'observed',
+          transactionFound: true,
           ...(transaction.blockhash ? { blockHash: transaction.blockhash } : {}),
           ...(transaction.blockheight !== undefined
             ? { blockHeight: String(transaction.blockheight) }
             : {}),
         };
       } catch (error) {
-        if (error instanceof RpcFailure && error.rpcCode === -5) return { state: 'observed' };
+        if (error instanceof RpcFailure && error.rpcCode === -5)
+          return { state: 'observed', transactionFound: false };
         throw error;
       }
     }
@@ -226,9 +227,9 @@ export class ChainRpcService {
         ]),
       );
     const status = result.value[0];
-    if (!status) return { state: 'observed' };
+    if (!status) return { state: 'observed', transactionFound: false };
     if (status.confirmationStatus !== 'finalized')
-      return { state: 'observed', blockHeight: String(status.slot) };
+      return { state: 'observed', transactionFound: true, blockHeight: String(status.slot) };
     const block = await this.call(chain, 'getBlock', [
       status.slot,
       { commitment: 'finalized', rewards: false, transactionDetails: 'none' },
@@ -236,6 +237,7 @@ export class ChainRpcService {
     const blockHash = z.object({ blockhash: z.string() }).safeParse(block);
     return {
       state: status.err ? 'failed' : 'finalized',
+      transactionFound: true,
       blockHeight: String(status.slot),
       ...(blockHash.success ? { blockHash: blockHash.data.blockhash } : {}),
     };

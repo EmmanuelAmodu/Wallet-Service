@@ -109,6 +109,30 @@ test('Bitcoin mempool transactions without confirmations are observed', async (t
     solanaGenesisHash: 'devnet',
   });
 
-  assert.deepEqual(await rpc.observeTransaction('bitcoin', '01'.repeat(32)), { state: 'observed' });
+  assert.deepEqual(await rpc.observeTransaction('bitcoin', '01'.repeat(32)), {
+    state: 'observed',
+    transactionFound: true,
+  });
   assert.deepEqual(calls, ['getblockchaininfo', 'getrawtransaction']);
+});
+
+test('EVM receipt absence distinguishes pending transactions from transactions no longer found', async (t) => {
+  const calls: string[] = [];
+  const url = await rpcServer(t, calls, (method) => {
+    if (method === 'eth_chainId') return '0x1';
+    if (method === 'eth_getTransactionReceipt') return null;
+    if (method === 'eth_getTransactionByHash') return null;
+    throw new Error(`Unexpected RPC method: ${method}`);
+  });
+  const rpc = new ChainRpcService({
+    ethereumUrl: url,
+    ethereumChainId: '1',
+    solanaGenesisHash: 'devnet',
+  });
+
+  assert.deepEqual(await rpc.observeTransaction('ethereum', '0xabc'), {
+    state: 'observed',
+    transactionFound: false,
+  });
+  assert.deepEqual(calls, ['eth_chainId', 'eth_getTransactionReceipt', 'eth_getTransactionByHash']);
 });

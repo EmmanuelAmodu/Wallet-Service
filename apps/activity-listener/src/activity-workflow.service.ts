@@ -23,6 +23,7 @@ import { Inject } from '@nestjs/common';
 @Injectable()
 export class ActivityWorkflowService {
   private readonly logger = new Logger(ActivityWorkflowService.name);
+  private sequenceCommandRegistered = false;
 
   constructor(
     private readonly rpc: ChainRpcService,
@@ -34,7 +35,16 @@ export class ActivityWorkflowService {
 
   async receive(activity: ProcessorActivity, pubsubMessageId: string, finalAttempt = false) {
     const { chain, transactionHash } = this.identity(activity);
-    await this.checkFinality(activity, chain, transactionHash, 0, undefined, finalAttempt);
+    const observationSequence = await this.nextObservationSequence(activity.identifier);
+    await this.checkFinality(
+      activity,
+      chain,
+      transactionHash,
+      0,
+      undefined,
+      observationSequence,
+      finalAttempt,
+    );
     this.logger.debug(`Accepted activity ${activity.identifier} from Pub/Sub ${pubsubMessageId}`);
   }
 
@@ -45,6 +55,7 @@ export class ActivityWorkflowService {
     finalAttempt = false,
   ) {
     const { chain, transactionHash } = this.identity(activity);
+    const observationSequence = await this.nextObservationSequence(activity.identifier);
     const observation = await this.observeOrMarkAttention(
       activity,
       chain,
@@ -52,7 +63,7 @@ export class ActivityWorkflowService {
       finalAttempt,
     );
     if (!observation) {
-      await this.publishAttention(activity, chain, transactionHash, poll);
+      await this.publishAttention(activity, chain, transactionHash, observationSequence);
       await this.scheduleFinality(activity, poll + 1, previousBlockHash);
       return;
     }
@@ -63,6 +74,7 @@ export class ActivityWorkflowService {
       poll,
       previousBlockHash,
       observation,
+      observationSequence,
     );
   }
 
@@ -72,6 +84,7 @@ export class ActivityWorkflowService {
     transactionHash: string,
     poll: number,
     previousBlockHash: string | undefined,
+    observationSequence: string,
     finalAttempt: boolean,
   ) {
     const observation = await this.observeOrMarkAttention(
@@ -81,7 +94,7 @@ export class ActivityWorkflowService {
       finalAttempt,
     );
     if (!observation) {
-      await this.publishAttention(activity, chain, transactionHash, poll);
+      await this.publishAttention(activity, chain, transactionHash, observationSequence);
       await this.scheduleFinality(activity, poll + 1, previousBlockHash);
       return;
     }
@@ -92,6 +105,7 @@ export class ActivityWorkflowService {
       poll,
       previousBlockHash,
       observation,
+      observationSequence,
     );
   }
 
@@ -99,7 +113,7 @@ export class ActivityWorkflowService {
     activity: ProcessorActivity,
     chain: Chain,
     transactionHash: string,
-    observationSequence: number,
+    observationSequence: string,
   ) {
     await this.publishLedgerUpdate(
       activity,
@@ -117,20 +131,21 @@ export class ActivityWorkflowService {
     activity: ProcessorActivity,
     chain: Chain,
     transactionHash: string,
-    observationSequence: number,
+    poll: number,
     previousBlockHash: string | undefined,
     observation: ChainObservation,
+    observationSequence: string,
   ) {
     const current =
-      previousBlockHash && observation.state === 'observed' && !observation.blockHash
+      previousBlockHash &&
+      observation.state === 'observed' &&
+      observation.transactionFound === false
         ? { ...observation, state: 'reverted' as const }
         : observation;
-    const canonicalReconciliation =
-      previousBlockHash !== undefined || current.state === 'reverted';
+    const canonicalReconciliation = previousBlockHash !== undefined || current.state === 'reverted';
 
     if (current.state === 'observed') {
-      const state =
-        observationSequence >= this.config.finalityMaxPolls ? 'attention' : 'observed';
+      const state = poll >= this.config.finalityMaxPolls ? 'attention' : 'observed';
       await this.publishLedgerUpdate(
         activity,
         chain,
@@ -154,11 +169,7 @@ export class ActivityWorkflowService {
       );
     }
 
-    await this.scheduleFinality(
-      activity,
-      observationSequence + 1,
-      current.blockHash ?? previousBlockHash,
-    );
+    await this.scheduleFinality(activity, poll + 1, current.blockHash ?? previousBlockHash);
   }
 
   private async observeOrMarkAttention(
@@ -181,7 +192,7 @@ export class ActivityWorkflowService {
     chain: Chain,
     transactionHash: string,
     observation: ChainObservation,
-    observationSequence: number,
+    observationSequence: string,
     canonicalReconciliation: boolean,
   ) {
     const changes =
@@ -202,6 +213,34 @@ export class ActivityWorkflowService {
     );
   }
 
+  private async nextObservationSequence(identifier: string) {
+    const sequenceKey = this.ledgerQueue.toKey(
+      `activity-sequence:${createHash('sha256').update(identifier).digest('hex')}`,
+    );
+    const redis = await this.ledgerQueue.getBackend().client;
+    if (!this.sequenceCommandRegistered) {
+      redis.defineCommand('nextActivitySequence', {
+        numberOfKeys: 1,
+        lua: `
+          local current = redis.call('GET', KEYS[1])
+          local baseline = ARGV[1]
+          if not current or #current < #baseline or (#current == #baseline and current < baseline) then
+            redis.call('SET', KEYS[1], baseline)
+          end
+          return tostring(redis.call('INCR', KEYS[1]))
+        `,
+      });
+      this.sequenceCommandRegistered = true;
+    }
+    const sequence = await redis.runCommand('nextActivitySequence', [
+      sequenceKey,
+      String(Date.now()),
+    ]);
+    if (typeof sequence !== 'string' && typeof sequence !== 'number')
+      throw new Error('Redis returned an invalid activity sequence');
+    return String(sequence);
+  }
+
   private async publishLedgerUpdate(
     activity: ProcessorActivity,
     chain: Chain,
@@ -209,7 +248,7 @@ export class ActivityWorkflowService {
     state: LedgerActivity['state'],
     observation: Pick<ChainObservation, 'blockHash' | 'blockHeight'>,
     sourceChanges: ProcessorActivity['balanceChanges'],
-    observationSequence: number,
+    observationSequence: string,
     canonicalReconciliation = false,
   ) {
     const ledgerActivity = ledgerActivitySchema.parse({
@@ -227,7 +266,7 @@ export class ActivityWorkflowService {
       changes: sourceChanges.flatMap((walletChanges) =>
         walletChanges.changes.map((change) => ({
           wallet: walletChanges.wallet,
-          asset: this.normalizeAssetIdentifier(change.token, chain),
+          asset: this.normalizeAssetIdentifier(change.token),
           amount: change.amount,
         })),
       ),
@@ -278,7 +317,7 @@ export class ActivityWorkflowService {
     }));
   }
 
-  private normalizeAssetIdentifier(identifier: string, chain: Chain) {
+  private normalizeAssetIdentifier(identifier: string) {
     const match = /^token:([^:]+):/.exec(identifier);
     const tokenChain = match && resolveChainIdentifier(match[1]);
     return tokenChain ? identifier.replace(/^token:[^:]+:/, `token:${tokenChain}:`) : identifier;

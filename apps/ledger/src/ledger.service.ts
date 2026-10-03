@@ -129,7 +129,7 @@ export class LedgerService {
       let revision = existing?.revision ?? 0;
 
       if (existing) {
-        const observationSequence = activity.observationSequence ?? 0;
+        const observationSequence = BigInt(activity.observationSequence ?? '0');
         if (observationSequence <= existing.observation_sequence) return existing;
         const sameBlock =
           existing.block_hash === activity.blockHash &&
@@ -208,7 +208,7 @@ export class LedgerService {
       transaction_hash: activity.transactionHash,
       state,
       revision,
-      observation_sequence: activity.observationSequence ?? 0,
+      observation_sequence: BigInt(activity.observationSequence ?? '0'),
       canonical_reconciliation: activity.canonicalReconciliation ?? false,
       block_hash: activity.blockHash,
       block_height: activity.blockHeight ? BigInt(activity.blockHeight) : null,
@@ -344,11 +344,12 @@ export class LedgerService {
     const previous = fresh.last_entry_id
       ? await tx.ledgerEntry.findUniqueOrThrow({ where: { id: fresh.last_entry_id } })
       : undefined;
-    const side: EntrySide = normalDelta > 0n
-      ? (fresh.normal_side as EntrySide)
-      : fresh.normal_side === 'debit'
-        ? 'credit'
-        : 'debit';
+    const side: EntrySide =
+      normalDelta > 0n
+        ? (fresh.normal_side as EntrySide)
+        : fresh.normal_side === 'debit'
+          ? 'credit'
+          : 'debit';
     const amount = normalDelta < 0n ? -normalDelta : normalDelta;
     const previousBalance = previous ? BigInt(previous.balance_after.toFixed(0)) : 0n;
     const balanceAfter = previousBalance + normalDelta;

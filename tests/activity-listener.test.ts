@@ -42,6 +42,7 @@ function activity(): ProcessorActivity {
 function workflow(
   observations: {
     state: 'observed' | 'finalized' | 'failed' | 'reverted';
+    transactionFound?: boolean;
     blockHash?: string;
     blockHeight?: string;
     feeAmount?: string;
@@ -52,9 +53,21 @@ function workflow(
   const ledgerJobs: { name: string; data: unknown; options: { jobId: string } }[] = [];
   const activityJobs: { name: string; data: unknown; options: { jobId: string; delay: number } }[] =
     [];
+  let observationSequence = 0n;
+  const redis = {
+    runCommand: async (_name: string, args: unknown[]) => {
+      const baseline = BigInt(String(args[1]));
+      observationSequence =
+        observationSequence > baseline ? observationSequence + 1n : baseline + 1n;
+      return observationSequence.toString();
+    },
+    defineCommand: () => undefined,
+  };
   const ledger = {
     add: async (name: string, data: unknown, options: { jobId: string }) =>
       ledgerJobs.push({ name, data, options }),
+    toKey: (key: string) => `test:ledger:${key}`,
+    getBackend: () => ({ client: Promise.resolve(redis) }),
   } as unknown as Queue;
   const activityQueue = {
     add: async (name: string, data: unknown, options: { jobId: string; delay: number }) =>
@@ -120,7 +133,7 @@ test('activity listener emits provisional then finalized ledger updates', async 
 test('activity listener reverses a previously mined transaction removed from the canonical chain', async () => {
   const state = workflow([
     { state: 'observed', blockHash: '0xold-block', blockHeight: '10' },
-    { state: 'observed' },
+    { state: 'observed', transactionFound: false },
   ]);
   const source = activity();
   await state.service.receive(source, 'pubsub-reorg');
@@ -135,10 +148,85 @@ test('activity listener reverses a previously mined transaction removed from the
   if (reverted.type === 'ledger.activity.update') {
     assert.equal(reverted.activity.state, 'reverted');
     assert.equal(reverted.activity.canonicalReconciliation, true);
-    assert.equal(reverted.activity.observationSequence, 1);
+    assert.ok(BigInt(reverted.activity.observationSequence!) > 0n);
     assert.deepEqual(reverted.activity.changes, []);
   }
   assert.equal(state.activityJobs.length, 2);
+});
+
+test('activity listener keeps a previously mined transaction provisional when it remains in mempool', async () => {
+  const state = workflow([{ state: 'observed', transactionFound: true }]);
+  await state.service.resumeFinality(activity(), 1, '0xold-block');
+  const observed = state.auth.open(
+    state.ledgerJobs[0].data,
+    state.ledgerJobs[0].options.jobId,
+    state.ledgerJobs[0].name,
+  );
+  assert.equal(observed.type, 'ledger.activity.update');
+  if (observed.type === 'ledger.activity.update') {
+    assert.equal(observed.activity.state, 'observed');
+    assert.equal(observed.activity.canonicalReconciliation, true);
+    assert.notDeepEqual(observed.activity.changes, []);
+  }
+});
+
+test('activity observation ordering follows RPC start order when responses complete out of order', async () => {
+  const ledgerJobs: { name: string; data: unknown; options: { jobId: string } }[] = [];
+  let sequence = 0n;
+  const redis = {
+    runCommand: async () => (++sequence).toString(),
+    defineCommand: () => undefined,
+  };
+  const ledgerQueue = {
+    add: async (name: string, data: unknown, options: { jobId: string }) =>
+      ledgerJobs.push({ name, data, options }),
+    toKey: (key: string) => key,
+    getBackend: () => ({ client: Promise.resolve(redis) }),
+  } as unknown as Queue;
+  const activityQueue = { add: async () => undefined } as unknown as Queue;
+  const auth = new MessageAuth('c'.repeat(64));
+  let resolveOlder!: () => void;
+  let markOlderStarted!: () => void;
+  const olderStarted = new Promise<void>((resolve) => (markOlderStarted = resolve));
+  const olderGate = new Promise<void>((resolve) => (resolveOlder = resolve));
+  let observations = 0;
+  const rpc = {
+    networkIdentity: () => '11155111',
+    observeTransaction: async () => {
+      observations += 1;
+      if (observations === 1) {
+        markOlderStarted();
+        await olderGate;
+        return { state: 'observed' as const, transactionFound: true, blockHash: '0xold' };
+      }
+      return { state: 'finalized' as const, transactionFound: true, blockHash: '0xnew' };
+    },
+  } as unknown as ChainRpcService;
+  const service = new ActivityWorkflowService(rpc, auth, activityQueue, ledgerQueue, {
+    pubsubProjectId: 'test',
+    pubsubSubscription: 'test-subscription',
+    pubsubApiEndpoint: undefined,
+    finalityPollMs: 30000,
+    finalityMaxPolls: 3,
+    reconciliationPollMs: 300000,
+  });
+  const source = activity();
+  const older = service.receive(source, 'pubsub-older');
+  await olderStarted;
+  await service.receive(source, 'pubsub-newer');
+  resolveOlder();
+  await older;
+
+  const published = ledgerJobs.map((job) => auth.open(job.data, job.options.jobId, job.name));
+  const newer = published[0];
+  const delayedOlder = published[1];
+  assert.equal(newer.type, 'ledger.activity.update');
+  assert.equal(delayedOlder.type, 'ledger.activity.update');
+  if (newer.type === 'ledger.activity.update' && delayedOlder.type === 'ledger.activity.update') {
+    const newerSequence = BigInt(newer.activity.observationSequence!);
+    const olderSequence = BigInt(delayedOlder.activity.observationSequence!);
+    assert.ok(newerSequence > olderSequence);
+  }
 });
 
 test('failed EVM transactions post the network fee but not reverted transfers', async () => {
@@ -228,6 +316,7 @@ test('shared chain resolver accepts every canonical chain and the BSC alias', ()
   assert.equal(resolveChainIdentifier('smartChain'), 'smartChain');
   assert.equal(resolveChainIdentifier('bsc'), 'smartChain');
   assert.equal(resolveChainIdentifier('unknown-chain'), undefined);
+  assert.equal(resolveChainIdentifier('toString'), undefined);
 });
 
 test('exhausted RPC retries publish attention without dropping provisional changes', async () => {

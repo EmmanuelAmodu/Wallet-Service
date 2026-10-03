@@ -113,6 +113,7 @@ test('application configuration is scoped and rejects unsafe settings at startup
     PUBSUB_SUBSCRIPTION: 'test-subscription',
     PUBSUB_API_ENDPOINT: '127.0.0.1:8086',
   });
+  assert.equal(activityListenerConfig().reconciliationPollMs, 300000);
   assert.equal(ledgerConfig().apiKey, 'c'.repeat(64));
   assert.equal(activityListenerConfig().pubsubSubscription, 'test-subscription');
   assert.equal(activityListenerConfig().reconciliationPollMs, 300000);
