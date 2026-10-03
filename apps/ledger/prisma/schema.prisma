@@ -29,6 +29,8 @@ model LedgerActivity {
   transaction_hash String
   state            String
   revision         Int           @default(0)
+  observation_sequence     Int           @default(0)
+  canonical_reconciliation Boolean       @default(false)
   block_hash       String?
   block_height     BigInt?
   completed_at_ms  BigInt

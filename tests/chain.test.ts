@@ -95,3 +95,20 @@ test('EVM and Bitcoin-family preparation use the configured chain RPC', async (t
   assert.deepEqual(customCalls.slice(4), ['getblockchaininfo', 'gettxout']);
   assert.deepEqual(fallbackCalls, []);
 });
+
+test('Bitcoin mempool transactions without confirmations are observed', async (t) => {
+  const calls: string[] = [];
+  const url = await rpcServer(t, calls, (method) => {
+    if (method === 'getblockchaininfo') return { chain: 'main' };
+    if (method === 'getrawtransaction') return { txid: '01'.repeat(32) };
+    throw new Error(`Unexpected RPC method: ${method}`);
+  });
+  const rpc = new ChainRpcService({
+    ethereumChainId: '1',
+    bitcoinUrl: url,
+    solanaGenesisHash: 'devnet',
+  });
+
+  assert.deepEqual(await rpc.observeTransaction('bitcoin', '01'.repeat(32)), { state: 'observed' });
+  assert.deepEqual(calls, ['getblockchaininfo', 'getrawtransaction']);
+});

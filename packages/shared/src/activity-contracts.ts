@@ -61,7 +61,7 @@ export const ledgerActivityChangeSchema = z
   .object({
     wallet: walletIdentifierSchema,
     asset: tokenIdentifierSchema,
-    amount: z.string().regex(/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?$/),
+    amount: z.string().regex(/^(?:0|-?[1-9][0-9]{0,77})$/),
   })
   .strict();
 export const ledgerActivitySchema = z
@@ -73,6 +73,8 @@ export const ledgerActivitySchema = z
     sourceStatus: z.enum(['success', 'failed']),
     state: ledgerActivityStateSchema,
     completedAtTimestamp: z.number().finite().nonnegative(),
+    observationSequence: z.number().int().nonnegative().optional(),
+    canonicalReconciliation: z.boolean().optional(),
     blockHash: z.string().min(1).max(256).optional(),
     blockHeight: z
       .string()

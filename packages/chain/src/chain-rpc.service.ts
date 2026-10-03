@@ -184,15 +184,18 @@ export class ChainRpcService {
       try {
         const transaction = z
           .object({
-            confirmations: z.number().int(),
+            confirmations: z.number().int().optional(),
             blockhash: z.string().optional(),
             blockheight: z.number().int().nonnegative().optional(),
           })
           .parse(await this.call(chain, 'getrawtransaction', [hash, true]));
-        if (transaction.confirmations < 0) return { state: 'reverted' };
+        if (transaction.confirmations !== undefined && transaction.confirmations < 0)
+          return { state: 'reverted' };
         return {
           state:
-            transaction.confirmations >= (settings.confirmations ?? 6) ? 'finalized' : 'observed',
+            (transaction.confirmations ?? 0) >= (settings.confirmations ?? 6)
+              ? 'finalized'
+              : 'observed',
           ...(transaction.blockhash ? { blockHash: transaction.blockhash } : {}),
           ...(transaction.blockheight !== undefined
             ? { blockHeight: String(transaction.blockheight) }

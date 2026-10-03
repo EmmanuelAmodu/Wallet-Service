@@ -8,6 +8,7 @@ import { ActivityListenerConfig } from '../apps/activity-listener/src/config/act
 import { ActivityWorkflowService } from '../apps/activity-listener/src/activity-workflow.service.js';
 import { ActivityPubSubService } from '../apps/activity-listener/src/activity-pubsub.service.js';
 import { ProcessorActivity } from '../packages/shared/src/activity-contracts.js';
+import { resolveChainIdentifier } from '../packages/shared/src/contracts.js';
 
 function activity(): ProcessorActivity {
   return {
@@ -40,7 +41,7 @@ function activity(): ProcessorActivity {
 
 function workflow(
   observations: {
-    state: 'observed' | 'finalized' | 'failed';
+    state: 'observed' | 'finalized' | 'failed' | 'reverted';
     blockHash?: string;
     blockHeight?: string;
     feeAmount?: string;
@@ -76,6 +77,7 @@ function workflow(
     pubsubApiEndpoint: undefined,
     finalityPollMs: 30000,
     finalityMaxPolls: 3,
+    reconciliationPollMs: 300000,
   };
   return {
     service: new ActivityWorkflowService(rpc, auth, activityQueue, ledger, config),
@@ -113,6 +115,30 @@ test('activity listener emits provisional then finalized ledger updates', async 
   assert.equal(finalized.type, 'ledger.activity.update');
   if (finalized.type === 'ledger.activity.update')
     assert.equal(finalized.activity.state, 'finalized');
+});
+
+test('activity listener reverses a previously mined transaction removed from the canonical chain', async () => {
+  const state = workflow([
+    { state: 'observed', blockHash: '0xold-block', blockHeight: '10' },
+    { state: 'observed' },
+  ]);
+  const source = activity();
+  await state.service.receive(source, 'pubsub-reorg');
+  await state.service.resumeFinality(source, 1, '0xold-block');
+
+  const reverted = state.auth.open(
+    state.ledgerJobs[1].data,
+    state.ledgerJobs[1].options.jobId,
+    state.ledgerJobs[1].name,
+  );
+  assert.equal(reverted.type, 'ledger.activity.update');
+  if (reverted.type === 'ledger.activity.update') {
+    assert.equal(reverted.activity.state, 'reverted');
+    assert.equal(reverted.activity.canonicalReconciliation, true);
+    assert.equal(reverted.activity.observationSequence, 1);
+    assert.deepEqual(reverted.activity.changes, []);
+  }
+  assert.equal(state.activityJobs.length, 2);
 });
 
 test('failed EVM transactions post the network fee but not reverted transfers', async () => {
@@ -197,10 +223,18 @@ test('listener BSC identifiers map to Wallet Core smartChain ledger assets', asy
   }
 });
 
+test('shared chain resolver accepts every canonical chain and the BSC alias', () => {
+  assert.equal(resolveChainIdentifier('litecoin'), 'litecoin');
+  assert.equal(resolveChainIdentifier('smartChain'), 'smartChain');
+  assert.equal(resolveChainIdentifier('bsc'), 'smartChain');
+  assert.equal(resolveChainIdentifier('unknown-chain'), undefined);
+});
+
 test('exhausted RPC retries publish attention without dropping provisional changes', async () => {
   const state = workflow([], '11155111', true);
   await state.service.receive(activity(), 'pubsub-offline', true);
   assert.equal(state.ledgerJobs.length, 1);
+  assert.equal(state.activityJobs.length, 1);
   const attention = state.auth.open(
     state.ledgerJobs[0].data,
     state.ledgerJobs[0].options.jobId,
@@ -211,6 +245,20 @@ test('exhausted RPC retries publish attention without dropping provisional chang
     assert.equal(attention.activity.state, 'attention');
     assert.equal(attention.activity.changes[0].amount, '-105');
   }
+});
+
+test('activity listener keeps exhausted finality checks recoverable at a slower interval', async () => {
+  const state = workflow([{ state: 'observed', blockHash: '0xblock', blockHeight: '10' }]);
+  await state.service.resumeFinality(activity(), 3, '0xblock');
+  const attention = state.auth.open(
+    state.ledgerJobs[0].data,
+    state.ledgerJobs[0].options.jobId,
+    state.ledgerJobs[0].name,
+  );
+  assert.equal(attention.type, 'ledger.activity.update');
+  if (attention.type === 'ledger.activity.update')
+    assert.equal(attention.activity.state, 'attention');
+  assert.equal(state.activityJobs[0].options.delay, 300000);
 });
 
 test('invalid Pub/Sub payloads are durably quarantined before acknowledgement', async () => {
@@ -226,6 +274,7 @@ test('invalid Pub/Sub payloads are durably quarantined before acknowledgement', 
     pubsubApiEndpoint: undefined,
     finalityPollMs: 30000,
     finalityMaxPolls: 3,
+    reconciliationPollMs: 300000,
   };
   const service = new ActivityPubSubService(config, auth, queue);
   let acknowledgements = 0;

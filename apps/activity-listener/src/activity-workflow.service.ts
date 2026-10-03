@@ -8,7 +8,7 @@ import {
   ledgerActivitySchema,
   ProcessorActivity,
 } from '../../../packages/shared/src/activity-contracts.js';
-import { Chain, chainSchema } from '../../../packages/shared/src/contracts.js';
+import { Chain, resolveChainIdentifier } from '../../../packages/shared/src/contracts.js';
 import {
   ChainRpcService,
   ChainObservation,
@@ -19,10 +19,6 @@ import {
   activityListenerConfig,
 } from './config/activity-listener.config.js';
 import { Inject } from '@nestjs/common';
-
-const sourceNetworkAliases: Record<string, Chain> = {
-  bsc: 'smartChain',
-};
 
 @Injectable()
 export class ActivityWorkflowService {
@@ -38,7 +34,7 @@ export class ActivityWorkflowService {
 
   async receive(activity: ProcessorActivity, pubsubMessageId: string, finalAttempt = false) {
     const { chain, transactionHash } = this.identity(activity);
-    await this.checkFinality(activity, chain, transactionHash, 0, finalAttempt);
+    await this.checkFinality(activity, chain, transactionHash, 0, undefined, finalAttempt);
     this.logger.debug(`Accepted activity ${activity.identifier} from Pub/Sub ${pubsubMessageId}`);
   }
 
@@ -55,32 +51,19 @@ export class ActivityWorkflowService {
       transactionHash,
       finalAttempt,
     );
-    if (!observation) return;
-    if (observation.state === 'observed') {
-      if (poll >= this.config.finalityMaxPolls) {
-        await this.publishLedgerUpdate(
-          activity,
-          chain,
-          transactionHash,
-          'attention',
-          observation,
-          activity.balanceChanges,
-        );
-        this.logger.warn(`Finality polling exhausted for ${activity.identifier}`);
-        return;
-      }
-      await this.publishLedgerUpdate(
-        activity,
-        chain,
-        transactionHash,
-        'observed',
-        observation,
-        activity.balanceChanges,
-      );
-      await this.scheduleFinality(activity, poll + 1, observation.blockHash ?? previousBlockHash);
+    if (!observation) {
+      await this.publishAttention(activity, chain, transactionHash, poll);
+      await this.scheduleFinality(activity, poll + 1, previousBlockHash);
       return;
     }
-    await this.publishSettledActivity(activity, chain, transactionHash, observation);
+    await this.publishObservation(
+      activity,
+      chain,
+      transactionHash,
+      poll,
+      previousBlockHash,
+      observation,
+    );
   }
 
   private async checkFinality(
@@ -88,6 +71,7 @@ export class ActivityWorkflowService {
     chain: Chain,
     transactionHash: string,
     poll: number,
+    previousBlockHash: string | undefined,
     finalAttempt: boolean,
   ) {
     const observation = await this.observeOrMarkAttention(
@@ -96,20 +80,85 @@ export class ActivityWorkflowService {
       transactionHash,
       finalAttempt,
     );
-    if (!observation) return;
-    if (observation.state === 'observed') {
+    if (!observation) {
+      await this.publishAttention(activity, chain, transactionHash, poll);
+      await this.scheduleFinality(activity, poll + 1, previousBlockHash);
+      return;
+    }
+    await this.publishObservation(
+      activity,
+      chain,
+      transactionHash,
+      poll,
+      previousBlockHash,
+      observation,
+    );
+  }
+
+  private async publishAttention(
+    activity: ProcessorActivity,
+    chain: Chain,
+    transactionHash: string,
+    observationSequence: number,
+  ) {
+    await this.publishLedgerUpdate(
+      activity,
+      chain,
+      transactionHash,
+      'attention',
+      {},
+      activity.balanceChanges,
+      observationSequence,
+    );
+    this.logger.warn(`Finality polling requires recovery for ${activity.identifier}`);
+  }
+
+  private async publishObservation(
+    activity: ProcessorActivity,
+    chain: Chain,
+    transactionHash: string,
+    observationSequence: number,
+    previousBlockHash: string | undefined,
+    observation: ChainObservation,
+  ) {
+    const current =
+      previousBlockHash && observation.state === 'observed' && !observation.blockHash
+        ? { ...observation, state: 'reverted' as const }
+        : observation;
+    const canonicalReconciliation =
+      previousBlockHash !== undefined || current.state === 'reverted';
+
+    if (current.state === 'observed') {
+      const state =
+        observationSequence >= this.config.finalityMaxPolls ? 'attention' : 'observed';
       await this.publishLedgerUpdate(
         activity,
         chain,
         transactionHash,
-        'observed',
-        observation,
+        state,
+        current,
         activity.balanceChanges,
+        observationSequence,
+        canonicalReconciliation,
       );
-      await this.scheduleFinality(activity, poll + 1, observation.blockHash);
-      return;
+      if (state === 'attention')
+        this.logger.warn(`Finality polling requires recovery for ${activity.identifier}`);
+    } else {
+      await this.publishSettledActivity(
+        activity,
+        chain,
+        transactionHash,
+        current,
+        observationSequence,
+        canonicalReconciliation,
+      );
     }
-    await this.publishSettledActivity(activity, chain, transactionHash, observation);
+
+    await this.scheduleFinality(
+      activity,
+      observationSequence + 1,
+      current.blockHash ?? previousBlockHash,
+    );
   }
 
   private async observeOrMarkAttention(
@@ -122,15 +171,8 @@ export class ActivityWorkflowService {
       return await this.rpc.observeTransaction(chain, transactionHash);
     } catch (error) {
       if (!finalAttempt) throw error;
-      await this.publishLedgerUpdate(
-        activity,
-        chain,
-        transactionHash,
-        'attention',
-        {},
-        activity.balanceChanges,
-      );
       this.logger.error(`RPC retries exhausted for ${activity.identifier}`, error);
+      return undefined;
     }
   }
 
@@ -139,6 +181,8 @@ export class ActivityWorkflowService {
     chain: Chain,
     transactionHash: string,
     observation: ChainObservation,
+    observationSequence: number,
+    canonicalReconciliation: boolean,
   ) {
     const changes =
       observation.state === 'failed'
@@ -153,6 +197,8 @@ export class ActivityWorkflowService {
       observation.state,
       observation,
       changes,
+      observationSequence,
+      canonicalReconciliation,
     );
   }
 
@@ -163,6 +209,8 @@ export class ActivityWorkflowService {
     state: LedgerActivity['state'],
     observation: Pick<ChainObservation, 'blockHash' | 'blockHeight'>,
     sourceChanges: ProcessorActivity['balanceChanges'],
+    observationSequence: number,
+    canonicalReconciliation = false,
   ) {
     const ledgerActivity = ledgerActivitySchema.parse({
       identifier: activity.identifier,
@@ -172,6 +220,8 @@ export class ActivityWorkflowService {
       sourceStatus: activity.status,
       state,
       completedAtTimestamp: activity.completedAtTimestamp,
+      observationSequence,
+      canonicalReconciliation,
       ...(observation.blockHash ? { blockHash: observation.blockHash } : {}),
       ...(observation.blockHeight ? { blockHeight: observation.blockHeight } : {}),
       changes: sourceChanges.flatMap((walletChanges) =>
@@ -199,7 +249,10 @@ export class ActivityWorkflowService {
       .digest('hex')}`;
     await this.activityQueue.add(payload.type, this.auth.seal(payload, jobId), {
       jobId,
-      delay: this.config.finalityPollMs,
+      delay:
+        poll > this.config.finalityMaxPolls
+          ? this.config.reconciliationPollMs
+          : this.config.finalityPollMs,
     });
   }
 
@@ -226,15 +279,14 @@ export class ActivityWorkflowService {
   }
 
   private normalizeAssetIdentifier(identifier: string, chain: Chain) {
-    if (chain !== 'smartChain') return identifier;
-    return identifier.replace(/^token:bsc:/, 'token:smartChain:');
+    const match = /^token:([^:]+):/.exec(identifier);
+    const tokenChain = match && resolveChainIdentifier(match[1]);
+    return tokenChain ? identifier.replace(/^token:[^:]+:/, `token:${tokenChain}:`) : identifier;
   }
 
   private identity(activity: ProcessorActivity) {
     const [, sourceNetwork, ...hashParts] = activity.identifier.split(':');
-    const chain =
-      sourceNetwork &&
-      (sourceNetworkAliases[sourceNetwork] ?? chainSchema.safeParse(sourceNetwork).data);
+    const chain = sourceNetwork && resolveChainIdentifier(sourceNetwork);
     const transactionHash = hashParts.join(':');
     if (!chain || !transactionHash)
       throw new ActionRejectedError('Unsupported activity identifier');

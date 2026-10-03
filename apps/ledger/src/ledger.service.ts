@@ -8,7 +8,12 @@ import {
   LedgerActivity,
   LedgerWalletRegistration,
 } from '../../../packages/shared/src/activity-contracts.js';
-import { Chain, chainFamily, chainSchema } from '../../../packages/shared/src/contracts.js';
+import {
+  Chain,
+  chainFamily,
+  chainSchema,
+  resolveChainIdentifier,
+} from '../../../packages/shared/src/contracts.js';
 import { LedgerPrismaService } from './prisma/prisma.service.js';
 
 type AccountKind = 'wallet' | 'clearing';
@@ -19,18 +24,7 @@ type LedgerAccountRow = Awaited<
   ReturnType<LedgerPrisma.TransactionClient['ledgerAccount']['findUniqueOrThrow']>
 >;
 
-type BalanceDelta = { walletId: string; asset: string; amount: Prisma.Decimal };
-
-const sourceNetworkChains: Record<string, Chain> = {
-  ethereum: 'ethereum',
-  polygon: 'polygon',
-  arbitrum: 'arbitrum',
-  optimism: 'optimism',
-  base: 'base',
-  bsc: 'smartChain',
-  bitcoin: 'bitcoin',
-  solana: 'solana',
-};
+type BalanceDelta = { walletId: string; asset: string; amount: bigint };
 
 function addressKey(chain: Chain, address: string) {
   if (chainFamily(chain) === 'ethereum') return address.toLowerCase();
@@ -41,7 +35,7 @@ function addressKey(chain: Chain, address: string) {
 
 function parseWalletIdentifier(identifier: string, expectedChain: Chain) {
   const match = /^wallet:([^:]+):(.+)$/.exec(identifier);
-  const chain = match && sourceNetworkChains[match[1]];
+  const chain = match && resolveChainIdentifier(match[1]);
   if (!match || chain !== expectedChain)
     throw new ActionRejectedError('Activity wallet identifier does not match its chain');
   return { chain, address: match[2] };
@@ -58,6 +52,16 @@ function accountKey(
   return kind === 'wallet'
     ? `wallet:${walletId}:${asset}:${balanceState}`
     : `clearing:${chain}:${network}:${asset}:${balanceState}`;
+}
+
+function assertLedgerInteger(amount: bigint) {
+  if ((amount < 0n ? -amount : amount).toString().length > 78)
+    throw new ActionRejectedError('Ledger amount exceeds supported precision');
+}
+
+function decimalFromInteger(amount: bigint) {
+  assertLedgerInteger(amount);
+  return new Prisma.Decimal(amount.toString());
 }
 
 @Injectable()
@@ -103,7 +107,7 @@ export class LedgerService {
     for (const account of accounts) {
       const balance = balances.get(account.asset) ?? { confirmed: '0', provisional: '0' };
       const amount = account.last_entry_id
-        ? (entryById.get(account.last_entry_id)?.balance_after.toString() ?? '0')
+        ? (entryById.get(account.last_entry_id)?.balance_after.toFixed(0) ?? '0')
         : '0';
       balance[account.balance_state as BalanceState] = amount;
       balances.set(account.asset, balance);
@@ -125,33 +129,51 @@ export class LedgerService {
       let revision = existing?.revision ?? 0;
 
       if (existing) {
+        const observationSequence = activity.observationSequence ?? 0;
+        if (observationSequence <= existing.observation_sequence) return existing;
         const sameBlock =
           existing.block_hash === activity.blockHash &&
           existing.block_hash !== null &&
           activity.blockHash !== undefined;
         const bothUnmined = !existing.block_hash && !activity.blockHash;
+        const terminal = ['finalized', 'failed', 'reverted'].includes(existing.state);
 
-        if (
-          activity.state === 'attention' &&
-          ['finalized', 'failed', 'reverted'].includes(existing.state)
-        )
-          return existing;
+        if (terminal && (sameBlock || bothUnmined))
+          return tx.ledgerActivity.update({
+            where: { identifier: activity.identifier },
+            data: {
+              observation_sequence: observationSequence,
+              canonical_reconciliation: activity.canonicalReconciliation ?? false,
+            },
+          });
+        if (terminal && !(activity.canonicalReconciliation ?? false)) return existing;
+        if (terminal && activity.state === 'attention') return existing;
         if (activity.state === 'attention' && ['observed', 'attention'].includes(existing.state))
           return tx.ledgerActivity.update({
             where: { identifier: activity.identifier },
-            data: { state: 'attention', last_error: 'Finality polling exhausted' },
+            data: {
+              state: 'attention',
+              observation_sequence: observationSequence,
+              last_error: 'Finality polling exhausted',
+            },
           });
-        if (activity.state === 'observed') {
-          if (
-            ['finalized', 'failed'].includes(existing.state) &&
-            (!activity.blockHash || sameBlock)
-          )
-            return existing;
-          if (existing.state === 'attention' && (sameBlock || bothUnmined)) return existing;
-          if (['observed', 'attention'].includes(existing.state) && (sameBlock || bothUnmined))
-            return existing;
-        } else if (activity.state === existing.state && (sameBlock || bothUnmined)) {
-          return existing;
+        if (
+          activity.state === 'observed' &&
+          existing.state === 'attention' &&
+          (sameBlock || bothUnmined)
+        )
+          return tx.ledgerActivity.update({
+            where: { identifier: activity.identifier },
+            data: this.activityData(activity, activity.state, existing.revision),
+          });
+        if (activity.state === existing.state && (sameBlock || bothUnmined)) {
+          return tx.ledgerActivity.update({
+            where: { identifier: activity.identifier },
+            data: {
+              observation_sequence: observationSequence,
+              canonical_reconciliation: activity.canonicalReconciliation ?? false,
+            },
+          });
         }
 
         await this.reverseCurrentRevision(
@@ -186,6 +208,8 @@ export class LedgerService {
       transaction_hash: activity.transactionHash,
       state,
       revision,
+      observation_sequence: activity.observationSequence ?? 0,
+      canonical_reconciliation: activity.canonicalReconciliation ?? false,
       block_hash: activity.blockHash,
       block_height: activity.blockHeight ? BigInt(activity.blockHeight) : null,
       completed_at_ms: BigInt(Math.trunc(activity.completedAtTimestamp)),
@@ -214,15 +238,17 @@ export class LedgerService {
       });
       if (!wallet) throw new ConflictException('Activity references an unregistered wallet');
       const key = `${wallet.wallet_id}:${change.asset}`;
-      const amount = new Prisma.Decimal(change.amount);
+      const amount = BigInt(change.amount);
       const previous = totals.get(key);
+      const total = (previous?.amount ?? 0n) + amount;
+      assertLedgerInteger(total);
       totals.set(key, {
         walletId: wallet.wallet_id,
         asset: change.asset,
-        amount: previous ? previous.amount.plus(amount) : amount,
+        amount: total,
       });
     }
-    return [...totals.values()].filter((delta) => !delta.amount.isZero());
+    return [...totals.values()].filter((delta) => delta.amount !== 0n);
   }
 
   private async postDoubleEntry(
@@ -232,7 +258,7 @@ export class LedgerService {
     balanceState: BalanceState,
     deltas: BalanceDelta[],
   ) {
-    const netByAsset = new Map<string, Prisma.Decimal>();
+    const netByAsset = new Map<string, bigint>();
     for (const delta of deltas) {
       const account = await this.getAccount(tx, {
         key: accountKey(
@@ -252,14 +278,13 @@ export class LedgerService {
         walletId: delta.walletId,
       });
       await this.appendEntry(tx, account, activity, revision, delta.amount, 'wallet');
-      netByAsset.set(
-        delta.asset,
-        (netByAsset.get(delta.asset) ?? new Prisma.Decimal(0)).plus(delta.amount),
-      );
+      const net = (netByAsset.get(delta.asset) ?? 0n) + delta.amount;
+      assertLedgerInteger(net);
+      netByAsset.set(delta.asset, net);
     }
 
     for (const [asset, net] of netByAsset) {
-      if (net.isZero()) continue;
+      if (net === 0n) continue;
       const clearing = await this.getAccount(tx, {
         key: accountKey('clearing', activity.chain, activity.network, asset, balanceState),
         kind: 'clearing',
@@ -307,11 +332,11 @@ export class LedgerService {
     account: LedgerAccountRow,
     activity: LedgerActivity,
     revision: number,
-    normalDelta: Prisma.Decimal,
+    normalDelta: bigint,
     entryKind: PostingKind,
     reversalOfId?: string,
   ) {
-    if (normalDelta.isZero()) return;
+    if (normalDelta === 0n) return;
     await lock(tx, `ledger-account-${account.account_key}`);
     const fresh = await tx.ledgerAccount.findUniqueOrThrow({
       where: { account_key: account.account_key },
@@ -319,13 +344,16 @@ export class LedgerService {
     const previous = fresh.last_entry_id
       ? await tx.ledgerEntry.findUniqueOrThrow({ where: { id: fresh.last_entry_id } })
       : undefined;
-    const side: EntrySide = normalDelta.isPositive()
+    const side: EntrySide = normalDelta > 0n
       ? (fresh.normal_side as EntrySide)
       : fresh.normal_side === 'debit'
         ? 'credit'
         : 'debit';
-    const amount = normalDelta.abs();
-    const balanceAfter = (previous?.balance_after ?? new Prisma.Decimal(0)).plus(normalDelta);
+    const amount = normalDelta < 0n ? -normalDelta : normalDelta;
+    const previousBalance = previous ? BigInt(previous.balance_after.toFixed(0)) : 0n;
+    const balanceAfter = previousBalance + normalDelta;
+    assertLedgerInteger(amount);
+    assertLedgerInteger(balanceAfter);
     const id = randomUUID();
     await tx.ledgerEntry.create({
       data: {
@@ -339,8 +367,8 @@ export class LedgerService {
         account_kind: fresh.account_kind,
         balance_state: fresh.balance_state,
         side,
-        amount,
-        balance_after: balanceAfter,
+        amount: decimalFromInteger(amount),
+        balance_after: decimalFromInteger(balanceAfter),
         entry_kind: entryKind,
         previous_entry_id: fresh.last_entry_id,
         reversal_of_id: reversalOfId,
@@ -371,8 +399,8 @@ export class LedgerService {
     });
     for (const entry of entries) {
       const account = entry.account;
-      const normalDelta =
-        entry.side === account.normal_side ? entry.amount : entry.amount.negated();
+      const amount = BigInt(entry.amount.toFixed(0));
+      const normalDelta = entry.side === account.normal_side ? amount : -amount;
       await this.appendEntry(
         tx,
         account,
@@ -387,7 +415,7 @@ export class LedgerService {
           changes: [],
         },
         revision + 1,
-        normalDelta.negated(),
+        -normalDelta,
         'reversal',
         entry.id,
       );

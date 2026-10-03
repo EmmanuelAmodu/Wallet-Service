@@ -89,6 +89,7 @@ test('application configuration is scoped and rejects unsafe settings at startup
     'PUBSUB_PROJECT_ID',
     'PUBSUB_SUBSCRIPTION',
     'PUBSUB_API_ENDPOINT',
+    'ACTIVITY_RECONCILIATION_POLL_MS',
     'NODE_ENV',
   ];
   const original = Object.fromEntries(names.map((name) => [name, process.env[name]]));
@@ -114,6 +115,7 @@ test('application configuration is scoped and rejects unsafe settings at startup
   });
   assert.equal(ledgerConfig().apiKey, 'c'.repeat(64));
   assert.equal(activityListenerConfig().pubsubSubscription, 'test-subscription');
+  assert.equal(activityListenerConfig().reconciliationPollMs, 300000);
   process.env.NODE_ENV = 'production';
   process.env.LEDGER_API_KEY = 'b'.repeat(64);
   process.env.QUEUE_AUTH_KEY = 'b'.repeat(64);

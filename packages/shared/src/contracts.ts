@@ -90,6 +90,12 @@ export type BitcoinChain = (typeof bitcoinChains)[number];
 export type SolanaChain = (typeof solanaChains)[number];
 export type ChainFamily = 'ethereum' | 'bitcoin' | 'solana';
 
+const chainAliases: Record<string, Chain> = { bsc: 'smartChain' };
+
+export function resolveChainIdentifier(identifier: string): Chain | undefined {
+  return chainAliases[identifier] ?? chainSchema.safeParse(identifier).data;
+}
+
 const evmChainSet = new Set<string>(evmChains);
 const bitcoinChainSet = new Set<string>(bitcoinChains);
 export function isEvmChain(chain: Chain): chain is EvmChain {

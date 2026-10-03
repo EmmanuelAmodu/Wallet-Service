@@ -18,7 +18,7 @@ export class LedgerProcessor extends WorkerHost implements BeforeApplicationShut
     await this.worker.close();
   }
 
-  async process(job: Job) {
+  async process(job: Job): Promise<void> {
     let message: Message;
     try {
       message = this.auth.open(job.data, job.id!, job.name);
@@ -26,10 +26,14 @@ export class LedgerProcessor extends WorkerHost implements BeforeApplicationShut
       throw new UnrecoverableError('Invalid queue message');
     }
     try {
-      if (message.type === 'ledger.wallet.registered')
-        return await this.service.registerWallet(message);
-      if (message.type === 'ledger.activity.update')
-        return await this.service.applyActivity(message.activity);
+      if (message.type === 'ledger.wallet.registered') {
+        await this.service.registerWallet(message);
+        return;
+      }
+      if (message.type === 'ledger.activity.update') {
+        await this.service.applyActivity(message.activity);
+        return;
+      }
       throw new ActionRejectedError('Unsupported ledger action');
     } catch (error) {
       if (error instanceof ActionRejectedError) throw new UnrecoverableError(error.message);

@@ -2,10 +2,20 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
+import { Queue, Worker } from 'bullmq';
+import { ActivityWorkflowService } from '../apps/activity-listener/src/activity-workflow.service.js';
+import { ActivityListenerConfig } from '../apps/activity-listener/src/config/activity-listener.config.js';
 import { LedgerPrismaService } from '../apps/ledger/src/prisma/prisma.service.js';
+import { LedgerProcessor } from '../apps/ledger/src/ledger.processor.js';
 import { LedgerService } from '../apps/ledger/src/ledger.service.js';
 import { migrate } from '../scripts/migrate.js';
-import { LedgerActivity } from '../packages/shared/src/activity-contracts.js';
+import {
+  LedgerActivity,
+  ProcessorActivity,
+} from '../packages/shared/src/activity-contracts.js';
+import { connection } from '../packages/queue/src/messaging.module.js';
+import { MessageAuth, Message, QUEUES } from '../packages/queue/src/messages.js';
+import { Job } from 'bullmq';
 
 const enabled = !!process.env.TEST_LEDGER_DATABASE_URL;
 const db = enabled
@@ -16,10 +26,115 @@ const tenantId = `ledger-test-${randomUUID()}`;
 const walletAddresses = [randomBytes(20).toString('hex'), randomBytes(20).toString('hex')].map(
   (address) => `0x${address}`,
 );
-const identifiers = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()].map(
-  (id) => `transaction:ethereum:${id}`,
-);
+const identifiers = Array.from({ length: 8 }, () => `transaction:ethereum:${randomUUID()}`);
 let service: LedgerService;
+
+test('ledger processor returns a JSON-safe void acknowledgement after commit', async () => {
+  const auth = new MessageAuth('f'.repeat(64));
+  const message = { type: 'ledger.activity.update' as const, activity: activity(0, 'observed', 'block') };
+  const jobId = randomUUID();
+  const job = {
+    id: jobId,
+    name: message.type,
+    data: auth.seal(message, jobId),
+  } as Job;
+  const processor = new LedgerProcessor(
+    { applyActivity: async () => ({ created_at: new Date(), block_height: 1n }) } as unknown as LedgerService,
+    auth,
+  );
+
+  assert.equal(await processor.process(job), undefined);
+});
+
+test(
+  'ActivityListener to Ledger BullMQ path commits an exact large balance and completes the job',
+  { skip: !enabled || !process.env.TEST_REDIS_URL, timeout: 15000 },
+  async () => {
+    const prefix = `ledger-flow-${randomUUID()}`;
+    const options = { connection: connection(process.env.TEST_REDIS_URL!), prefix };
+    const activityQueue = new Queue(QUEUES.activity, options);
+    const ledgerQueue = new Queue(QUEUES.ledger, options);
+    const auth = new MessageAuth('9'.repeat(64));
+    const processor = new LedgerProcessor(service, auth);
+    const worker = new Worker(QUEUES.ledger, (job) => processor.process(job), options);
+    const identifier = `transaction:ethereum:${randomUUID()}`;
+    const source: ProcessorActivity = {
+      identifier,
+      completedAtTimestamp: 1000,
+      metadata: {},
+      status: 'success',
+      transfers: [],
+      tokenIdentifiers: ['token:ethereum:native'],
+      fee: { amount: 0, feePayer: [] },
+      balanceChanges: [
+        {
+          wallet: `wallet:ethereum:${walletAddresses[0]}`,
+          changes: [{ token: 'token:ethereum:native', amount: '-1000000000000000000001' }],
+        },
+      ],
+    };
+    const config: ActivityListenerConfig = {
+      pubsubProjectId: 'test',
+      pubsubSubscription: 'test-subscription',
+      pubsubApiEndpoint: undefined,
+      finalityPollMs: 30000,
+      finalityMaxPolls: 3,
+      reconciliationPollMs: 300000,
+    };
+    const listener = new ActivityWorkflowService(
+      {
+        networkIdentity: () => '11155111',
+        observeTransaction: async () => ({
+          state: 'finalized' as const,
+          blockHash: '0xflow-block',
+          blockHeight: '10',
+        }),
+      } as never,
+      auth,
+      activityQueue,
+      ledgerQueue,
+      config,
+    );
+    const before = BigInt(
+      (await service.balances(walletIds[0], tenantId)).balances.find(
+        (balance) => balance.asset === 'token:ethereum:native',
+      )!.confirmed,
+    );
+
+    try {
+      await worker.waitUntilReady();
+      await listener.receive(source, 'pubsub-ledger-integration');
+      let completed: Job | undefined;
+      const deadline = Date.now() + 10000;
+      while (!completed && Date.now() < deadline) {
+        const jobs = await ledgerQueue.getJobs(['completed'], 0, 100);
+        completed = jobs.find((job) => {
+          const message = auth.open(job.data, job.id!, job.name) as Message;
+          return message.type === 'ledger.activity.update' && message.activity.identifier === identifier;
+        });
+        if (!completed) await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert(completed, 'Ledger queue job should complete');
+      assert.equal(completed.returnvalue, undefined);
+      const after = BigInt(
+        (await service.balances(walletIds[0], tenantId)).balances.find(
+          (balance) => balance.asset === 'token:ethereum:native',
+        )!.confirmed,
+      );
+      assert.equal(after, before - 1_000_000_000_000_000_000_001n);
+      assert.equal(
+        (await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier } })).state,
+        'finalized',
+      );
+    } finally {
+      await worker.close();
+      await activityQueue.obliterate({ force: true });
+      await ledgerQueue.obliterate({ force: true });
+      await activityQueue.close();
+      await ledgerQueue.close();
+    }
+  },
+);
 
 before(async () => {
   if (!db) return;
@@ -67,6 +182,8 @@ function activity(
   index: number,
   state: LedgerActivity['state'],
   blockHash: string,
+  observationSequence = 0,
+  canonicalReconciliation = false,
 ): LedgerActivity {
   return {
     identifier: identifiers[index],
@@ -76,6 +193,8 @@ function activity(
     sourceStatus: 'success',
     state,
     completedAtTimestamp: 1000,
+    observationSequence,
+    canonicalReconciliation,
     blockHash,
     blockHeight: '10',
     changes: [
@@ -118,13 +237,23 @@ test(
     assert.equal(balances.balances[0].confirmed, '0');
     assert.equal(balances.balances[0].provisional, '-100');
 
-    await service.applyActivity({ ...first, state: 'finalized' });
+    await service.applyActivity({
+      ...first,
+      state: 'finalized',
+      observationSequence: 1,
+      canonicalReconciliation: true,
+    });
     balances = await service.balances(walletIds[0], tenantId);
     assert.equal(balances.balances[0].confirmed, '-100');
     assert.equal(balances.balances[0].provisional, '0');
     entries = await db!.ledgerEntry.count({ where: { activity_identifier: identifiers[0] } });
     assert.equal(entries, 6);
-    await service.applyActivity({ ...first, state: 'finalized' });
+    await service.applyActivity({
+      ...first,
+      state: 'finalized',
+      observationSequence: 1,
+      canonicalReconciliation: true,
+    });
     assert.equal(
       await db!.ledgerEntry.count({ where: { activity_identifier: identifiers[0] } }),
       entries,
@@ -150,7 +279,7 @@ test(
       }
       assert.equal(account.last_entry_id, chain.at(-1)?.id);
     }
-    await service.applyActivity({ ...first, state: 'attention' });
+    await service.applyActivity({ ...first, state: 'attention', observationSequence: 2 });
     assert.equal(
       (await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier: identifiers[0] } })).state,
       'finalized',
@@ -158,6 +287,7 @@ test(
     await service.applyActivity({
       ...first,
       state: 'observed',
+      observationSequence: 3,
       blockHash: undefined,
       blockHeight: undefined,
     });
@@ -167,11 +297,16 @@ test(
 
     const second = activity(1, 'observed', '0xblock-b');
     await service.applyActivity(second);
-    await service.applyActivity({ ...second, state: 'attention' });
+    await service.applyActivity({ ...second, state: 'attention', observationSequence: 1 });
     balances = await service.balances(walletIds[0], tenantId);
     assert.equal(balances.balances[0].provisional, '-100');
-    await service.applyActivity(second);
-    await service.applyActivity({ ...second, state: 'finalized' });
+    await service.applyActivity({ ...second, observationSequence: 2 });
+    await service.applyActivity({
+      ...second,
+      state: 'finalized',
+      observationSequence: 3,
+      canonicalReconciliation: true,
+    });
     balances = await service.balances(walletIds[0], tenantId);
     assert.equal(balances.balances[0].confirmed, '-200');
     assert.equal(balances.balances[0].provisional, '0');
@@ -183,7 +318,12 @@ test(
 
     const third = activity(2, 'observed', '0xblock-c');
     await service.applyActivity(third);
-    await service.applyActivity({ ...third, blockHash: '0xblock-d' });
+    await service.applyActivity({
+      ...third,
+      blockHash: '0xblock-d',
+      observationSequence: 1,
+      canonicalReconciliation: true,
+    });
     balances = await service.balances(walletIds[0], tenantId);
     assert.equal(balances.balances[0].provisional, '-200');
     await service.applyActivity({
@@ -191,6 +331,8 @@ test(
       state: 'reverted',
       blockHash: '0xblock-d',
       changes: [],
+      observationSequence: 2,
+      canonicalReconciliation: true,
     });
     balances = await service.balances(walletIds[0], tenantId);
     assert.equal(balances.balances[0].provisional, '-100');
@@ -212,5 +354,52 @@ test(
     const clearingEntry = feeJournal.find((entry) => entry.account_kind === 'clearing');
     assert.equal(clearingEntry?.side, 'debit');
     assert.equal(clearingEntry?.amount.toString(), '5');
+
+    balances = await service.balances(walletIds[0], tenantId);
+    const beforeLargePostings = BigInt(balances.balances[0].provisional);
+    const large = activity(5, 'observed', '0xblock-large');
+    large.changes[0].amount = '-1000000000000000000000';
+    large.changes[1].amount = '1000000000000000000000';
+    await service.applyActivity(large);
+    const unit = activity(6, 'observed', '0xblock-unit');
+    unit.changes[0].amount = '-1';
+    unit.changes[1].amount = '1';
+    await service.applyActivity(unit);
+    balances = await service.balances(walletIds[0], tenantId);
+    assert.equal(
+      BigInt(balances.balances[0].provisional),
+      beforeLargePostings - 1_000_000_000_000_000_000_000n - 1n,
+    );
+
+    const confirmedBeforeFinality = BigInt(balances.balances[0].confirmed);
+    const finalized = activity(7, 'finalized', '0xcanonical-a', 5);
+    await service.applyActivity(finalized);
+    balances = await service.balances(walletIds[0], tenantId);
+    const confirmedAfterFinality = BigInt(balances.balances[0].confirmed);
+    assert.equal(confirmedAfterFinality, confirmedBeforeFinality - 100n);
+
+    await service.applyActivity({
+      ...finalized,
+      state: 'observed',
+      blockHash: '0xstale-block',
+      observationSequence: 4,
+    });
+    balances = await service.balances(walletIds[0], tenantId);
+    assert.equal(BigInt(balances.balances[0].confirmed), confirmedAfterFinality);
+    assert.equal(
+      BigInt(balances.balances[0].provisional),
+      beforeLargePostings - 1_000_000_000_000_000_000_000n - 1n,
+    );
+
+    await service.applyActivity({
+      ...finalized,
+      state: 'reverted',
+      blockHash: undefined,
+      changes: [],
+      observationSequence: 6,
+      canonicalReconciliation: true,
+    });
+    balances = await service.balances(walletIds[0], tenantId);
+    assert.equal(BigInt(balances.balances[0].confirmed), confirmedBeforeFinality);
   },
 );
