@@ -311,6 +311,53 @@ test('listener BSC identifiers map to Wallet Core smartChain ledger assets', asy
   }
 });
 
+test('listener deduplicates BSC and smartChain aliases using canonical chain, network, and hash', async () => {
+  const state = workflow(
+    [
+      { state: 'finalized', blockHash: '0xblock', blockHeight: '10' },
+      { state: 'finalized', blockHash: '0xblock', blockHeight: '10' },
+    ],
+    '56',
+  );
+  const bsc = activity();
+  bsc.identifier = 'transaction:bsc:0xABC';
+  bsc.balanceChanges = [
+    {
+      wallet: 'wallet:bsc:0x' + '11'.repeat(20),
+      changes: [{ token: 'token:bsc:native', amount: '100' }],
+    },
+  ];
+  const canonical = activity();
+  canonical.identifier = 'transaction:smartChain:0xabc';
+  canonical.balanceChanges = [
+    {
+      wallet: 'wallet:smartChain:0x' + '11'.repeat(20),
+      changes: [{ token: 'token:smartChain:native', amount: '100' }],
+    },
+  ];
+
+  await state.service.receive(bsc, 'pubsub-bsc-alias');
+  await state.service.receive(canonical, 'pubsub-canonical-chain');
+
+  const updates = state.ledgerJobs.map((job) =>
+    state.auth.open(job.data, job.options.jobId, job.name),
+  );
+  assert.equal(updates[0].type, 'ledger.activity.update');
+  assert.equal(updates[1].type, 'ledger.activity.update');
+  if (
+    updates[0].type === 'ledger.activity.update' &&
+    updates[1].type === 'ledger.activity.update'
+  ) {
+    assert.equal(updates[0].activity.identifier, 'transaction:smartChain:56:0xabc');
+    assert.equal(updates[1].activity.identifier, updates[0].activity.identifier);
+    assert.equal(updates[0].activity.transactionHash, updates[1].activity.transactionHash);
+    assert.ok(
+      BigInt(updates[1].activity.observationSequence!) >
+        BigInt(updates[0].activity.observationSequence!),
+    );
+  }
+});
+
 test('shared chain resolver accepts every canonical chain and the BSC alias', () => {
   assert.equal(resolveChainIdentifier('litecoin'), 'litecoin');
   assert.equal(resolveChainIdentifier('smartChain'), 'smartChain');

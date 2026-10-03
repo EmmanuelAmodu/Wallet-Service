@@ -8,7 +8,12 @@ import {
   ledgerActivitySchema,
   ProcessorActivity,
 } from '../../../packages/shared/src/activity-contracts.js';
-import { Chain, resolveChainIdentifier } from '../../../packages/shared/src/contracts.js';
+import {
+  canonicalTransactionHash,
+  canonicalTransactionIdentifier,
+  Chain,
+  resolveChainIdentifier,
+} from '../../../packages/shared/src/contracts.js';
 import {
   ChainRpcService,
   ChainObservation,
@@ -35,7 +40,9 @@ export class ActivityWorkflowService {
 
   async receive(activity: ProcessorActivity, pubsubMessageId: string, finalAttempt = false) {
     const { chain, transactionHash } = this.identity(activity);
-    const observationSequence = await this.nextObservationSequence(activity.identifier);
+    const network = this.rpc.networkIdentity(chain);
+    const identifier = canonicalTransactionIdentifier(chain, network, transactionHash);
+    const observationSequence = await this.nextObservationSequence(identifier);
     await this.checkFinality(
       activity,
       chain,
@@ -55,7 +62,9 @@ export class ActivityWorkflowService {
     finalAttempt = false,
   ) {
     const { chain, transactionHash } = this.identity(activity);
-    const observationSequence = await this.nextObservationSequence(activity.identifier);
+    const network = this.rpc.networkIdentity(chain);
+    const identifier = canonicalTransactionIdentifier(chain, network, transactionHash);
+    const observationSequence = await this.nextObservationSequence(identifier);
     const observation = await this.observeOrMarkAttention(
       activity,
       chain,
@@ -250,11 +259,14 @@ export class ActivityWorkflowService {
     observationSequence: string,
     canonicalReconciliation = false,
   ) {
+    const network = this.rpc.networkIdentity(chain);
+    const identifier = canonicalTransactionIdentifier(chain, network, transactionHash);
+    const canonicalHash = canonicalTransactionHash(chain, transactionHash);
     const ledgerActivity = ledgerActivitySchema.parse({
-      identifier: activity.identifier,
+      identifier,
       chain,
-      network: this.rpc.networkIdentity(chain),
-      transactionHash,
+      network,
+      transactionHash: canonicalHash,
       sourceStatus: activity.status,
       state,
       completedAtTimestamp: activity.completedAtTimestamp,

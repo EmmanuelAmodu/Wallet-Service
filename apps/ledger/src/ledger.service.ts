@@ -12,6 +12,7 @@ import {
   Chain,
   chainFamily,
   chainSchema,
+  canonicalTransactionHash,
   resolveChainIdentifier,
 } from '../../../packages/shared/src/contracts.js';
 import { LedgerPrismaService } from './prisma/prisma.service.js';
@@ -117,23 +118,55 @@ export class LedgerService {
     };
   }
 
-  async applyActivity(activity: LedgerActivity) {
+  async applyActivity(incomingActivity: LedgerActivity) {
     return this.db.$transaction(async (tx) => {
-      await lock(tx, `ledger-activity-${activity.identifier}`);
-      const existing = await tx.ledgerActivity.findUnique({
+      const identity = JSON.stringify([
+        incomingActivity.chain,
+        incomingActivity.network,
+        canonicalTransactionHash(incomingActivity.chain, incomingActivity.transactionHash),
+      ]);
+      await lock(tx, `ledger-activity-${identity}`);
+      let activity = incomingActivity;
+      let existing = await tx.ledgerActivity.findUnique({
         where: { identifier: activity.identifier },
       });
+      if (!existing)
+        existing = await tx.ledgerActivity.findFirst({
+          where: {
+            chain: activity.chain,
+            network: activity.network,
+            transaction_hash:
+              chainFamily(activity.chain) === 'solana'
+                ? activity.transactionHash
+                : { equals: activity.transactionHash, mode: 'insensitive' },
+          },
+        });
+      if (existing && existing.identifier !== activity.identifier)
+        activity = { ...activity, identifier: existing.identifier };
+      const hasObservationSequence = activity.observationSequence !== undefined;
+      const observationSequence = hasObservationSequence
+        ? BigInt(activity.observationSequence!)
+        : (existing?.observation_sequence ?? 0n) + 1n;
+      activity = { ...activity, observationSequence: observationSequence.toString() };
       let revision = existing?.revision ?? 0;
 
       if (existing) {
-        const observationSequence = BigInt(activity.observationSequence ?? '0');
-        if (observationSequence <= existing.observation_sequence) return existing;
+        if (hasObservationSequence && observationSequence <= existing.observation_sequence)
+          return existing;
         const sameBlock =
           existing.block_hash === activity.blockHash &&
           existing.block_hash !== null &&
           activity.blockHash !== undefined;
         const bothUnmined = !existing.block_hash && !activity.blockHash;
         const terminal = ['finalized', 'failed', 'reverted'].includes(existing.state);
+        if (
+          !hasObservationSequence &&
+          activity.state === 'observed' &&
+          !sameBlock &&
+          !bothUnmined &&
+          !activity.canonicalReconciliation
+        )
+          return existing;
         const restoredFinality =
           existing.state === 'reverted' &&
           ['finalized', 'failed'].includes(activity.state) &&

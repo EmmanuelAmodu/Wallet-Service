@@ -6,20 +6,26 @@ import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 import { required } from '../packages/shared/src/config.js';
 
 export async function reconcileActivity(queue: Queue, identifier: string, auth: MessageAuth) {
-  const jobs = await queue.getJobs(
-    ['waiting', 'active', 'delayed', 'failed', 'completed'],
-    0,
-    9999,
-  );
   const candidates = [];
-  for (const job of jobs) {
-    try {
-      const message = auth.open(job.data, job.id!, job.name);
-      if (message.type !== 'activity.check-finality' || message.activity.identifier !== identifier)
-        continue;
-      candidates.push({ job, poll: message.poll, state: await job.getState() });
-    } catch {
-      continue;
+  const states = ['waiting', 'active', 'delayed', 'failed', 'completed'] as const;
+  const pageSize = 1000;
+  for (const state of states) {
+    for (let start = 0; ; start += pageSize) {
+      const jobs = await queue.getJobs([state], start, start + pageSize - 1);
+      for (const job of jobs) {
+        try {
+          const message = auth.open(job.data, job.id!, job.name);
+          if (
+            message.type !== 'activity.check-finality' ||
+            message.activity.identifier !== identifier
+          )
+            continue;
+          candidates.push({ job, poll: message.poll, state: await job.getState() });
+        } catch {
+          continue;
+        }
+      }
+      if (jobs.length < pageSize) break;
     }
   }
   candidates.sort((left, right) => right.poll - left.poll);

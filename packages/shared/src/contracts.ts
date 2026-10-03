@@ -117,6 +117,18 @@ export function chainFamily(chain: Chain): ChainFamily {
   return 'solana';
 }
 
+export function canonicalTransactionHash(chain: Chain, transactionHash: string): string {
+  return chainFamily(chain) === 'solana' ? transactionHash : transactionHash.toLowerCase();
+}
+
+export function canonicalTransactionIdentifier(
+  chain: Chain,
+  network: string,
+  transactionHash: string,
+): string {
+  return `transaction:${chain}:${encodeURIComponent(network)}:${canonicalTransactionHash(chain, transactionHash)}`;
+}
+
 const uint = z
   .string()
   .regex(/^(0|[1-9][0-9]*)$/)

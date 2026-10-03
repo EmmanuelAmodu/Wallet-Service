@@ -76,6 +76,53 @@ test('activity reconciliation retries the latest retained check and releases del
   assert.equal(delayed.read().promoted, true);
 });
 
+test('activity reconciliation searches paginated delayed jobs beyond the first 10000', async () => {
+  const auth = new MessageAuth('e'.repeat(64));
+  const identifier = 'transaction:ethereum:0xdeep';
+  const activity = {
+    identifier,
+    completedAtTimestamp: 0,
+    metadata: {},
+    status: 'success' as const,
+    transfers: [],
+    tokenIdentifiers: [],
+    fee: { amount: 0, feePayer: [] },
+    balanceChanges: [],
+  };
+  const targetId = randomUUID();
+  let promoted = false;
+  const target = {
+    id: targetId,
+    name: 'activity.check-finality',
+    data: auth.seal({ type: 'activity.check-finality', activity, poll: 12 }, targetId),
+    getState: async () => 'delayed',
+    promote: async () => {
+      promoted = true;
+    },
+  };
+  const requestedDelayedPages: number[] = [];
+  const queue = {
+    getJobs: async (states: string[], start: number, end: number) => {
+      if (!states.includes('delayed')) return [];
+      requestedDelayedPages.push(start);
+      if (start === 10000) return [target];
+      const count = Math.min(end - start + 1, 10000 - start);
+      return Array.from({ length: count }, (_, index) => ({
+        id: `unrelated-${start + index}`,
+        name: 'unknown',
+        data: {},
+      }));
+    },
+  } as unknown as Queue;
+
+  assert.equal(
+    await reconcileActivity(queue, identifier, auth),
+    'Queued finality reconciliation at poll 12',
+  );
+  assert.equal(promoted, true);
+  assert(requestedDelayedPages.includes(10000));
+});
+
 test(
   'activity reconciliation requeues a completed BullMQ finality check',
   { skip: !process.env.TEST_REDIS_URL, timeout: 10000 },

@@ -81,6 +81,9 @@ test(
     const processor = new LedgerProcessor(service, auth);
     const worker = new Worker(QUEUES.ledger, (job) => processor.process(job), options);
     const identifier = `transaction:ethereum:${randomUUID()}`;
+    const ledgerIdentifier = `transaction:ethereum:11155111:${identifier.split(':').at(-1)!.toLowerCase()}`;
+    const smartChainWalletId = randomUUID();
+    const smartChainAddress = `0x${randomBytes(20).toString('hex')}`;
     const observations = [
       { state: 'observed' as const, transactionFound: true, blockHash: '0xflow-block' },
       { state: 'observed' as const, transactionFound: true, blockHash: '0xflow-block' },
@@ -117,7 +120,7 @@ test(
     };
     const listener = new ActivityWorkflowService(
       {
-        networkIdentity: () => '11155111',
+        networkIdentity: (chain: string) => (chain === 'smartChain' ? '56' : '11155111'),
         observeTransaction: async () => observations.shift()!,
       } as never,
       auth,
@@ -127,8 +130,15 @@ test(
     );
     try {
       await worker.waitUntilReady();
+      await service.registerWallet({
+        walletId: smartChainWalletId,
+        tenantId,
+        chain: 'smartChain',
+        network: '56',
+        address: smartChainAddress,
+      });
       await listener.receive(source, 'pubsub-ledger-integration');
-      let record = await waitForLedgerActivity(identifier, 'observed', 0n);
+      let record = await waitForLedgerActivity(ledgerIdentifier, 'observed', 0n);
       let balances = await service.balances(walletIds[0], tenantId);
       assert.equal(
         BigInt(balances.balances.find((balance) => balance.asset === asset)!.provisional),
@@ -141,7 +151,7 @@ test(
 
       const initialSequence = record.observation_sequence;
       await listener.resumeFinality(source, 120, '0xflow-block');
-      record = await waitForLedgerActivity(identifier, 'observed', initialSequence);
+      record = await waitForLedgerActivity(ledgerIdentifier, 'observed', initialSequence);
       const lateSequence = record.observation_sequence;
       balances = await service.balances(walletIds[0], tenantId);
       assert.equal(
@@ -156,7 +166,7 @@ test(
       assert.equal(recoveryCheck?.opts.delay, 300000);
 
       await listener.resumeFinality(source, 121, '0xflow-block');
-      record = await waitForLedgerActivity(identifier, 'reverted', lateSequence);
+      record = await waitForLedgerActivity(ledgerIdentifier, 'reverted', lateSequence);
       balances = await service.balances(walletIds[0], tenantId);
       assert.equal(
         BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
@@ -169,7 +179,7 @@ test(
 
       const revertedSequence = record.observation_sequence;
       await listener.resumeFinality(source, 122, '0xflow-block');
-      await waitForLedgerActivity(identifier, 'finalized', revertedSequence);
+      await waitForLedgerActivity(ledgerIdentifier, 'finalized', revertedSequence);
       balances = await service.balances(walletIds[0], tenantId);
       assert.equal(
         BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
@@ -180,14 +190,71 @@ test(
         0n,
       );
 
+      observations.push(
+        {
+          state: 'finalized',
+          transactionFound: true,
+          blockHash: '0xbsc-block',
+          blockHeight: '20',
+        },
+        {
+          state: 'finalized',
+          transactionFound: true,
+          blockHash: '0xbsc-block',
+          blockHeight: '20',
+        },
+      );
+      const bscHash = '0xAbC123';
+      const bscActivity: ProcessorActivity = {
+        ...source,
+        identifier: `transaction:bsc:${bscHash}`,
+        tokenIdentifiers: ['token:bsc:native'],
+        balanceChanges: [
+          {
+            wallet: `wallet:bsc:${smartChainAddress}`,
+            changes: [{ token: 'token:bsc:native', amount: '100' }],
+          },
+        ],
+      };
+      await listener.receive(bscActivity, 'pubsub-bsc-alias');
+      const canonicalId = 'transaction:smartChain:56:0xabc123';
+      const firstAliasUpdate = await waitForLedgerActivity(canonicalId, 'finalized', 0n);
+      const smartChainActivity: ProcessorActivity = {
+        ...bscActivity,
+        identifier: `transaction:smartChain:${bscHash.toLowerCase()}`,
+        balanceChanges: [
+          {
+            wallet: `wallet:smartChain:${smartChainAddress}`,
+            changes: [{ token: 'token:smartChain:native', amount: '100' }],
+          },
+        ],
+      };
+      await listener.receive(smartChainActivity, 'pubsub-smartchain-alias');
+      await waitForLedgerActivity(canonicalId, 'finalized', firstAliasUpdate.observation_sequence);
+      const smartChainBalances = await service.balances(smartChainWalletId, tenantId);
+      assert.equal(smartChainBalances.balances[0].confirmed, '100');
+      assert.equal(
+        await db!.ledgerActivity.count({
+          where: { chain: 'smartChain', network: '56', transaction_hash: '0xabc123' },
+        }),
+        1,
+      );
+      assert.equal(
+        await db!.ledgerEntry.count({
+          where: { activity_identifier: canonicalId, account_kind: 'wallet' },
+        }),
+        1,
+      );
+
       const completedUpdates = await ledgerQueue.getJobs(['completed'], 0, 100);
       const activityUpdates = completedUpdates.filter((job) => {
         const message = auth.open(job.data, job.id!, job.name) as Message;
         return (
-          message.type === 'ledger.activity.update' && message.activity.identifier === identifier
+          message.type === 'ledger.activity.update' &&
+          [ledgerIdentifier, canonicalId].includes(message.activity.identifier)
         );
       });
-      assert.equal(activityUpdates.length, 4);
+      assert.equal(activityUpdates.length, 6);
       assert(activityUpdates.every((job) => job.returnvalue === null));
     } finally {
       await worker.close();
@@ -210,6 +277,14 @@ before(async () => {
     where: { activity: { chain: 'ethereum', network: '11155111' } },
   });
   await db.ledgerActivity.deleteMany({ where: { chain: 'ethereum', network: '11155111' } });
+  await db.ledgerEntry.updateMany({
+    where: { activity: { chain: 'smartChain', network: '56' } },
+    data: { previous_entry_id: null },
+  });
+  await db.ledgerEntry.deleteMany({
+    where: { activity: { chain: 'smartChain', network: '56' } },
+  });
+  await db.ledgerActivity.deleteMany({ where: { chain: 'smartChain', network: '56' } });
   await db.ledgerWallet.deleteMany({ where: { tenant_id: { startsWith: 'ledger-test-' } } });
   service = new LedgerService(db);
   await Promise.all(
@@ -243,6 +318,14 @@ after(async () => {
     where: { activity: { chain: 'litecoin', network: 'mainnet' } },
   });
   await db.ledgerActivity.deleteMany({ where: { chain: 'litecoin', network: 'mainnet' } });
+  await db.ledgerEntry.updateMany({
+    where: { activity: { chain: 'smartChain', network: '56' } },
+    data: { previous_entry_id: null },
+  });
+  await db.ledgerEntry.deleteMany({
+    where: { activity: { chain: 'smartChain', network: '56' } },
+  });
+  await db.ledgerActivity.deleteMany({ where: { chain: 'smartChain', network: '56' } });
   await db.ledgerWallet.deleteMany({ where: { tenant_id: tenantId } });
   await db.$disconnect();
 });
@@ -541,5 +624,52 @@ test(
     const balances = await service.balances(walletId, tenantId);
     assert.equal(balances.chain, 'litecoin');
     assert.equal(balances.balances[0].provisional, '2500');
+  },
+);
+
+test(
+  'unsequenced legacy activity progresses to finalized with a generated Ledger sequence',
+  { skip: !enabled },
+  async () => {
+    const walletId = randomUUID();
+    const address = `0x${randomBytes(20).toString('hex')}`;
+    const identifier = `transaction:ethereum:${randomUUID()}`;
+    await service.registerWallet({
+      walletId,
+      tenantId,
+      chain: 'ethereum',
+      network: '11155111',
+      address,
+    });
+    const legacyEvent: LedgerActivity = {
+      identifier,
+      chain: 'ethereum',
+      network: '11155111',
+      transactionHash: identifier.split(':').at(-1)!,
+      sourceStatus: 'success',
+      state: 'observed',
+      completedAtTimestamp: 1000,
+      blockHash: '0xlegacy-block',
+      changes: [
+        {
+          wallet: `wallet:ethereum:${address}`,
+          asset: 'token:ethereum:native',
+          amount: '100',
+        },
+      ],
+    };
+
+    await service.applyActivity(legacyEvent);
+    await service.applyActivity({ ...legacyEvent, state: 'finalized' });
+    const balances = await service.balances(walletId, tenantId);
+    assert.equal(balances.balances[0].confirmed, '100');
+    assert.equal(balances.balances[0].provisional, '0');
+    const persisted = await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier } });
+    assert.equal(persisted.observation_sequence, 2n);
+
+    await service.applyActivity({ ...legacyEvent, blockHash: '0xolder-block' });
+    const unchanged = await service.balances(walletId, tenantId);
+    assert.equal(unchanged.balances[0].confirmed, '100');
+    assert.equal(unchanged.balances[0].provisional, '0');
   },
 );
