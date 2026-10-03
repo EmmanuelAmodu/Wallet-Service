@@ -29,7 +29,7 @@ export class WalletsService {
       if (existing) return existing;
       const [sequence] = await db.$queryRaw<
         { account: bigint }[]
-      >`SELECT nextval('wallet_account_seq') AS account`;
+      >`SELECT nextval('wallets_account_seq') AS account`;
       const account = Number(sequence.account),
         id = randomUUID();
       const path = walletCoreMetadata(core, chain, account).path;

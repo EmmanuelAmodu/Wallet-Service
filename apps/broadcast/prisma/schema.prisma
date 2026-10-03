@@ -7,10 +7,19 @@ datasource db {
   provider = "postgresql"
 }
 
+enum BroadcastTransactionStatus {
+  queued
+  broadcasting
+  submitted
+  confirmed
+  failed
+  attention
+}
+
 model Transaction {
   id                   String   @id @db.Uuid
   snapshot             Json
-  status               String
+  status               BroadcastTransactionStatus
   broadcast_generation Int
   broadcast_attempts   Int      @default(0)
   revision             Int      @default(0)

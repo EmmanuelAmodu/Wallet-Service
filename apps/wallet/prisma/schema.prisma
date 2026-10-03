@@ -1,9 +1,29 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["partialIndexes"]
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+enum WalletStatus {
+  deriving
+  ready
+  rejected
+}
+
+enum WalletTransactionStatus {
+  preparing
+  signing
+  signed
+  queued
+  broadcasting
+  submitted
+  confirmed
+  failed
+  rejected
+  attention
 }
 
 model Wallet {
@@ -13,10 +33,10 @@ model Wallet {
   chain        String
   network      String
   seed_id      String
-  account      Int
+  account      Int           @default(autoincrement())
   path         String
   address      String?
-  status       String        @default("deriving")
+  status       WalletStatus  @default(deriving)
   last_error   String?
   created_at   DateTime      @default(now()) @db.Timestamptz
   transactions Transaction[]
@@ -38,7 +58,7 @@ model Transaction {
   prepared             Json?
   signed               Json?
   tx_hash              String?
-  status               String
+  status               WalletTransactionStatus
   broadcast_attempts   Int      @default(0)
   broadcast_generation Int      @default(0)
   broadcast_revision   Int      @default(0)
@@ -48,7 +68,7 @@ model Transaction {
 
   @@unique([tenant_id, idempotency_key])
   @@index([tenant_id, created_at], map: "transactions_tenant")
-  // one_pending_per_wallet is a partial unique index maintained in migration SQL.
+  @@unique([wallet_id], where: raw("\"status\" IN ('preparing', 'signing', 'signed', 'queued', 'broadcasting', 'submitted', 'attention')"), map: "one_pending_per_wallet")
   @@map("transactions")
 }
 

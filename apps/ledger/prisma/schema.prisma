@@ -7,6 +7,40 @@ datasource db {
   provider = "postgresql"
 }
 
+enum LedgerActivityState {
+  observed
+  finalized
+  failed
+  reverted
+  attention
+}
+
+enum LedgerActivitySourceStatus {
+  success
+  failed
+}
+
+enum LedgerEntryAccountKind {
+  wallet
+  clearing
+}
+
+enum LedgerEntrySide {
+  debit
+  credit
+}
+
+enum LedgerBalanceState {
+  provisional
+  confirmed
+}
+
+enum LedgerEntryKind {
+  wallet
+  clearing
+  reversal
+}
+
 model LedgerWallet {
   wallet_id   String        @id @db.Uuid
   tenant_id   String
@@ -27,14 +61,14 @@ model LedgerActivity {
   network                  String
   transaction_hash         String
   transaction_hash_key     String
-  state                    String
+  state                    LedgerActivityState
   revision                 Int           @default(0)
   observation_sequence     BigInt        @default(0)
   canonical_reconciliation Boolean       @default(false)
   block_hash               String?
   block_height             BigInt?
   completed_at_ms          BigInt
-  source_status            String
+  source_status            LedgerActivitySourceStatus
   payload                  Json
   last_error               String?
   created_at               DateTime      @default(now()) @db.Timestamptz
@@ -58,12 +92,12 @@ model LedgerEntry {
   wallet_id           String?        @db.Uuid
   wallet              LedgerWallet?  @relation(fields: [wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
   asset               String
-  account_kind        String
-  side                String
+  account_kind        LedgerEntryAccountKind
+  side                LedgerEntrySide
   amount              Decimal        @db.Decimal(96, 18)
   balance_after       Decimal        @db.Decimal(96, 18)
-  balance_state       String
-  entry_kind          String
+  balance_state       LedgerBalanceState
+  entry_kind          LedgerEntryKind
   previous_entry_id   String?        @unique @db.Uuid
   previous_entry      LedgerEntry?   @relation("LedgerEntryPrevious", fields: [previous_entry_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   next_entries        LedgerEntry[]  @relation("LedgerEntryPrevious")

@@ -5,7 +5,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { Prisma, PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient, WalletTransactionStatus } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
 import { WalletPrismaService } from '../prisma/prisma.service.js';
 import { lock, lockTransaction } from '../../../../packages/database/src/locks.js';
@@ -20,7 +20,7 @@ import { networkFor } from '../../../../packages/chain/src/config.js';
 
 import { walletConfig, WalletConfig } from '../config/wallet.config.js';
 
-export const pendingStatuses = [
+export const pendingStatuses: WalletTransactionStatus[] = [
   'preparing',
   'signing',
   'signed',

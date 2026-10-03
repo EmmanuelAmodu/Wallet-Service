@@ -1,35 +1,19 @@
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createDatabase } from '../apps/wallet/src/prisma/prisma.service.js';
 import { required } from '../packages/shared/src/config.js';
 
 export async function migrate(
   url: string,
   application: 'wallet' | 'broadcast' | 'ledger' = 'wallet',
 ) {
-  if (application !== 'wallet') {
-    const config =
-      application === 'broadcast' ? 'prisma.broadcast.config.ts' : 'prisma.ledger.config.ts';
-    run(['migrate', 'deploy', '--config', config], url, application);
-    return;
-  }
-  const db = createDatabase(url);
-  try {
-    // The original SQL runner recorded 001_initial.sql. Baseline only that known schema.
-    const [tables] = await db.$queryRaw<
-      { legacy: string | null; prisma: string | null }[]
-    >`SELECT to_regclass('public.schema_migrations')::text AS legacy,to_regclass('public._prisma_migrations')::text AS prisma`;
-    if (tables.legacy && !tables.prisma) {
-      const applied = await db.$queryRaw<{ name: string }[]>`SELECT name FROM schema_migrations`;
-      if (applied.length !== 1 || applied[0].name !== '001_initial.sql')
-        throw new Error('Unrecognized legacy schema; baseline manually');
-      run(['migrate', 'resolve', '--applied', '0001_initial'], url);
-    }
-    run(['migrate', 'deploy'], url);
-  } finally {
-    await db.$disconnect();
-  }
+  const config =
+    application === 'wallet'
+      ? 'prisma.config.ts'
+      : application === 'broadcast'
+        ? 'prisma.broadcast.config.ts'
+        : 'prisma.ledger.config.ts';
+  run(['migrate', 'deploy', '--config', config], url, application);
 }
 
 function run(
