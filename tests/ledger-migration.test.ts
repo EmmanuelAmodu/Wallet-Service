@@ -93,18 +93,23 @@ test(
       assert.equal(archived[0].entries, 2n);
       assert.equal(archived[0].balances, 1n);
 
-      const walletAccounts = await db.ledgerAccount.findMany({
+      const accountTable = await db.$queryRaw<{ table_name: string | null }[]>`
+        SELECT to_regclass('public.ledger_accounts')::text AS table_name
+      `;
+      assert.equal(accountTable[0].table_name, null);
+      const walletEntries = await db.ledgerEntry.findMany({
         where: { wallet_id: walletId },
+        orderBy: [{ account_key: 'asc' }, { sequence: 'desc' }],
       });
-      const openingBalances = await Promise.all(
-        walletAccounts.map(async (account) => {
-          const entry = await db!.ledgerEntry.findUniqueOrThrow({
-            where: { id: account.last_entry_id! },
-          });
-          return `${account.balance_state}:${entry.balance_after.toFixed(0)}`;
-        }),
-      );
-      assert.deepEqual(openingBalances.sort(), ['confirmed:100', 'provisional:20']);
+      const openingBalances = new Map<string, string>();
+      for (const entry of walletEntries) {
+        if (!openingBalances.has(entry.account_key))
+          openingBalances.set(
+            entry.account_key,
+            `${entry.balance_state}:${entry.balance_after.toFixed(0)}`,
+          );
+      }
+      assert.deepEqual([...openingBalances.values()].sort(), ['confirmed:100', 'provisional:20']);
 
       const journal = await db.ledgerEntry.findMany();
       const debits = journal

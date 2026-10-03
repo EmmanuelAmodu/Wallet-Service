@@ -20,9 +20,13 @@ type AccountKind = 'wallet' | 'clearing';
 type BalanceState = 'provisional' | 'confirmed';
 type EntrySide = 'debit' | 'credit';
 type PostingKind = 'wallet' | 'clearing' | 'reversal';
-type LedgerAccountRow = Awaited<
-  ReturnType<LedgerPrisma.TransactionClient['ledgerAccount']['findUniqueOrThrow']>
->;
+type PostingAccount = {
+  key: string;
+  kind: AccountKind;
+  balanceState: BalanceState;
+  asset: string;
+  walletId?: string;
+};
 
 type BalanceDelta = { walletId: string; asset: string; amount: bigint };
 
@@ -94,23 +98,16 @@ export class LedgerService {
       where: { wallet_id: walletId, tenant_id: tenantId },
     });
     if (!wallet) throw new NotFoundException('Ledger wallet not found');
-    const accounts = await this.db.ledgerAccount.findMany({
+    const latestEntries = await this.db.ledgerEntry.findMany({
       where: { wallet_id: walletId, account_kind: 'wallet' },
-      orderBy: [{ asset: 'asc' }, { balance_state: 'asc' }],
+      orderBy: [{ account_key: 'asc' }, { sequence: 'desc' }],
+      distinct: ['account_key'],
     });
-    const lastEntryIds = accounts.flatMap((account) => account.last_entry_id ?? []);
-    const lastEntries = lastEntryIds.length
-      ? await this.db.ledgerEntry.findMany({ where: { id: { in: lastEntryIds } } })
-      : [];
-    const entryById = new Map(lastEntries.map((entry) => [entry.id, entry]));
     const balances = new Map<string, { confirmed: string; provisional: string }>();
-    for (const account of accounts) {
-      const balance = balances.get(account.asset) ?? { confirmed: '0', provisional: '0' };
-      const amount = account.last_entry_id
-        ? (entryById.get(account.last_entry_id)?.balance_after.toFixed(0) ?? '0')
-        : '0';
-      balance[account.balance_state as BalanceState] = amount;
-      balances.set(account.asset, balance);
+    for (const entry of latestEntries) {
+      const balance = balances.get(entry.asset) ?? { confirmed: '0', provisional: '0' };
+      balance[entry.balance_state as BalanceState] = entry.balance_after.toFixed(0);
+      balances.set(entry.asset, balance);
     }
     return {
       walletId: wallet.wallet_id,
@@ -260,7 +257,7 @@ export class LedgerService {
   ) {
     const netByAsset = new Map<string, bigint>();
     for (const delta of deltas) {
-      const account = await this.getAccount(tx, {
+      const account: PostingAccount = {
         key: accountKey(
           'wallet',
           activity.chain,
@@ -270,13 +267,10 @@ export class LedgerService {
           delta.walletId,
         ),
         kind: 'wallet',
-        normalSide: 'debit',
         balanceState,
-        chain: activity.chain,
-        network: activity.network,
         asset: delta.asset,
         walletId: delta.walletId,
-      });
+      };
       await this.appendEntry(tx, account, activity, revision, delta.amount, 'wallet');
       const net = (netByAsset.get(delta.asset) ?? 0n) + delta.amount;
       assertLedgerInteger(net);
@@ -285,51 +279,19 @@ export class LedgerService {
 
     for (const [asset, net] of netByAsset) {
       if (net === 0n) continue;
-      const clearing = await this.getAccount(tx, {
+      const clearing: PostingAccount = {
         key: accountKey('clearing', activity.chain, activity.network, asset, balanceState),
         kind: 'clearing',
-        normalSide: 'credit',
         balanceState,
-        chain: activity.chain,
-        network: activity.network,
         asset,
-      });
+      };
       await this.appendEntry(tx, clearing, activity, revision, net, 'clearing');
     }
   }
 
-  private async getAccount(
-    tx: LedgerPrisma.TransactionClient,
-    account: {
-      key: string;
-      kind: AccountKind;
-      normalSide: EntrySide;
-      balanceState: BalanceState;
-      chain: Chain;
-      network: string;
-      asset: string;
-      walletId?: string;
-    },
-  ): Promise<LedgerAccountRow> {
-    return tx.ledgerAccount.upsert({
-      where: { account_key: account.key },
-      create: {
-        account_key: account.key,
-        account_kind: account.kind,
-        normal_side: account.normalSide,
-        balance_state: account.balanceState,
-        chain: account.chain,
-        network: account.network,
-        asset: account.asset,
-        wallet_id: account.walletId,
-      },
-      update: {},
-    });
-  }
-
   private async appendEntry(
     tx: LedgerPrisma.TransactionClient,
-    account: LedgerAccountRow,
+    account: PostingAccount,
     activity: LedgerActivity,
     revision: number,
     normalDelta: bigint,
@@ -337,19 +299,14 @@ export class LedgerService {
     reversalOfId?: string,
   ) {
     if (normalDelta === 0n) return;
-    await lock(tx, `ledger-account-${account.account_key}`);
-    const fresh = await tx.ledgerAccount.findUniqueOrThrow({
-      where: { account_key: account.account_key },
+    await lock(tx, `ledger-account-${account.key}`);
+    const previous = await tx.ledgerEntry.findFirst({
+      where: { account_key: account.key },
+      orderBy: { sequence: 'desc' },
     });
-    const previous = fresh.last_entry_id
-      ? await tx.ledgerEntry.findUniqueOrThrow({ where: { id: fresh.last_entry_id } })
-      : undefined;
+    const normalSide: EntrySide = account.kind === 'wallet' ? 'debit' : 'credit';
     const side: EntrySide =
-      normalDelta > 0n
-        ? (fresh.normal_side as EntrySide)
-        : fresh.normal_side === 'debit'
-          ? 'credit'
-          : 'debit';
+      normalDelta > 0n ? normalSide : normalSide === 'debit' ? 'credit' : 'debit';
     const amount = normalDelta < 0n ? -normalDelta : normalDelta;
     const previousBalance = previous ? BigInt(previous.balance_after.toFixed(0)) : 0n;
     const balanceAfter = previousBalance + normalDelta;
@@ -361,25 +318,19 @@ export class LedgerService {
         id,
         activity_identifier: activity.identifier,
         revision,
-        account_key: fresh.account_key,
-        sequence: fresh.next_sequence,
-        wallet_id: fresh.wallet_id,
-        asset: fresh.asset,
-        account_kind: fresh.account_kind,
-        balance_state: fresh.balance_state,
+        account_key: account.key,
+        sequence: (previous?.sequence ?? 0n) + 1n,
+        wallet_id: account.walletId,
+        asset: account.asset,
+        account_kind: account.kind,
+        balance_state: account.balanceState,
         side,
         amount: decimalFromInteger(amount),
         balance_after: decimalFromInteger(balanceAfter),
         entry_kind: entryKind,
-        previous_entry_id: fresh.last_entry_id,
+        previous_entry_id: previous?.id,
         reversal_of_id: reversalOfId,
       },
-    });
-    if (previous)
-      await tx.ledgerEntry.update({ where: { id: previous.id }, data: { next_entry_id: id } });
-    await tx.ledgerAccount.update({
-      where: { account_key: fresh.account_key },
-      data: { next_sequence: { increment: 1n }, last_entry_id: id },
     });
   }
 
@@ -396,12 +347,19 @@ export class LedgerService {
         revision,
         entry_kind: { in: ['wallet', 'clearing'] },
       },
-      include: { account: true },
     });
     for (const entry of entries) {
-      const account = entry.account;
+      const kind = entry.account_kind as AccountKind;
+      const normalSide = kind === 'wallet' ? 'debit' : 'credit';
       const amount = BigInt(entry.amount.toFixed(0));
-      const normalDelta = entry.side === account.normal_side ? amount : -amount;
+      const normalDelta = entry.side === normalSide ? amount : -amount;
+      const account: PostingAccount = {
+        key: entry.account_key,
+        kind,
+        balanceState: entry.balance_state as BalanceState,
+        asset: entry.asset,
+        ...(entry.wallet_id ? { walletId: entry.wallet_id } : {}),
+      };
       await this.appendEntry(
         tx,
         account,

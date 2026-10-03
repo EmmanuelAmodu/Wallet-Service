@@ -23,7 +23,7 @@ const tenantId = `ledger-test-${randomUUID()}`;
 const walletAddresses = [randomBytes(20).toString('hex'), randomBytes(20).toString('hex')].map(
   (address) => `0x${address}`,
 );
-const identifiers = Array.from({ length: 8 }, () => `transaction:ethereum:${randomUUID()}`);
+const identifiers = Array.from({ length: 10 }, () => `transaction:ethereum:${randomUUID()}`);
 let service: LedgerService;
 
 test('ledger processor returns a JSON-safe void acknowledgement after commit', async () => {
@@ -143,15 +143,14 @@ test(
 before(async () => {
   if (!db) return;
   await migrate(process.env.TEST_LEDGER_DATABASE_URL!, 'ledger');
-  await db.ledgerAccount.updateMany({
-    where: { chain: 'ethereum', network: '11155111' },
-    data: { last_entry_id: null },
+  await db.ledgerEntry.updateMany({
+    where: { activity: { chain: 'ethereum', network: '11155111' } },
+    data: { previous_entry_id: null },
   });
   await db.ledgerEntry.deleteMany({
-    where: { account: { chain: 'ethereum', network: '11155111' } },
+    where: { activity: { chain: 'ethereum', network: '11155111' } },
   });
   await db.ledgerActivity.deleteMany({ where: { chain: 'ethereum', network: '11155111' } });
-  await db.ledgerAccount.deleteMany({ where: { chain: 'ethereum', network: '11155111' } });
   await db.ledgerWallet.deleteMany({ where: { tenant_id: { startsWith: 'ledger-test-' } } });
   service = new LedgerService(db);
   await Promise.all(
@@ -169,28 +168,21 @@ before(async () => {
 
 after(async () => {
   if (!db) return;
-  await db.ledgerAccount.updateMany({
-    where: { chain: 'ethereum', network: '11155111' },
-    data: { last_entry_id: null },
+  await db.ledgerEntry.updateMany({
+    where: { activity: { chain: 'ethereum', network: '11155111' } },
+    data: { previous_entry_id: null },
   });
   await db.ledgerEntry.deleteMany({
-    where: { account: { chain: 'ethereum', network: '11155111' } },
+    where: { activity: { chain: 'ethereum', network: '11155111' } },
   });
   await db.ledgerActivity.deleteMany({ where: { chain: 'ethereum', network: '11155111' } });
-  await db.ledgerAccount.deleteMany({ where: { chain: 'ethereum', network: '11155111' } });
-  const litecoinAccounts = await db.ledgerAccount.findMany({
-    where: { chain: 'litecoin', network: 'mainnet' },
-    select: { account_key: true },
+  await db.ledgerEntry.updateMany({
+    where: { activity: { chain: 'litecoin', network: 'mainnet' } },
+    data: { previous_entry_id: null },
   });
-  const litecoinAccountKeys = litecoinAccounts.map((account) => account.account_key);
-  if (litecoinAccountKeys.length) {
-    await db.ledgerAccount.updateMany({
-      where: { account_key: { in: litecoinAccountKeys } },
-      data: { last_entry_id: null },
-    });
-    await db.ledgerEntry.deleteMany({ where: { account_key: { in: litecoinAccountKeys } } });
-    await db.ledgerAccount.deleteMany({ where: { account_key: { in: litecoinAccountKeys } } });
-  }
+  await db.ledgerEntry.deleteMany({
+    where: { activity: { chain: 'litecoin', network: 'mainnet' } },
+  });
   await db.ledgerActivity.deleteMany({ where: { chain: 'litecoin', network: 'mainnet' } });
   await db.ledgerWallet.deleteMany({ where: { tenant_id: tenantId } });
   await db.$disconnect();
@@ -276,26 +268,26 @@ test(
       await db!.ledgerEntry.count({ where: { activity_identifier: identifiers[0] } }),
       entries,
     );
-    const accounts = await db!.ledgerAccount.findMany({
-      where: { wallet_id: { in: walletIds }, asset: 'token:ethereum:native' },
+    const journal = await db!.ledgerEntry.findMany({
+      where: { asset: 'token:ethereum:native' },
+      orderBy: [{ account_key: 'asc' }, { sequence: 'asc' }],
     });
-    for (const account of accounts) {
-      const chain = await db!.ledgerEntry.findMany({
-        where: { account_key: account.account_key },
-        orderBy: { sequence: 'asc' },
-      });
-      let previousBalance = new Prisma.Decimal(0);
-      for (let index = 0; index < chain.length; index++) {
-        assert.equal(chain[index].previous_entry_id, chain[index - 1]?.id ?? null);
-        assert.equal(chain[index].next_entry_id, chain[index + 1]?.id ?? null);
-        const normalDelta =
-          chain[index].side === account.normal_side
-            ? chain[index].amount
-            : chain[index].amount.negated();
-        previousBalance = previousBalance.plus(normalDelta);
-        assert.equal(chain[index].balance_after.toString(), previousBalance.toString());
+    const accountChains = new Map<string, typeof journal>();
+    for (const entry of journal) {
+      const entries = accountChains.get(entry.account_key) ?? [];
+      entries.push(entry);
+      accountChains.set(entry.account_key, entries);
+    }
+    for (const entries of accountChains.values()) {
+      let previousBalance = 0n;
+      for (let index = 0; index < entries.length; index++) {
+        assert.equal(entries[index].sequence, BigInt(index + 1));
+        assert.equal(entries[index].previous_entry_id, entries[index - 1]?.id ?? null);
+        const normalSide = entries[index].account_kind === 'wallet' ? 'debit' : 'credit';
+        const amount = BigInt(entries[index].amount.toFixed(0));
+        previousBalance += entries[index].side === normalSide ? amount : -amount;
+        assert.equal(entries[index].balance_after.toFixed(0), previousBalance.toString());
       }
-      assert.equal(account.last_entry_id, chain.at(-1)?.id);
     }
     await service.applyActivity({ ...first, state: 'attention', observationSequence: '2' });
     assert.equal(
@@ -419,6 +411,23 @@ test(
     });
     balances = await service.balances(walletIds[0], tenantId);
     assert.equal(BigInt(balances.balances[0].confirmed), confirmedBeforeFinality);
+
+    await Promise.all([
+      service.applyActivity(activity(8, 'observed', '0xconcurrent-a')),
+      service.applyActivity(activity(9, 'observed', '0xconcurrent-b')),
+    ]);
+    const concurrentJournal = await db!.ledgerEntry.findMany({
+      where: { activity_identifier: { in: [identifiers[8], identifiers[9]] } },
+    });
+    assert.equal(concurrentJournal.length, 4);
+    const walletAccountKey = `wallet:${walletIds[0]}:token:ethereum:native:provisional`;
+    const concurrentTail = await db!.ledgerEntry.findMany({
+      where: { account_key: walletAccountKey },
+      orderBy: { sequence: 'asc' },
+    });
+    const finalTwo = concurrentTail.slice(-2);
+    assert.equal(finalTwo[1].sequence, finalTwo[0].sequence + 1n);
+    assert.equal(finalTwo[1].previous_entry_id, finalTwo[0].id);
   },
 );
 

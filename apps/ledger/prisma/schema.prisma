@@ -8,39 +8,38 @@ datasource db {
 }
 
 model LedgerWallet {
-  wallet_id   String          @id @db.Uuid
+  wallet_id   String        @id @db.Uuid
   tenant_id   String
   chain       String
   network     String
   address     String
   address_key String
-  created_at  DateTime        @default(now()) @db.Timestamptz
+  created_at  DateTime      @default(now()) @db.Timestamptz
   entries     LedgerEntry[]
-  accounts    LedgerAccount[]
 
   @@unique([chain, network, address_key])
   @@map("ledger_wallets")
 }
 
 model LedgerActivity {
-  identifier       String        @id
-  chain            String
-  network          String
-  transaction_hash String
-  state            String
-  revision         Int           @default(0)
+  identifier               String        @id
+  chain                    String
+  network                  String
+  transaction_hash         String
+  state                    String
+  revision                 Int           @default(0)
   observation_sequence     BigInt        @default(0)
   canonical_reconciliation Boolean       @default(false)
-  block_hash       String?
-  block_height     BigInt?
-  completed_at_ms  BigInt
-  source_status    String
-  payload          Json
-  last_error       String?
-  created_at       DateTime      @default(now()) @db.Timestamptz
-  updated_at       DateTime      @updatedAt @db.Timestamptz
-  finalized_at     DateTime?     @db.Timestamptz
-  entries          LedgerEntry[]
+  block_hash               String?
+  block_height             BigInt?
+  completed_at_ms          BigInt
+  source_status            String
+  payload                  Json
+  last_error               String?
+  created_at               DateTime      @default(now()) @db.Timestamptz
+  updated_at               DateTime      @updatedAt @db.Timestamptz
+  finalized_at             DateTime?     @db.Timestamptz
+  entries                  LedgerEntry[]
 
   @@index([chain, network, block_height])
   @@index([state, updated_at])
@@ -48,59 +47,33 @@ model LedgerActivity {
 }
 
 model LedgerEntry {
-  id                  String        @id @db.Uuid
+  id                  String         @id @db.Uuid
   activity_identifier String
   activity            LedgerActivity @relation(fields: [activity_identifier], references: [identifier], onDelete: NoAction, onUpdate: NoAction)
   revision            Int
   account_key         String
-  account             LedgerAccount @relation(fields: [account_key], references: [account_key], onDelete: NoAction, onUpdate: NoAction)
   sequence            BigInt
-  wallet_id           String?       @db.Uuid
-  wallet               LedgerWallet? @relation(fields: [wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
-  asset                String
-  account_kind         String
-  side                 String
-  amount               Decimal       @db.Decimal(96, 18)
-  balance_after        Decimal       @db.Decimal(96, 18)
-  balance_state        String
-  entry_kind           String
-  previous_entry_id    String?       @unique @db.Uuid
-  previous_entry       LedgerEntry?  @relation("LedgerEntryPrevious", fields: [previous_entry_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  next_entries         LedgerEntry[] @relation("LedgerEntryPrevious")
-  next_entry_id        String?       @unique @db.Uuid
-  next_entry           LedgerEntry?  @relation("LedgerEntryNext", fields: [next_entry_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  previous_entries    LedgerEntry[] @relation("LedgerEntryNext")
-  tail_account         LedgerAccount? @relation("LedgerAccountTail")
-  reversal_of_id       String?       @db.Uuid
-  reversal_of          LedgerEntry?  @relation("LedgerEntryReversal", fields: [reversal_of_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  reversals            LedgerEntry[] @relation("LedgerEntryReversal")
-  created_at           DateTime      @default(now()) @db.Timestamptz
+  wallet_id           String?        @db.Uuid
+  wallet              LedgerWallet?  @relation(fields: [wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
+  asset               String
+  account_kind        String
+  side                String
+  amount              Decimal        @db.Decimal(96, 18)
+  balance_after       Decimal        @db.Decimal(96, 18)
+  balance_state       String
+  entry_kind          String
+  previous_entry_id   String?        @unique @db.Uuid
+  previous_entry      LedgerEntry?   @relation("LedgerEntryPrevious", fields: [previous_entry_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  next_entries        LedgerEntry[]  @relation("LedgerEntryPrevious")
+  reversal_of_id      String?        @db.Uuid
+  reversal_of         LedgerEntry?   @relation("LedgerEntryReversal", fields: [reversal_of_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversals           LedgerEntry[]  @relation("LedgerEntryReversal")
+  created_at          DateTime       @default(now()) @db.Timestamptz
 
   @@unique([account_key, sequence])
   @@index([activity_identifier, revision])
-  @@index([wallet_id, asset, balance_state, sequence])
+  @@index([wallet_id, account_key, sequence(sort: Desc)])
   @@map("ledger_entries")
-}
-
-model LedgerAccount {
-  account_key    String        @id
-  account_kind   String
-  normal_side    String
-  balance_state  String
-  chain          String
-  network        String
-  asset          String
-  wallet_id      String?       @db.Uuid
-  wallet         LedgerWallet? @relation(fields: [wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
-  next_sequence  BigInt        @default(1)
-  last_entry_id  String?       @unique @db.Uuid
-  last_entry     LedgerEntry?  @relation("LedgerAccountTail", fields: [last_entry_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  entries        LedgerEntry[]
-  created_at     DateTime      @default(now()) @db.Timestamptz
-
-  @@index([wallet_id, balance_state])
-  @@index([chain, network, asset, account_kind, balance_state])
-  @@map("ledger_accounts")
 }
 
 model Inbox {
