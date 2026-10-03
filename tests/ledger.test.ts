@@ -692,3 +692,76 @@ test(
     assert.equal(protectedBalances.balances[0].provisional, '100');
   },
 );
+
+test(
+  'Ledger hash-key lookup deduplicates differing legacy IDs and EVM hash casing',
+  { skip: !enabled },
+  async () => {
+    const walletId = randomUUID();
+    const address = `0x${randomBytes(20).toString('hex')}`;
+    await service.registerWallet({
+      walletId,
+      tenantId,
+      chain: 'ethereum',
+      network: '11155111',
+      address,
+    });
+    const shared = {
+      chain: 'ethereum' as const,
+      network: '11155111',
+      transactionHash: '0xAbC123',
+      sourceStatus: 'success' as const,
+      completedAtTimestamp: 1000,
+      blockHash: '0xalias-block',
+      changes: [
+        {
+          wallet: `wallet:ethereum:${address}`,
+          asset: 'token:ethereum:native',
+          amount: '100',
+        },
+      ],
+    };
+    const firstIdentifier = `transaction:ethereum:${randomUUID()}`;
+    const duplicateIdentifier = `transaction:ethereum:${randomUUID()}`;
+    await service.applyActivity({
+      ...shared,
+      identifier: firstIdentifier,
+      state: 'observed',
+      observationSequence: '1',
+    });
+    await service.applyActivity({
+      ...shared,
+      identifier: duplicateIdentifier,
+      transactionHash: '0xabc123',
+      state: 'finalized',
+      observationSequence: '2',
+      canonicalReconciliation: true,
+    });
+
+    const balances = await service.balances(walletId, tenantId);
+    assert.equal(balances.balances[0].confirmed, '100');
+    assert.equal(balances.balances[0].provisional, '0');
+    assert.equal(
+      await db!.ledgerActivity.count({
+        where: { chain: 'ethereum', network: '11155151', transaction_hash_key: '0xabc123' },
+      }),
+      0,
+    );
+    assert.equal(
+      await db!.ledgerActivity.count({
+        where: { chain: 'ethereum', network: '11155111', transaction_hash_key: '0xabc123' },
+      }),
+      1,
+    );
+    assert.equal(
+      await db!.ledgerEntry.count({
+        where: { activity_identifier: firstIdentifier, account_kind: 'wallet' },
+      }),
+      3,
+    );
+    assert.equal(
+      await db!.ledgerActivity.findUnique({ where: { identifier: duplicateIdentifier } }),
+      null,
+    );
+  },
+);

@@ -135,10 +135,10 @@ export class LedgerService {
           where: {
             chain: activity.chain,
             network: activity.network,
-            transaction_hash:
-              chainFamily(activity.chain) === 'solana'
-                ? activity.transactionHash
-                : { equals: activity.transactionHash, mode: 'insensitive' },
+            transaction_hash_key: canonicalTransactionHash(
+              activity.chain,
+              activity.transactionHash,
+            ),
           },
         });
       if (existing && existing.identifier !== activity.identifier)
@@ -245,6 +245,7 @@ export class LedgerService {
       chain: activity.chain,
       network: activity.network,
       transaction_hash: activity.transactionHash,
+      transaction_hash_key: canonicalTransactionHash(activity.chain, activity.transactionHash),
       state,
       revision,
       observation_sequence: BigInt(activity.observationSequence ?? '0'),

@@ -50,7 +50,7 @@ test(
         `INSERT INTO ledger_activities
           (identifier, chain, network, transaction_hash, state, revision, block_hash, block_height,
            completed_at_ms, source_status, payload, updated_at)
-         VALUES ($1, 'ethereum', '11155111', 'legacy', 'observed', 4, '0xlegacy-block', 10,
+         VALUES ($1, 'ethereum', '11155111', 'LeGaCy', 'observed', 4, '0xlegacy-block', 10,
                  1, 'success', '{}'::jsonb, now())`,
         [activityId],
       );
@@ -112,6 +112,16 @@ test(
       `;
       assert.equal(archived[0].entries, 2n);
       assert.equal(archived[0].balances, 2n);
+      const normalizedActivity = await db.ledgerActivity.findUniqueOrThrow({
+        where: { identifier: activityId },
+      });
+      assert.equal(normalizedActivity.transaction_hash_key, 'legacy');
+      const lookupIndex = await db.$queryRaw<{ indexname: string }[]>`
+        SELECT indexname FROM pg_indexes
+        WHERE schemaname = 'public' AND tablename = 'ledger_activities'
+          AND indexname = 'ledger_activities_chain_network_transaction_hash_key_idx'
+      `;
+      assert.equal(lookupIndex.length, 1);
 
       const accountTable = await db.$queryRaw<{ table_name: string | null }[]>`
         SELECT to_regclass('public.ledger_accounts')::text AS table_name

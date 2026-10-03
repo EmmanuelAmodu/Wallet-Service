@@ -26,6 +26,7 @@ model LedgerActivity {
   chain                    String
   network                  String
   transaction_hash         String
+  transaction_hash_key     String
   state                    String
   revision                 Int           @default(0)
   observation_sequence     BigInt        @default(0)
@@ -42,6 +43,7 @@ model LedgerActivity {
   entries                  LedgerEntry[]
 
   @@index([chain, network, block_height])
+  @@index([chain, network, transaction_hash_key])
   @@index([state, updated_at])
   @@map("ledger_activities")
 }
