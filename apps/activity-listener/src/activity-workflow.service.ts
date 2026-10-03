@@ -60,6 +60,7 @@ export class ActivityWorkflowService {
     poll: number,
     previousBlockHash?: string,
     finalAttempt = false,
+    previouslyIncluded = previousBlockHash !== undefined,
   ) {
     const { chain, transactionHash } = this.identity(activity);
     const network = this.rpc.networkIdentity(chain);
@@ -73,7 +74,7 @@ export class ActivityWorkflowService {
     );
     if (!observation) {
       await this.publishAttention(activity, chain, transactionHash, observationSequence);
-      await this.scheduleFinality(activity, poll + 1, previousBlockHash);
+      await this.scheduleFinality(activity, poll + 1, previousBlockHash, previouslyIncluded);
       return;
     }
     await this.publishObservation(
@@ -84,6 +85,7 @@ export class ActivityWorkflowService {
       previousBlockHash,
       observation,
       observationSequence,
+      previouslyIncluded,
     );
   }
 
@@ -144,14 +146,15 @@ export class ActivityWorkflowService {
     previousBlockHash: string | undefined,
     observation: ChainObservation,
     observationSequence: string,
+    previouslyIncluded = previousBlockHash !== undefined,
   ) {
     const current =
-      previousBlockHash &&
+      previouslyIncluded &&
       observation.state === 'observed' &&
       observation.transactionFound === false
         ? { ...observation, state: 'reverted' as const }
         : observation;
-    const canonicalReconciliation = previousBlockHash !== undefined || current.state === 'reverted';
+    const canonicalReconciliation = previouslyIncluded || current.state === 'reverted';
 
     if (current.state === 'observed') {
       await this.publishLedgerUpdate(
@@ -177,7 +180,12 @@ export class ActivityWorkflowService {
       );
     }
 
-    await this.scheduleFinality(activity, poll + 1, current.blockHash ?? previousBlockHash);
+    await this.scheduleFinality(
+      activity,
+      poll + 1,
+      current.blockHash ?? previousBlockHash,
+      previouslyIncluded || current.blockHash !== undefined || current.blockHeight !== undefined,
+    );
   }
 
   private async observeOrMarkAttention(
@@ -287,15 +295,23 @@ export class ActivityWorkflowService {
     await this.ledgerQueue.add(payload.type, this.auth.seal(payload, jobId), { jobId });
   }
 
-  private async scheduleFinality(activity: ProcessorActivity, poll: number, blockHash?: string) {
+  private async scheduleFinality(
+    activity: ProcessorActivity,
+    poll: number,
+    blockHash?: string,
+    previouslyIncluded = blockHash !== undefined,
+  ) {
     const payload = {
       type: 'activity.check-finality' as const,
       activity,
       poll,
+      previouslyIncluded,
       ...(blockHash ? { blockHash } : {}),
     };
     const jobId = `activity-check-${createHash('sha256')
-      .update(`${activity.identifier}:${blockHash ?? 'unmined'}:${poll}`)
+      .update(
+        `${activity.identifier}:${blockHash ?? (previouslyIncluded ? 'included' : 'unmined')}:${poll}`,
+      )
       .digest('hex')}`;
     await this.activityQueue.add(payload.type, this.auth.seal(payload, jobId), {
       jobId,

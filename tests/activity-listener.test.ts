@@ -428,3 +428,40 @@ test('invalid Pub/Sub payloads are durably quarantined before acknowledgement', 
   const invalid = auth.open(jobs[0].data, jobs[0].jobId, jobs[0].name);
   assert.equal(invalid.type, 'activity.invalid');
 });
+
+test('Solana inclusion without a block hash is reversed on disappearance', async () => {
+  const state = workflow([
+    { state: 'observed', transactionFound: true, blockHeight: '20' },
+    { state: 'observed', transactionFound: false },
+  ]);
+  const source = activity();
+  source.identifier = 'transaction:solana:signature';
+  source.balanceChanges = [];
+  await state.service.receive(source, 'solana-inclusion');
+  const check = state.auth.open(
+    state.activityJobs[0].data,
+    state.activityJobs[0].options.jobId,
+    state.activityJobs[0].name,
+  );
+  assert.equal(check.type, 'activity.check-finality');
+  if (check.type !== 'activity.check-finality') throw new Error('Wrong action');
+  assert.equal(check.previouslyIncluded, true);
+  assert.equal(check.blockHash, undefined);
+  await state.service.resumeFinality(
+    check.activity,
+    check.poll,
+    check.blockHash,
+    false,
+    check.previouslyIncluded,
+  );
+  const update = state.auth.open(
+    state.ledgerJobs[1].data,
+    state.ledgerJobs[1].options.jobId,
+    state.ledgerJobs[1].name,
+  );
+  assert.equal(update.type, 'ledger.activity.update');
+  if (update.type !== 'ledger.activity.update') throw new Error('Wrong update');
+  assert.equal(update.activity.state, 'reverted');
+  assert.equal(update.activity.canonicalReconciliation, true);
+  assert.deepEqual(update.activity.changes, []);
+});

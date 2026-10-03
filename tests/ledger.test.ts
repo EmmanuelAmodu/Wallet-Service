@@ -628,7 +628,7 @@ test(
 );
 
 test(
-  'unsequenced legacy activity progresses to finalized with a generated Ledger sequence',
+  'unsequenced legacy activity progresses without claiming a sequenced observation',
   { skip: !enabled },
   async () => {
     const walletId = randomUUID();
@@ -665,11 +665,30 @@ test(
     assert.equal(balances.balances[0].confirmed, '100');
     assert.equal(balances.balances[0].provisional, '0');
     const persisted = await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier } });
-    assert.equal(persisted.observation_sequence, 2n);
+    assert.equal(persisted.observation_sequence, 0n);
 
     await service.applyActivity({ ...legacyEvent, blockHash: '0xolder-block' });
     const unchanged = await service.balances(walletId, tenantId);
     assert.equal(unchanged.balances[0].confirmed, '100');
     assert.equal(unchanged.balances[0].provisional, '0');
+    const sequenced = {
+      ...legacyEvent,
+      observationSequence: '100',
+      state: 'observed' as const,
+      blockHash: '0xcanonical-new',
+      canonicalReconciliation: true,
+    };
+    await service.applyActivity(sequenced);
+    await assert.rejects(
+      service.applyActivity({ ...legacyEvent, state: 'finalized', blockHash: '0xorphaned' }),
+      /Legacy activity cannot replace a sequenced observation/,
+    );
+    const protectedActivity = await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier } });
+    assert.equal(protectedActivity.observation_sequence, 100n);
+    assert.equal(protectedActivity.block_hash, '0xcanonical-new');
+    assert.equal(protectedActivity.state, 'observed');
+    const protectedBalances = await service.balances(walletId, tenantId);
+    assert.equal(protectedBalances.balances[0].confirmed, '0');
+    assert.equal(protectedBalances.balances[0].provisional, '100');
   },
 );

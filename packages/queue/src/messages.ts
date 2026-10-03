@@ -93,6 +93,7 @@ export const messageSchema = z.discriminatedUnion('type', [
       activity: processorActivitySchema,
       poll: z.number().int().nonnegative(),
       blockHash: z.string().optional(),
+      previouslyIncluded: z.boolean().optional(),
     })
     .strict(),
   z

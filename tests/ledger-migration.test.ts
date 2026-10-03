@@ -35,6 +35,8 @@ test(
       await legacy.query(initialMigration);
 
       const walletId = randomUUID();
+      const secondWalletId = randomUUID();
+      const secondAddress = `0x${'22'.repeat(20)}`;
       const activityId = `transaction:ethereum:${randomUUID()}`;
       const legacyEntryId = randomUUID();
       const address = `0x${'11'.repeat(20)}`;
@@ -65,6 +67,21 @@ test(
          VALUES ($1, $2, 0, 100, now())`,
         [walletId, asset],
       );
+      await legacy.query(
+        `INSERT INTO ledger_wallets (wallet_id, tenant_id, chain, network, address, address_key)
+         VALUES ($1, 'migration-test', 'ethereum', '11155111', $2, $2)`,
+        [secondWalletId, secondAddress],
+      );
+      await legacy.query(
+        `INSERT INTO ledger_entries (id, activity_identifier, revision, wallet_id, asset, amount, kind)
+         VALUES ($1, $2, 4, $3, $4, -100, 'provisional')`,
+        [randomUUID(), activityId, secondWalletId, asset],
+      );
+      await legacy.query(
+        `INSERT INTO ledger_balances (wallet_id, asset, confirmed_amount, provisional_amount, updated_at)
+         VALUES ($1, $2, 0, -100, now())`,
+        [secondWalletId, asset],
+      );
       await legacy.end();
       legacy = undefined;
 
@@ -93,8 +110,8 @@ test(
           (SELECT count(*) FROM ledger_legacy_entries) AS entries,
           (SELECT count(*) FROM ledger_legacy_balances) AS balances
       `;
-      assert.equal(archived[0].entries, 1n);
-      assert.equal(archived[0].balances, 1n);
+      assert.equal(archived[0].entries, 2n);
+      assert.equal(archived[0].balances, 2n);
 
       const accountTable = await db.$queryRaw<{ table_name: string | null }[]>`
         SELECT to_regclass('public.ledger_accounts')::text AS table_name
@@ -126,9 +143,9 @@ test(
       const credits = journal
         .filter((entry) => entry.side === 'credit')
         .reduce((total, entry) => total.plus(entry.amount), new Prisma.Decimal(0));
-      assert.equal(journal.length, 2);
-      assert.equal(debits.toFixed(0), '100');
-      assert.equal(credits.toFixed(0), '100');
+      assert.equal(journal.length, 4);
+      assert.equal(debits.toFixed(0), '200');
+      assert.equal(credits.toFixed(0), '200');
 
       const service = new LedgerService(db);
       await service.applyActivity({
@@ -143,11 +160,17 @@ test(
         canonicalReconciliation: true,
         blockHash: '0xlegacy-block',
         blockHeight: '10',
-        changes: [{ wallet: `wallet:ethereum:${address}`, asset, amount: '100' }],
+        changes: [
+          { wallet: `wallet:ethereum:${address}`, asset, amount: '100' },
+          { wallet: `wallet:ethereum:${secondAddress}`, asset, amount: '-100' },
+        ],
       });
       const balances = await service.balances(walletId, 'migration-test');
       assert.equal(balances.balances[0].confirmed, '100');
       assert.equal(balances.balances[0].provisional, '0');
+      const second = await service.balances(secondWalletId, 'migration-test');
+      assert.equal(second.balances[0].confirmed, '-100');
+      assert.equal(second.balances[0].provisional, '0');
       const migratedActivity = await db.ledgerActivity.findUniqueOrThrow({
         where: { identifier: activityId },
       });

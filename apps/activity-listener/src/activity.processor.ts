@@ -35,6 +35,7 @@ export class ActivityProcessor extends WorkerHost implements BeforeApplicationSh
           message.poll,
           message.blockHash,
           finalAttempt,
+          message.previouslyIncluded,
         );
       else if (message.type === 'activity.invalid')
         throw new ActionRejectedError(`Invalid provider activity: ${message.reason}`);

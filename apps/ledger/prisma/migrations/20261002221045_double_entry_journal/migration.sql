@@ -154,6 +154,7 @@ BEGIN
         AND e."revision" = legacy_group."revision"
         AND e."kind" = legacy_group."kind"
         AND e."asset" = legacy_group."asset"
+        AND e."wallet_id" = legacy_group."wallet_id"
       ORDER BY e."created_at", e."id"
     LOOP
       previous_balance := 0;

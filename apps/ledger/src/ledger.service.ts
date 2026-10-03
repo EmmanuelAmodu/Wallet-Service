@@ -144,9 +144,13 @@ export class LedgerService {
       if (existing && existing.identifier !== activity.identifier)
         activity = { ...activity, identifier: existing.identifier };
       const hasObservationSequence = activity.observationSequence !== undefined;
+      if (!hasObservationSequence && existing && existing.observation_sequence > 0n)
+        throw new ActionRejectedError(
+          'Legacy activity cannot replace a sequenced observation; reconcile through ActivityListener',
+        );
       const observationSequence = hasObservationSequence
         ? BigInt(activity.observationSequence!)
-        : (existing?.observation_sequence ?? 0n) + 1n;
+        : 0n;
       activity = { ...activity, observationSequence: observationSequence.toString() };
       let revision = existing?.revision ?? 0;
 
