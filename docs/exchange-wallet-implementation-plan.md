@@ -85,8 +85,8 @@ If multiple seed-isolated domains or same-chain networks are enabled later, add 
 ### Development reset and bootstrap
 
 1. Stop application workers and the development provider publisher; remove old provider watches.
-2. Review and apply the guarded `npm run reset:development` script. It recreates Wallet, Broadcast, and Ledger local databases from baselines, retires only the previous project BullMQ prefix and Pub/Sub subscription, and rotates the persistent epoch/topic/subscription names.
-3. Update the external provider publisher to the new topic/epoch; the reset script cannot configure that separately deployed service. Install fresh watches and verify subscription acknowledgment/backfill before readiness.
+2. Review and apply the guarded `npm run reset:development` script after the Phase 1 schemas are ready. It reads durable `.env` directly despite stale shell exports and acquires an exclusive `.env.reset.lock` bound to an owner token. Hold that lock through destructive work and final reset-marker clearing, which also verifies the durable epoch and marker. Services reject conflicting runtime epochs. The script recreates Wallet, Broadcast, and Ledger local databases from baselines, retires only the previous project BullMQ prefix and Pub/Sub subscription, and rotates the persistent epoch/topic/subscription names. Interrupted work resumes from the same durable epoch/namespaces; stale-lock recovery is explicit.
+3. Update the external provider publisher to the new topic/epoch and require top-level `resetEpoch` on every discovery payload; the reset script cannot configure that separately deployed service. Install fresh watches and verify subscription acknowledgment/backfill before readiness.
 4. Configure the development custody seed, networks, assets, and signer policy. A record reset does not clear blockchain state; use fresh local chain state or a fresh development seed when an empty on-chain starting point is required.
 5. Bootstrap the hot wallet at account 0, then any explicitly configured management wallets in 1–9. Begin customer allocation at exactly 10.
 6. Install/verify customer subscriptions, seed test fixtures deliberately, and start the exchange workers with the new epoch.
@@ -165,10 +165,10 @@ The reservation transaction must atomically check available balance, create the 
 
 ## 6. Deposit listener and credit flow
 
-1. Wallet derives a customer account >=10 and publishes `customer-wallet.registry.requested` with customer identity, custody domain, chain/network, address, registry revision, and hot-wallet identity. This is not a customer-ready event.
+1. Wallet derives a customer account >=10 and publishes `customer-wallet.registry.requested.v1` with customer identity, custody domain, chain/network, address, registry revision, and hot-wallet identity. This is not a customer-ready event.
 2. The registry/subscription worker installs the provider subscription, records its acknowledgment, and establishes a backfill cursor. The provider is external to this repository, so subscription and payload changes are an implementation dependency.
-3. Wallet publishes `customer-wallet.ready` only after both Ledger and ActivityListener acknowledge the matching registry revision and the provider reports complete initial backfill coverage.
-4. ActivityListener receives an event carrying the current `RESET_EPOCH` as a discovery signal, verifies the configured network and chain data, and normalizes relevant transfers. Missing or stale epochs are quarantined before queueing.
+3. Wallet marks the address ready only after both Ledger and ActivityListener acknowledge the matching registry revision and the provider reports complete initial backfill coverage.
+4. ActivityListener receives a discovery event with top-level `resetEpoch` equal to the current `RESET_EPOCH`, verifies the configured network and chain data, and normalizes relevant transfers. Missing or stale epochs are quarantined before queueing, including events delivered to the current topic.
 5. For each watched address, classify the movement as external deposit, internal funding, authorized sweep, or unexpected outgoing activity. Ignore unrelated counterparties for wallet lookup; do not fail the entire event because the external sender has no Ledger wallet.
 6. Ledger records pending status, finality promotes the deposit, and Ledger atomically commits the customer credit plus `deposit.credited` to its outbox.
 7. Sweep orchestration consumes `deposit.credited`, coalesces eligible work by wallet/asset, and schedules execution.
@@ -336,41 +336,67 @@ The existing shared queue HMAC proves envelope integrity, not independent withdr
 
 ## 10. Delivery phases and exit criteria
 
+These phases use the same numbering and dependencies as the [TODO checklist](exchange-wallet-todo.md). Phases 0–8 deliver the initial exchange flow; Phase 9 is optional expansion. Preparatory work may proceed when its prerequisites are available, while each customer-facing capability remains gated on its verification.
+
 ### Phase 0 — Configuration and contracts
 
-Record the exchange configuration, supported asset contract, financial policy, provider gaps, and operation/message contracts. Implement and verify the guarded reset tooling and stale-epoch rejection, but defer the actual database reset and hot/customer bootstrap until the Phase 1 schemas and allocator are ready. Customer liabilities start at zero after that coordinated reset; test balances are created only through explicit fixtures or deposit events.
+Record the exchange configuration, supported asset contract, financial policy, provider gaps, and operation/message contracts. Implement and verify the guarded reset tooling: direct durable `.env` validation, stale-runtime epoch rejection, persisted-plan recovery despite stale shell exports, exclusive lock ownership, interruption/resume fencing, and queue/provider-source epoch rejection. Defer the actual database reset and hot/customer bootstrap until the Phase 1 schemas and allocator are ready. Customer liabilities start at zero after that coordinated reset; test balances are created only through explicit fixtures or deposit events. Keep the actual reset and failure/resume rehearsal pending until performed.
 
-Exit: configuration/provider decisions are recorded; dry-run/reset safety, queue-epoch rejection, and provider-source-epoch rejection pass. Allocation-at-10 and empty-ledger assertions are not Phase 0 gates.
+Exit: configuration/contracts and external dependencies are recorded; reset safety and stale-epoch rejection are verified. The coordinated reset procedure is ready to run once Phase 1 schemas are available. Allocation-at-10 and empty-ledger assertions are Phase 1 gates.
 
-### Phase 1 — Custody domains and reserved allocation
+### Phase 1 — Custody roles, allocation, and bootstrap
 
-Implement role/domain schema, allocator starting at 10, idempotent hot bootstrap, management configuration, signer seed binding, trusted signer role policy, and durable registry/subscription readiness.
+Implement customer/domain/role schemas, reserved-index constraints, allocator starting at 10, idempotent hot bootstrap, management configuration, and seed/network-bound derivation. Implement Bitcoin regtest address/signing/RPC support before enabling that adapter. Persist readiness state, then run the coordinated reset and bootstrap after the schemas are deployed.
 
-Exit: after schemas are deployed, the coordinated reset runs successfully; customer creation cannot allocate 0–9; hot0 derives deterministically; concurrent replicas cannot create two active hot wallets or overlapping customer accounts; the first customer account is 10.
+Exit: the coordinated reset runs successfully; the first customer account is 10; hot0 derives deterministically; customer creation cannot allocate 0–9; concurrent replicas cannot create conflicting wallets. Address publication remains blocked until Phase 3 subscription/registry readiness is verified.
 
-### Phase 2 — Exchange Ledger and deposits
+### Phase 2 — Durable messaging and exchange accounting
 
-Implement customer liabilities, deposit identity, finality credit/reversal, reservations, Ledger outbox, normalized transfer classification, internal-funding exclusion, customer balance APIs, and clean-state test fixtures.
+Implement shared business contracts, separate outbox deliveries and acknowledgments, Ledger account identities and journal batches, customer liabilities, deposit credit/reversal, withdrawal reservations, custody/fee settlement, and Ledger outbox/reconciliation. Preserve append-only balanced journals and database inbox/transition guards without cross-application database reads.
 
-Exit: duplicate deliveries credit once; sweeps and funding do not change user balances; concurrent holds cannot overspend; reorgs produce balanced compensating entries.
+Exit: Ledger owns customer balances and holds durably; concurrent holds cannot overspend; duplicate/reordered events cannot credit or settle twice; custody-only movements leave customer liabilities unchanged; each financial transition is balanced and recoverable.
 
-### Phase 3 — Native sweeps and hot withdrawals
+### Phase 3 — Deposit listener and customer deposit APIs
 
-Implement durable operations/attempts, native family sweep adapters, Bitcoin UTXO discovery/reservations, automatic submission, hot scheduling, treasury reconciliation, and restricted public transaction routes. Deliver all three native families, with per-chain feature flags during rollout.
+Implement registry projections and readiness acknowledgments, certified provider watch installation/removal and initial backfill, exact transfer identity and RPC finality verification, movement classification, incidents, and customer deposit/balance/history APIs. Select and certify the replacement Solana provider and deployed capabilities for each enabled network. Require top-level provider `resetEpoch` and keep unsupported assets in custody exceptions.
 
-Exit: finalized deposits are swept, withdrawals use only hot0, deposits arriving mid-sweep are picked up afterward, and crashes/uncertain broadcasts cannot pay or debit twice.
+Exit: supported external deposits credit the correct customer once; registry/provider gaps are recoverable; internal funding and sweep receipts never create a second credit; only addresses with matching acknowledgments and complete initial coverage are exposed.
 
-### Phase 4 — Fungible tokens and fee management
+### Phase 4 — Safe execution and native sweeps
+
+Implement durable sweep/funding operations and immutable execution attempts, source-resource reservations, trusted Signer authorization, automatic Broadcast submission, and native EVM/Bitcoin/Solana sweep adapters. Discover and reserve Bitcoin UTXOs; preserve source serialization, fee bounds, hot-only recipients, and ambiguous-attempt holds. Coalesce deposits and rescan residuals.
+
+Exit: eligible finalized native deposits are swept to hot0; deposits arriving during a sweep create later work; fees and dust follow policy; crashes/retries/uncertain submission cannot create conflicting execution or duplicate custody settlement.
+
+### Phase 5 — Hot-wallet withdrawals
+
+Implement customer withdrawal requests and accepted fee quotes, authenticated ownership validation, Ledger reservation/result/release saga, hot liquidity scheduling, immutable attempts, automatic submission, settlement, and safe cancellation/reorg handling. Restrict generic customer-wallet transfers and reject exchange-owned destinations until a separate internal-transfer flow exists.
+
+Exit: every withdrawal uses hot0, customer and hot resources are reserved separately, low-liquidity requests queue durably, and duplicate/late events cannot pay or debit twice or release uncertain obligations.
+
+### Phase 6 — ERC-20, SPL, and fee management
 
 Implement/certify ERC-20 and SPL adapters, management gas funding, Solana fee sponsorship and hot token accounts, token metadata policies, actual fee accounting, residual cleanup, and unsupported-asset exception handling.
 
 Exit: enabled token deposits can be credited, swept, and withdrawn end to end. Native-only completion is not completion of the all-supported-assets requirement.
 
-### Phase 5 — Scale and production rollout
+### Phase 7 — Operational recovery and controls
 
-Add certified withdrawal batching and higher concurrency only after durable resources are implemented. Complete backfill/reconciliation, operational controls and incident workflows; run a single-domain/chain canary before expanding.
+Implement periodic hot/management RPC and per-asset custody/liability reconciliation, idempotent repair workers, audited incident/freeze/retry controls, metrics, and recovery runbooks. Preserve operations, holds, and journals during recovery; the development reset is an initial setup action.
 
-Exit: balances reconcile, replay tests pass, reservations and attempts recover after process/Redis outages, and rollout/rollback preserves published addresses and journal history.
+Exit: unexplained custody differences and stranded work are visible and recoverable without deleting financial history.
+
+### Phase 8 — Acceptance and controlled rollout
+
+Run real PostgreSQL/Redis integration tests with deterministic provider/RPC fixtures and signed-transaction smoke tests for every enabled adapter. Demonstrate deposit → credit → sweep → hot withdrawal and outage/reorg/ambiguous-submission recovery. Validate separate capability switches, dry-run scheduling, a single-domain/chain canary, and rollout/rollback procedures.
+
+Exit: all required phase gates pass, enabled assets reconcile end to end, and rollout/recovery preserves addresses, operations, holds, and journals.
+
+### Phase 9 — Optional follow-up backlog
+
+After initial acceptance, add certified withdrawal batching/concurrency, bounded EVM nonce windows, optional EVM batch contracts, multiple seed-isolated domains/rotation, an explicit internal-transfer API, or a separately owned Treasury service when justified. Each expansion needs its own resource, signing, accounting, and recovery verification.
+
+These tasks are optional and do not block the initial serialized hot-wallet scheduler. Enable each only after its independent certification passes.
 
 ## 11. Verification and operational acceptance
 

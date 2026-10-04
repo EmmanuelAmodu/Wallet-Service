@@ -80,6 +80,9 @@ test(
       prefix = `test-${randomUUID()}`,
       resetEpoch = randomUUID(),
       walletPort = await freePort();
+    await writeFile(join(dir, '.env'), `RESET_EPOCH=${resetEpoch}\nRESET_IN_PROGRESS=\n`, {
+      mode: 0o600,
+    });
     const raws: string[] = [];
     let accepted = false,
       confirmed = false;
@@ -139,6 +142,7 @@ test(
       REDIS_URL: process.env.TEST_REDIS_URL,
       QUEUE_PREFIX: prefix,
       RESET_EPOCH: resetEpoch,
+      RESET_ENV_FILE: join(dir, '.env'),
       QUEUE_AUTH_KEY: queueKey,
       SIGNER_SEED_FILE: seed,
       SIGNER_SEED_ID: 'http-events',

@@ -1,6 +1,7 @@
 import { registerAs, ConfigType } from '@nestjs/config';
 import { integerSetting, required } from '../../shared/src/config.js';
 import { token } from '../../shared/src/security/tokens.js';
+import { assertResetReady } from '../../shared/src/development-reset.js';
 
 export function epochQueuePrefix(prefix: string, resetEpoch: string) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(prefix)) throw new Error('Invalid queue prefix');
@@ -9,8 +10,7 @@ export function epochQueuePrefix(prefix: string, resetEpoch: string) {
 }
 
 export const queueConfig = registerAs('queue', () => {
-  if (process.env.RESET_IN_PROGRESS)
-    throw new Error('Development reset is in progress; queue-backed services must remain stopped');
+  assertResetReady();
   const resetEpoch = required('RESET_EPOCH');
   return {
     redisUrl: required('REDIS_URL'),

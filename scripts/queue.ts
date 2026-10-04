@@ -5,6 +5,7 @@ import { connection } from '../packages/queue/src/messaging.module.js';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
 import { required } from '../packages/shared/src/config.js';
+import { assertResetReady } from '../packages/shared/src/development-reset.js';
 
 export async function reconcileActivity(queue: Queue, identifier: string, auth: MessageAuth) {
   const candidates = [];
@@ -45,8 +46,7 @@ export async function reconcileActivity(queue: Queue, identifier: string, auth: 
 }
 
 async function main() {
-  if (process.env.RESET_IN_PROGRESS)
-    throw new Error('Development reset is in progress; queue maintenance is blocked');
+  assertResetReady();
   const [action, name, id] = process.argv.slice(2);
   if (
     !Object.values(QUEUES).some((q) => q === name) ||

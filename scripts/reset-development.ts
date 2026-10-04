@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
+import { open, readFile, rename, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { PubSub } from '@google-cloud/pubsub';
@@ -8,7 +8,12 @@ import { Queue } from 'bullmq';
 import { connection } from '../packages/queue/src/messaging.module.js';
 import { QUEUES } from '../packages/queue/src/messages.js';
 import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
-import { required } from '../packages/shared/src/config.js';
+import {
+  acquireDevelopmentResetLock,
+  dotenvAssignmentSpans,
+  readResetEnvironment,
+  resetEnvironmentPath,
+} from '../packages/shared/src/development-reset.js';
 
 const databaseTargets = [
   { name: 'wallet', envName: 'WALLET_DATABASE_URL', config: 'prisma.config.ts' },
@@ -142,18 +147,30 @@ export function createDevelopmentResetPlan(input: {
 export function updateEnvContent(content: string, values: Record<string, string>) {
   const normalized = content.replace(/\r\n/g, '\n').replace(/\n+$/, '');
   const lines = normalized ? normalized.split('\n') : [];
+  const assignments = dotenvAssignmentSpans(normalized);
+  const replacements: { startLine: number; endLine: number; line: string }[] = [];
+  const additions: string[] = [];
   for (const [key, value] of Object.entries(values)) {
     if (!/^[A-Z][A-Z0-9_]*$/.test(key) || /[\r\n]/.test(value))
       throw new Error('Invalid environment entry');
-    const matching = lines.flatMap((line, index) => (line.startsWith(`${key}=`) ? [index] : []));
+    const matching = assignments.filter((assignment) => assignment.key === key);
     if (matching.length > 1) throw new Error(`Duplicate ${key} in .env`);
-    if (matching.length) lines[matching[0]] = `${key}=${value}`;
-    else lines.push(`${key}=${value}`);
+    if (matching.length) replacements.push({ ...matching[0], line: `${key}=${value}` });
+    else additions.push(`${key}=${value}`);
   }
+  for (const { startLine, endLine, line } of replacements.sort((a, b) => b.startLine - a.startLine))
+    lines.splice(startLine, endLine - startLine + 1, line);
+  lines.push(...additions);
   return `${lines.join('\n').replace(/\n+$/, '')}\n`;
 }
 
-function resetDatabase(name: string, envName: string, config: string, connectionString: string) {
+function resetDatabase(
+  name: string,
+  envName: string,
+  config: string,
+  connectionString: string,
+  environment: NodeJS.ProcessEnv,
+) {
   const result = spawnSync(
     process.execPath,
     [
@@ -165,7 +182,7 @@ function resetDatabase(name: string, envName: string, config: string, connection
       config,
     ],
     {
-      env: postgresResetEnvironment(connectionString, envName),
+      env: postgresResetEnvironment(connectionString, envName, environment),
       stdio: 'inherit',
     },
   );
@@ -220,14 +237,135 @@ async function retirePubSubSubscription(
   }
 }
 
-async function writeEnvironment(values: Record<string, string>) {
-  const envPath = resolve('.env');
+async function writeEnvironment(envPath: string, values: Record<string, string>) {
   const content = await readFile(envPath, 'utf8');
   const next = updateEnvContent(content, values);
-  const temporaryPath = `${envPath}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, next, { flag: 'wx', mode: 0o600 });
-  await chmod(temporaryPath, 0o600);
-  await rename(temporaryPath, envPath);
+  const temporaryPath = `${envPath}.${randomUUID()}.tmp`;
+  try {
+    const file = await open(temporaryPath, 'wx', 0o600);
+    try {
+      await file.writeFile(next, 'utf8');
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    await rename(temporaryPath, envPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+}
+
+function resetConfiguration(environment: NodeJS.ProcessEnv) {
+  if (environment.NODE_ENV === 'production')
+    throw new Error('Development reset is disabled in production');
+  const urls = databaseTargets.map((target) => {
+    const url =
+      environment[target.envName] ??
+      (target.name === 'ledger'
+        ? 'postgresql://ledger:ledger_local_only@127.0.0.1:5434/ledger'
+        : undefined);
+    if (!url) throw new Error(`Missing configuration: ${target.envName}`);
+    return { ...target, url, database: localDatabaseName(url) };
+  });
+  if (!environment.REDIS_URL) throw new Error('Missing configuration: REDIS_URL');
+  return {
+    urls,
+    redisUrl: localRedisUrl(environment.REDIS_URL),
+    apiEndpoint: localPubSubEndpoint(environment.PUBSUB_API_ENDPOINT ?? '127.0.0.1:8086'),
+    projectId: environment.PUBSUB_PROJECT_ID ?? 'wallet-local',
+  };
+}
+
+function persistedPlan(environment: NodeJS.ProcessEnv, resume: boolean) {
+  return createDevelopmentResetPlan({
+    resume,
+    resetEpoch: environment.RESET_EPOCH,
+    resetInProgress: environment.RESET_IN_PROGRESS,
+    previousQueuePrefix: environment.RESET_PREVIOUS_QUEUE_PREFIX,
+    previousSubscription: environment.RESET_PREVIOUS_SUBSCRIPTION,
+    currentTopic: environment.PUBSUB_TOPIC,
+    currentSubscription: environment.PUBSUB_SUBSCRIPTION,
+    basePrefix: environment.QUEUE_PREFIX ?? 'waas',
+    topicBase: environment.PUBSUB_TOPIC_BASE ?? 'on-chain-activity',
+    subscriptionBase: environment.PUBSUB_SUBSCRIPTION_BASE ?? 'wallet-activity',
+  });
+}
+
+export async function runDevelopmentReset(options: {
+  envPath: string;
+  environment?: NodeJS.ProcessEnv;
+  resume?: boolean;
+  prepare?: (environment: NodeJS.ProcessEnv, plan: DevelopmentResetPlan) => void;
+  performReset: (environment: NodeJS.ProcessEnv, plan: DevelopmentResetPlan) => Promise<void>;
+}) {
+  const envPath = resetEnvironmentPath({ RESET_ENV_FILE: options.envPath });
+  const lock = await acquireDevelopmentResetLock(envPath);
+  try {
+    const inherited = options.environment ?? process.env;
+    if (inherited.NODE_ENV === 'production')
+      throw new Error('Development reset is disabled in production');
+    // Reset control and recovery targets come from disk, not a shell's cached dotenv exports.
+    const environment = { ...inherited, ...readResetEnvironment(envPath) };
+    if (environment.NODE_ENV === 'production')
+      throw new Error('Development reset is disabled in production');
+    const plan = persistedPlan(environment, options.resume ?? false);
+    options.prepare?.(environment, plan);
+    await lock.assertOwned();
+    const activeEnvironment = {
+      ...environment,
+      RESET_IN_PROGRESS: plan.resetEpoch,
+      RESET_EPOCH: plan.resetEpoch,
+      RESET_PREVIOUS_QUEUE_PREFIX: plan.retiredQueuePrefix,
+      RESET_PREVIOUS_SUBSCRIPTION: plan.previousSubscription,
+      PUBSUB_TOPIC: plan.topic,
+      PUBSUB_SUBSCRIPTION: plan.subscription,
+    };
+    if (!options.resume) {
+      await writeEnvironment(envPath, {
+        RESET_IN_PROGRESS: plan.resetEpoch,
+        RESET_EPOCH: plan.resetEpoch,
+        RESET_PREVIOUS_QUEUE_PREFIX: plan.retiredQueuePrefix,
+        RESET_PREVIOUS_SUBSCRIPTION: plan.previousSubscription,
+        PUBSUB_TOPIC: plan.topic,
+        PUBSUB_SUBSCRIPTION: plan.subscription,
+      });
+    }
+    await lock.assertOwned();
+    const fenced = readResetEnvironment(envPath);
+    if (fenced.RESET_EPOCH !== plan.resetEpoch || fenced.RESET_IN_PROGRESS !== plan.resetEpoch)
+      throw new Error('Durable reset fence is missing or changed; refusing to perform the reset');
+    await options.performReset(activeEnvironment, plan);
+    await lock.assertOwned();
+    const persisted = readResetEnvironment(envPath);
+    if (
+      persisted.RESET_EPOCH !== plan.resetEpoch ||
+      persisted.RESET_IN_PROGRESS !== plan.resetEpoch
+    )
+      throw new Error('Reset ownership changed; refusing to clear another reset fence');
+    await writeEnvironment(envPath, {
+      RESET_IN_PROGRESS: '',
+      RESET_PREVIOUS_QUEUE_PREFIX: '',
+      RESET_PREVIOUS_SUBSCRIPTION: '',
+    });
+    return plan;
+  } finally {
+    await lock.release();
+  }
+}
+
+function printPreview(environment: NodeJS.ProcessEnv, plan: DevelopmentResetPlan) {
+  const { urls } = resetConfiguration(environment);
+  const { resetEpoch, retiredQueuePrefix, previousSubscription, topic, subscription } = plan;
+  console.log('Development reset preview:');
+  console.log(`- Databases: ${urls.map(({ name, database }) => `${name}/${database}`).join(', ')}`);
+  console.log(`- Retired BullMQ prefix: ${retiredQueuePrefix}`);
+  console.log(
+    `- New BullMQ prefix: ${epochQueuePrefix(environment.QUEUE_PREFIX ?? 'waas', resetEpoch)}`,
+  );
+  console.log(
+    `- New Pub/Sub namespace: ${environment.PUBSUB_PROJECT_ID ?? 'wallet-local'}/${topic} -> ${subscription}`,
+  );
+  console.log(`- Retired Pub/Sub subscription: ${previousSubscription}`);
 }
 
 async function main() {
@@ -240,47 +378,19 @@ async function main() {
   }
   if (process.env.NODE_ENV === 'production')
     throw new Error('Development reset is disabled in production');
+  const envPath = resetEnvironmentPath();
   const resume = flags.has('--resume');
-  const inProgressEpoch = process.env.RESET_IN_PROGRESS;
-
-  const urls = databaseTargets.map((target) => {
-    const url =
-      process.env[target.envName] ??
-      (target.name === 'ledger' && process.env.NODE_ENV !== 'production'
-        ? 'postgresql://ledger:ledger_local_only@127.0.0.1:5434/ledger'
-        : required(target.envName));
-    return { ...target, url, database: localDatabaseName(url) };
-  });
-  const redisUrl = localRedisUrl(required('REDIS_URL'));
-  const apiEndpoint = localPubSubEndpoint(process.env.PUBSUB_API_ENDPOINT ?? '127.0.0.1:8086');
-  const projectId = process.env.PUBSUB_PROJECT_ID ?? 'wallet-local';
-  const basePrefix = process.env.QUEUE_PREFIX ?? 'waas';
-  const currentEpoch = process.env.RESET_EPOCH;
-  const topicBase = process.env.PUBSUB_TOPIC_BASE ?? 'on-chain-activity';
-  const subscriptionBase = process.env.PUBSUB_SUBSCRIPTION_BASE ?? 'wallet-activity';
-  const plan = createDevelopmentResetPlan({
-    resume,
-    resetEpoch: currentEpoch,
-    resetInProgress: inProgressEpoch,
-    previousQueuePrefix: process.env.RESET_PREVIOUS_QUEUE_PREFIX,
-    previousSubscription: process.env.RESET_PREVIOUS_SUBSCRIPTION,
-    currentTopic: process.env.PUBSUB_TOPIC,
-    currentSubscription: process.env.PUBSUB_SUBSCRIPTION,
-    basePrefix,
-    topicBase,
-    subscriptionBase,
-  });
-  const { resetEpoch, retiredQueuePrefix, previousSubscription, topic, subscription } = plan;
-
-  console.log('Development reset preview:');
-  console.log(`- Databases: ${urls.map(({ name, database }) => `${name}/${database}`).join(', ')}`);
-  console.log(`- Retired BullMQ prefix: ${retiredQueuePrefix}`);
-  console.log(`- New BullMQ prefix: ${epochQueuePrefix(basePrefix, resetEpoch)}`);
-  console.log(`- New Pub/Sub namespace: ${projectId}/${topic} -> ${subscription}`);
   if (!flags.has('--apply')) {
-    console.log(
-      'No changes made. Stop workers/publisher and remove provider watches before applying.',
-    );
+    const lock = await acquireDevelopmentResetLock(envPath);
+    try {
+      const environment = { ...process.env, ...readResetEnvironment(envPath) };
+      printPreview(environment, persistedPlan(environment, resume));
+      console.log(
+        'No changes made. Stop workers/publisher and remove provider watches before applying.',
+      );
+    } finally {
+      await lock.release();
+    }
     return;
   }
   for (const acknowledgement of [
@@ -291,26 +401,30 @@ async function main() {
     if (!flags.has(acknowledgement))
       throw new Error(`Applying the reset requires ${acknowledgement}`);
 
-  if (!resume) {
-    await writeEnvironment({
-      RESET_IN_PROGRESS: resetEpoch,
-      RESET_EPOCH: resetEpoch,
-      RESET_PREVIOUS_QUEUE_PREFIX: retiredQueuePrefix,
-      RESET_PREVIOUS_SUBSCRIPTION: previousSubscription,
-      PUBSUB_TOPIC: topic,
-      PUBSUB_SUBSCRIPTION: subscription,
-    });
-  }
-
-  await ensurePubSubNamespace(projectId, apiEndpoint, topic, subscription);
-  for (const target of urls) resetDatabase(target.name, target.envName, target.config, target.url);
-  await resetQueues(redisUrl, retiredQueuePrefix);
-  await retirePubSubSubscription(projectId, apiEndpoint, previousSubscription, subscription);
-  await writeEnvironment({
-    RESET_IN_PROGRESS: '',
-    RESET_PREVIOUS_QUEUE_PREFIX: '',
-    RESET_PREVIOUS_SUBSCRIPTION: '',
+  const plan = await runDevelopmentReset({
+    envPath,
+    resume,
+    prepare: printPreview,
+    performReset: async (environment, currentPlan) => {
+      const { urls, redisUrl, apiEndpoint, projectId } = resetConfiguration(environment);
+      await ensurePubSubNamespace(
+        projectId,
+        apiEndpoint,
+        currentPlan.topic,
+        currentPlan.subscription,
+      );
+      for (const target of urls)
+        resetDatabase(target.name, target.envName, target.config, target.url, environment);
+      await resetQueues(redisUrl, currentPlan.retiredQueuePrefix);
+      await retirePubSubSubscription(
+        projectId,
+        apiEndpoint,
+        currentPlan.previousSubscription,
+        currentPlan.subscription,
+      );
+    },
   });
+  const { resetEpoch, topic } = plan;
   console.log(`Reset complete. RESET_EPOCH=${resetEpoch}`);
   console.log(`Configure the stopped provider publisher for ${topic} at epoch ${resetEpoch}.`);
   console.log(
