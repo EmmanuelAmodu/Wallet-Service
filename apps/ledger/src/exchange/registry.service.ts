@@ -17,12 +17,37 @@ export class ExchangeRegistryService {
   async handle(event: ExchangeEvent) {
     if (
       event.type !== 'customer-wallet.registry.requested.v1' &&
-      event.type !== 'custody-wallet.registry.requested.v1'
+      event.type !== 'custody-wallet.registry.requested.v1' &&
+      event.type !== 'customer.registry.requested.v1'
     )
       throw new ActionRejectedError('Unsupported registry event');
     return this.db.$transaction(async (tx) => {
       await lock(tx, `exchange-domain:${event.domainId}`);
       await consumeExchangeEvent(tx, event, async () => {
+        if (event.type === 'customer.registry.requested.v1') {
+          const existing = await tx.exchangeCustomer.findUnique({
+            where: { customer_id: event.customerId },
+          });
+          if (existing && existing.domain_id !== event.domainId)
+            throw new ActionRejectedError('Customer belongs to a different custody domain');
+          await tx.exchangeCustomer.upsert({
+            where: { customer_id: event.customerId },
+            create: { customer_id: event.customerId, domain_id: event.domainId, state: 'active' },
+            update: {},
+          });
+          await enqueue(
+            tx,
+            QUEUES.wallet,
+            {
+              ...resultIdentity(event),
+              type: 'customer.registry.acknowledged.v1',
+              customerId: event.customerId,
+              data: { externalId: event.data.externalId, status: 'ready' },
+            },
+            `customer-registry-ledger:${event.customerId}:${event.revision}`,
+          );
+          return;
+        }
         const data = event.data;
         const customer = event.type === 'customer-wallet.registry.requested.v1';
         const role: ExchangeWalletRole = customer ? 'customer' : event.data.role;
@@ -64,8 +89,8 @@ export class ExchangeRegistryService {
           const hot = await tx.exchangeWallet.findUnique({
             where: { wallet_id: event.data.hotWalletId },
           });
+          if (!hot) throw new Error('Customer registry hot wallet has not arrived');
           if (
-            !hot ||
             hot.role !== 'hot' ||
             hot.domain_id !== event.domainId ||
             hot.chain !== data.chain ||
@@ -93,22 +118,21 @@ export class ExchangeRegistryService {
           },
           update: { registry_revision: data.registryRevision },
         });
-        if (customer)
-          await enqueue(
-            tx,
-            QUEUES.wallet,
-            {
-              ...resultIdentity(event),
-              type: 'customer-wallet.registry.acknowledged.v1',
-              data: {
-                walletId: data.walletId,
-                consumer: 'ledger',
-                registryRevision: data.registryRevision,
-                status: 'ready',
-              },
+        await enqueue(
+          tx,
+          QUEUES.wallet,
+          {
+            ...resultIdentity(event),
+            type: 'customer-wallet.registry.acknowledged.v1',
+            data: {
+              walletId: data.walletId,
+              consumer: 'ledger',
+              registryRevision: data.registryRevision,
+              status: 'ready',
             },
-            `registry-ledger-${data.walletId}-${data.registryRevision}`,
-          );
+          },
+          `registry-ledger-${data.walletId}-${data.registryRevision}`,
+        );
       });
     });
   }

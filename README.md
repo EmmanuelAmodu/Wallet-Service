@@ -19,6 +19,8 @@ flowchart LR
   Wallet -->|Nonce / gas / UTXO / blockhash reads| Nodes
   ProviderListener[Provider webhook listener] -->|on-chain-activity| PubSub[Google Cloud Pub/Sub]
   PubSub --> Activity[Activity listener]
+  Activity --> ActivityDB[(Activity PostgreSQL / Prisma)]
+  ActivityDB -->|Transactional outbox| Redis
   Activity -->|finality checks| Nodes
   Activity -->|Provisional / final / reversal events| Redis
   Redis --> Ledger[Ledger service]
@@ -29,13 +31,13 @@ flowchart LR
 
 | Service | Responsibilities | Dependencies |
 | --- | --- | --- |
-| `apps/wallet` | Tenant API, wallet records, idempotency, transaction preparation, processing signer results, queuing broadcast/refresh actions | Prisma/PostgreSQL, Redis, read RPCs |
+| `apps/wallet` | Exchange customer API and deposit history, legacy tenant API, wallet records, idempotency, transaction preparation, processing signer results, queuing broadcast/refresh actions | Its own Prisma/PostgreSQL, Redis, Ledger HTTP, read RPCs |
 | `apps/signer` | Consume derivation/signing commands; derive ephemeral keys; publish results | Redis, Wallet Core, seed file; **no database or RPC** |
 | `apps/broadcast` | Reconcile hashes, submit stored signed bytes, exponential retries, Solana simulation/expiry checks, confirmation monitoring | Prisma/PostgreSQL, Redis, RPCs; **no seed or signing responsibilities** |
-| `apps/activity-listener` | Consume provider activities from Pub/Sub, normalize supported wallet identifiers, verify network/transaction state, poll finality, and publish ledger updates | Pub/Sub, Redis, configured chain RPCs; **no database or private keys** |
+| `apps/activity-listener` | Persist exchange registry/watch coverage, consume discovery signals, verify canonical transfers/finality, recover gaps, and publish deposit/incident events | Its own Prisma/PostgreSQL, Pub/Sub, Redis, provider gateway, configured chain RPCs; **no private keys** |
 | `apps/ledger` | Own the wallet registry, double-entry debit/credit journal, per-entry running balances, and internal balance API | Its own Prisma/PostgreSQL database, Redis; **no signer or provider credentials** |
 
-The wallet service does not submit transactions or call the signer over HTTP. Signer, broadcast, and activity-listener are Nest application contexts with queue/Pub/Sub consumers, not HTTP servers. Ledger has an internal HTTP API on `127.0.0.1:3010` by default; only Wallet-Service calls it, using `LEDGER_API_KEY`. Wallet, broadcast, and ledger each own a separate database, Prisma schema, migration history, and client. No service queries another service's database. Wallet account registration is sent to Ledger through the wallet database's transactional outbox. The signer remains stateless and needs no database. Broadcast status in Wallet is eventually consistent; balances are served by Ledger.
+The wallet service does not submit transactions or call the signer over HTTP. Signer, broadcast, and activity-listener are Nest application contexts with queue/Pub/Sub consumers, not HTTP servers. Ledger has an internal HTTP API on `127.0.0.1:3010` by default; Wallet calls it using `LEDGER_API_KEY`. Wallet, broadcast, ledger, and activity-listener each own a separate database, Prisma schema, migration history, and client. No service queries another service's database. Registry and financial commands use transactional outboxes and consumer-owned inboxes. The signer remains stateless and needs no database. Broadcast status and deposit history in Wallet are eventually consistent; balances are served by Ledger.
 
 **Redis/BullMQ was chosen for action queues with durable jobs, retries, and competing workers.** This does not use Redis Pub/Sub or Nest's ephemeral Redis microservice transport. Kafka is not required for this implementation.
 
@@ -132,7 +134,7 @@ Wallet-Service exposes the tenant API at `127.0.0.1:3000` by default. Swagger is
 - Broadcast: `BROADCAST_DATABASE_URL`, separate local PostgreSQL on port 5433.
 - Ledger: `LEDGER_DATABASE_URL`, separate local PostgreSQL on port 5434.
 - Signer: no database URL or database access.
-- ActivityListener: no database; it consumes Pub/Sub and publishes through Redis queues.
+- ActivityListener: `ACTIVITY_DATABASE_URL`, separate local PostgreSQL on port 5435.
 
 `npm run migrate` migrates Wallet, Broadcast, Ledger, and ActivityListener databases. For independent deployment use `npm run migrate:wallet`, `npm run migrate:broadcast`, `npm run migrate:ledger`, or `npm run migrate:activity`, supplying only that application's URL. Each service should receive only its own database credentials. Separate databases may live on one PostgreSQL server with separate roles and access restrictions, or on separate servers as in Compose.
 
@@ -147,6 +149,8 @@ The local reset preserved the existing seed and `.env` credentials, but recreate
 ## Exchange accounting
 
 Phase 2 provides tenant-free customer liabilities and holds, immutable balanced journals, durable per-consumer registry delivery, and Ledger outbox/reconciliation. See [Phase 2 implementation notes](docs/exchange-wallet-phase2.md) for the internal API, migration setup, and verification. Customer address publication remains blocked until Phase 1 custody bootstrap and Phase 3 provider coverage are complete.
+
+Phase 3 adds `/v1/customers` APIs using `EXCHANGE_API_KEY` and `EXCHANGE_DOMAIN_ID`, durable address-watch/backfill readiness, RPC-verified transfer identities, reorg compensation, and custody-loss freezes. Customer creation registers its identity with Ledger through the queue; balances return HTTP 202 until acknowledgment. Address assignment waits for a registered customer account >=10 and all custody, Ledger, and listener coverage prerequisites. QuickNode is selected for Ethereum/Solana; its gateway implementation and live certification in the external listener repository remain open. Bitcoin regtest has a separate observation gateway. Certificates default to empty, and no customer address is exposed without verified coverage. See [Phase 3 implementation notes](docs/exchange-wallet-phase3.md) for API routes, configuration, the gateway contract, and remaining rollout gates.
 
 ## API changes
 

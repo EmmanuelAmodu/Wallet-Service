@@ -7,6 +7,7 @@ import {
 import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../shared/src/contracts.js';
 import { matches, token } from '../../shared/src/security/tokens.js';
 import { exchangeEventSchema, ExchangeEvent } from './exchange-contracts.js';
+import { exchangeDiscoverySchema } from '../../shared/src/exchange-discovery.js';
 
 export const QUEUES = {
   wallet: 'wallet-actions',
@@ -28,6 +29,15 @@ export const broadcastSnapshotSchema = z
       ctx.addIssue({ code: 'custom', message: 'Solana expiry height required' });
   });
 const legacyMessageSchema = z.discriminatedUnion('type', [
+  z
+    .object({ type: z.literal('exchange.discovery.received'), discovery: exchangeDiscoverySchema })
+    .strict(),
+  z
+    .object({
+      type: z.literal('exchange.discovery.check'),
+      discoveryId: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .strict(),
   z
     .object({ type: z.literal('wallet.derive'), walletId: z.uuid(), request: deriveSchema })
     .strict(),

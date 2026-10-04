@@ -78,6 +78,16 @@ function event<
     .strict();
 }
 
+const customerRegistryRequested = event(
+  'customer.registry.requested.v1',
+  z.object({ externalId: z.string().min(1).max(128) }).strict(),
+  { customerId: z.uuid() },
+);
+const customerRegistryAcknowledged = event(
+  'customer.registry.acknowledged.v1',
+  z.object({ externalId: z.string().min(1).max(128), status: z.literal('ready') }).strict(),
+  { customerId: z.uuid() },
+);
 const registryRequested = event(
   'customer-wallet.registry.requested.v1',
   z
@@ -453,7 +463,54 @@ const incidentOpened = custodyIncident('custody.incident.opened.v1');
 const incidentUpdated = custodyIncident('custody.incident.updated.v1');
 const incidentResolved = custodyIncident('custody.incident.resolved.v1');
 
+const custodyLossDetected = event(
+  'custody.loss.detected.v1',
+  z
+    .object({
+      incidentId: z.uuid(),
+      walletId: z.uuid(),
+      asset: canonicalAssetSchema,
+      amount: positiveAmountSchema,
+      transactionHash: z.string().min(1).max(256),
+      reason: z.string().min(1).max(1000),
+    })
+    .strict(),
+  { customerId: z.uuid() },
+);
+
+const custodyLossRecorded = event(
+  'custody.loss.recorded.v1',
+  z
+    .object({
+      incidentId: z.uuid(),
+      ledgerBatchId: z.uuid(),
+      walletId: z.uuid(),
+      asset: canonicalAssetSchema,
+      amount: positiveAmountSchema,
+      transactionHash: z.string().min(1).max(256),
+    })
+    .strict(),
+  { customerId: z.uuid() },
+);
+
+const custodyLossReverted = event(
+  'custody.loss.reverted.v1',
+  z
+    .object({
+      incidentId: z.uuid(),
+      walletId: z.uuid(),
+      asset: canonicalAssetSchema,
+      amount: positiveAmountSchema,
+      transactionHash: z.string().min(1).max(256),
+      reason: z.string().min(1).max(1000),
+    })
+    .strict(),
+  { customerId: z.uuid() },
+);
+
 export const exchangeEventSchema = z.discriminatedUnion('type', [
+  customerRegistryRequested,
+  customerRegistryAcknowledged,
   registryRequested,
   custodyRegistryRequested,
   registryAcknowledged,
@@ -482,5 +539,8 @@ export const exchangeEventSchema = z.discriminatedUnion('type', [
   incidentOpened,
   incidentUpdated,
   incidentResolved,
+  custodyLossDetected,
+  custodyLossRecorded,
+  custodyLossReverted,
 ]);
 export type ExchangeEvent = z.infer<typeof exchangeEventSchema>;

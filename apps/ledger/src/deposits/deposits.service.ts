@@ -95,7 +95,9 @@ export class DepositsService {
     const customer = await tx.exchangeCustomer.findUnique({
       where: { customer_id: event.customerId },
     });
-    if (!customer || customer.domain_id !== event.domainId)
+    if (!customer)
+      throw new Error('Deposit customer is not registered yet; awaiting registry delivery');
+    if (customer.domain_id !== event.domainId)
       throw new ActionRejectedError('Deposit customer is not registered in this custody domain');
     const existing = await tx.deposit.findUnique({ where: { id: event.data.depositId } });
     const sameTransfer = await tx.deposit.findUnique({
@@ -129,6 +131,7 @@ export class DepositsService {
       const wallet = await tx.exchangeWallet.findUnique({
         where: { wallet_id: event.data.walletId },
       });
+      if (!wallet) throw new Error('Deposit wallet registry has not arrived yet');
       if (
         !wallet ||
         wallet.role !== 'customer' ||

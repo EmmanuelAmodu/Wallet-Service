@@ -91,3 +91,33 @@ test('Pub/Sub ingress queues only provider events from the configured reset epoc
   );
   assert.equal(opened.type, 'activity.received');
 });
+
+test('versioned discovery ingress preserves lookup identities and rejects supplied financial values', async () => {
+  const calls: unknown[] = [];
+  const service = serviceFor(calls);
+  const discovery = {
+    schemaVersion: 1,
+    resetEpoch: 'epoch-current',
+    discoveryId: 'discovery-1',
+    chain: 'ethereum',
+    network: '11155111',
+    transactionHash: '0x' + 'aa'.repeat(32),
+    source: 'live',
+  };
+  for (const [payload, expected] of [
+    [discovery, 'exchange.discovery.received'],
+    [{ ...discovery, amount: '1000' }, 'activity.invalid'],
+  ] as const) {
+    const { message, calls: ack } = createMessage(payload);
+    await (service as unknown as { forward(message: PubSubMessage): Promise<void> }).forward(
+      message,
+    );
+    assert.equal(ack.ack, 1);
+    assert.equal(ack.nack, 0);
+    const [, envelope] = calls.at(-1) as [string, { id: string }];
+    assert.equal(
+      new MessageAuth('a'.repeat(64), 'epoch-current').open(envelope, envelope.id, expected).type,
+      expected,
+    );
+  }
+});

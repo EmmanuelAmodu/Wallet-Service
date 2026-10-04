@@ -147,3 +147,65 @@ model ExchangeOperationProjection {
 
   @@map("exchange_operation_projections")
 }
+
+model ExchangeCustomer {
+  customer_id              String                             @id @db.Uuid
+  external_id              String                             @unique
+  domain_id                String
+  reset_epoch              String
+  state                    String                             @default("active")
+  ledger_status            String                             @default("pending")
+  ledger_registry_revision Int                                @default(0)
+  created_at               DateTime                           @default(now()) @db.Timestamptz
+  updated_at               DateTime                           @default(now()) @updatedAt @db.Timestamptz
+  assignments              ExchangeDepositAddressAssignment[]
+  deposits                 ExchangeDepositProjection[]
+
+  @@map("exchange_customers")
+}
+
+model ExchangeDepositAddressAssignment {
+  assignment_id String           @id @db.Uuid
+  customer_id   String           @db.Uuid
+  customer      ExchangeCustomer @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
+  domain_id     String
+  reset_epoch   String
+  chain         String
+  network       String
+  wallet_id     String?          @unique @db.Uuid
+  created_at    DateTime         @default(now()) @db.Timestamptz
+
+  @@unique([customer_id, chain, network])
+  @@map("exchange_deposit_address_assignments")
+}
+
+// A read projection only. Ledger owns balances, credit, and compensating journals.
+model ExchangeDepositProjection {
+  deposit_id          String           @id @db.Uuid
+  customer_id         String           @db.Uuid
+  customer            ExchangeCustomer @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
+  domain_id           String
+  reset_epoch         String
+  wallet_id           String?          @db.Uuid
+  chain               String
+  network             String
+  asset_id            String
+  amount              String?
+  transaction_hash    String?
+  transfer_identity   Json?
+  identity_digest     String?
+  discovery_revision  Int              @default(0)
+  discovery_state     String           @default("unknown")
+  discovery_digest    String?
+  accounting_revision Int              @default(0)
+  accounting_state    String           @default("pending")
+  accounting_digest   String?
+  ledger_batch_id     String?          @db.Uuid
+  deficit_incident_id String?          @db.Uuid
+  reason              String?
+  created_at          DateTime         @default(now()) @db.Timestamptz
+  updated_at          DateTime         @default(now()) @updatedAt @db.Timestamptz
+
+  @@index([customer_id, deposit_id])
+  @@map("exchange_deposit_projections")
+}

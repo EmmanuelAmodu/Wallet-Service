@@ -7,9 +7,16 @@ import { LedgerAuthGuard } from '../ledger-auth.guard.js';
 import { LedgerExchangeController } from './exchange.controller.js';
 import { LedgerExchangeService } from './exchange.service.js';
 import { ExchangeRegistryService } from './registry.service.js';
+import { IncidentsModule } from '../incidents/incidents.module.js';
 
 @Module({
-  imports: [LedgerPrismaModule, DepositsModule, ReservationsModule, SettlementsModule],
+  imports: [
+    LedgerPrismaModule,
+    DepositsModule,
+    ReservationsModule,
+    SettlementsModule,
+    IncidentsModule,
+  ],
   controllers: [LedgerExchangeController],
   providers: [LedgerAuthGuard, LedgerExchangeService, ExchangeRegistryService],
   exports: [LedgerExchangeService],

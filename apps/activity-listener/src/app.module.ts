@@ -13,6 +13,7 @@ import { ActivityRegistryModule } from './registry/registry.module.js';
 import { ActivityPrismaModule } from './prisma/prisma.module.js';
 import { ActivityPrismaService } from './prisma/prisma.service.js';
 import { OutboxModule } from '../../../packages/queue/src/outbox.module.js';
+import { ActivityExchangeModule } from './exchange/exchange.module.js';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { OutboxModule } from '../../../packages/queue/src/outbox.module.js';
     MessagingModule,
     ChainModule,
     ActivityRegistryModule,
+    ActivityExchangeModule,
     OutboxModule.register(ActivityPrismaModule, ActivityPrismaService),
   ],
   providers: [ActivityPubSubService, ActivityProcessor, ActivityWorkflowService],

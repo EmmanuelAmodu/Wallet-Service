@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
 import { WalletPrismaService } from '../prisma/prisma.service.js';
@@ -11,6 +11,7 @@ import { canonical, MessageAuth, QUEUES } from '../../../../packages/queue/src/m
 import { enqueueFanOut } from '../../../../packages/queue/src/outbox.service.js';
 import { isEvmChain } from '../../../../packages/shared/src/contracts.js';
 import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
+import { ExchangeCustomersService } from '../customers/customers.service.js';
 
 type RegistryRequest = Extract<
   ExchangeEvent,
@@ -32,6 +33,7 @@ export class ExchangeMessagingService {
   constructor(
     @Inject(WalletPrismaService) private readonly db: WalletPrismaService,
     @Inject(MessageAuth) private readonly auth: MessageAuth,
+    @Optional() private readonly customers?: ExchangeCustomersService,
   ) {}
 
   private parse(input: ExchangeEvent) {
@@ -149,7 +151,10 @@ export class ExchangeMessagingService {
         canonical((current.request as unknown as OperationRequest).data) !== canonical(event.data)
       )
         throw new ActionRejectedError('Operation request is immutable');
-      await enqueueFanOut(db, event, queues);
+      const consumers = event.type.endsWith('execute.requested.v1')
+        ? [...new Set([...queues, QUEUES.activity])]
+        : queues;
+      await enqueueFanOut(db, event, consumers);
     };
     if (transaction) await apply(transaction);
     else await this.db.$transaction(apply);
@@ -176,6 +181,11 @@ export class ExchangeMessagingService {
         if (registry.domain_id !== event.domainId || registry.reset_epoch !== event.resetEpoch)
           throw new ActionRejectedError('Registry acknowledgment domain/epoch mismatch');
         if (data.registryRevision === registry.registry_revision) {
+          if (
+            (registry.customer_id && event.customerId !== registry.customer_id) ||
+            (!registry.customer_id && event.customerId)
+          )
+            throw new ActionRejectedError('Registry acknowledgment customer mismatch');
           const previousRevision =
             data.consumer === 'ledger'
               ? registry.ledger_ack_revision
@@ -303,6 +313,9 @@ export class ExchangeMessagingService {
             });
         }
       }
+      await this.customers?.project(event, db);
+      if (event.type === 'execution.attempt.updated.v1')
+        await enqueueFanOut(db, event, [QUEUES.activity]);
       await db.exchangeEventReceipt.create({
         data: {
           event_id: event.eventId,

@@ -1,6 +1,6 @@
 generator client {
   provider = "prisma-client-js"
-  output = "../../../node_modules/.prisma/activity-client"
+  output   = "../../../node_modules/.prisma/activity-client"
 }
 
 datasource db {
@@ -8,42 +8,162 @@ datasource db {
 }
 
 model ExchangeWalletRegistration {
-  wallet_id String @id @db.Uuid
-  domain_id String
-  reset_epoch String
-  chain String
-  network String
-  address String
-  role String
-  account Int
-  customer_id String? @db.Uuid
-  hot_wallet_id String? @db.Uuid
-  registry_revision Int
-  request Json
-  status String @default("awaiting_provider_coverage")
-  start_cursor String?
-  created_at DateTime @default(now()) @db.Timestamptz
-  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+  wallet_id                String    @id @db.Uuid
+  domain_id                String
+  reset_epoch              String
+  chain                    String
+  network                  String
+  address                  String
+  role                     String
+  account                  Int
+  customer_id              String?   @db.Uuid
+  hot_wallet_id            String?   @db.Uuid
+  registry_revision        Int
+  request                  Json
+  status                   String    @default("awaiting_provider_coverage")
+  start_cursor             String?
+  readiness_revision       Int       @default(0)
+  provider_generation      String    @default(uuid()) @db.Uuid
+  provider_watch_id        String?
+  provider_ack             Json?
+  provider_error           String?
+  backfill_cursor          String?
+  coverage_start_cursor    String?
+  backfill_complete        Boolean   @default(false)
+  provider_acknowledged_at DateTime? @db.Timestamptz
+  last_backfill_at         DateTime? @db.Timestamptz
+  created_at               DateTime  @default(now()) @db.Timestamptz
+  updated_at               DateTime  @default(now()) @updatedAt @db.Timestamptz
 
   @@unique([domain_id, chain, network, address])
   @@map("exchange_wallet_registry")
 }
 
 model Inbox {
-  id String @id
+  id           String   @id
   payload_hash String
   processed_at DateTime @default(now()) @db.Timestamptz
+
   @@map("inbox")
 }
 
+model ExchangeProviderWatchLease {
+  generation      String   @id @db.Uuid
+  wallet_id       String   @db.Uuid
+  domain_id       String
+  reset_epoch     String
+  provider        String
+  chain           String
+  network         String
+  install_request Json
+  watch_id        String?
+  acknowledgment  Json?
+  state           String   @default("installing")
+  last_error      String?
+  created_at      DateTime @default(now()) @db.Timestamptz
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@index([reset_epoch, state, updated_at])
+  @@map("exchange_provider_watch_leases")
+}
+
 model Outbox {
-  id String @id @db.Uuid
-  queue String
-  dedupe_key String @unique
-  payload Json
-  available_at DateTime @default(now()) @db.Timestamptz
+  id           String    @id @db.Uuid
+  queue        String
+  dedupe_key   String    @unique
+  payload      Json
+  available_at DateTime  @default(now()) @db.Timestamptz
   published_at DateTime? @db.Timestamptz
-  created_at DateTime @default(now()) @db.Timestamptz
+  created_at   DateTime  @default(now()) @db.Timestamptz
+
   @@index([published_at, available_at])
   @@map("outbox")
+}
+
+// RPC-verified discovery and transfer identities remain durable beyond queue retention.
+model ExchangeDiscovery {
+  id               String   @id
+  reset_epoch      String
+  chain            String
+  network          String
+  transaction_hash String
+  payload_hash     String
+  signal           Json
+  state            String   @default("pending")
+  check_revision   Int      @default(0)
+  lease_until      DateTime? @db.Timestamptz
+  block_hash       String?
+  block_height     String?
+  next_check_at    DateTime @default(now()) @db.Timestamptz
+  last_error       String?
+  created_at       DateTime @default(now()) @db.Timestamptz
+  updated_at       DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@index([reset_epoch, next_check_at])
+  @@map("exchange_discoveries")
+}
+
+model ExchangeTransfer {
+  id               String   @id @db.Uuid
+  domain_id        String
+  reset_epoch      String
+  customer_id      String   @db.Uuid
+  wallet_id        String   @db.Uuid
+  chain            String
+  network          String
+  asset_id         String
+  transaction_hash String
+  transfer_key     String
+  identity         Json
+  from_address     String?
+  to_address       String
+  amount           String
+  state            String
+  revision         Int
+  block_hash       String?
+  block_height     String?
+  created_at       DateTime @default(now()) @db.Timestamptz
+  updated_at       DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, chain, network, asset_id, transaction_hash, transfer_key])
+  @@index([chain, network, transaction_hash])
+  @@map("exchange_transfers")
+}
+
+model ExchangeObservedOperation {
+  operation_id     String  @id @db.Uuid
+  domain_id        String
+  reset_epoch      String
+  attempt_id       String  @db.Uuid
+  request_digest   String
+  kind             String
+  intent           Json
+  revision         Int
+  attempt_revision Int     @default(0)
+  state            String  @default("preparing")
+  transaction_hash String?
+
+  @@unique([domain_id, attempt_id])
+  @@index([domain_id, transaction_hash])
+  @@map("exchange_observed_operations")
+}
+
+model ExchangeCustodyIncident {
+  id               String   @id @db.Uuid
+  incident_key     String   @unique
+  domain_id        String
+  reset_epoch      String
+  customer_id      String?  @db.Uuid
+  wallet_id        String   @db.Uuid
+  chain            String
+  network          String
+  transaction_hash String
+  category         String
+  reason           String
+  evidence         Json
+  state            String   @default("open")
+  revision         Int      @default(1)
+  created_at       DateTime @default(now()) @db.Timestamptz
+
+  @@map("exchange_custody_incidents")
 }

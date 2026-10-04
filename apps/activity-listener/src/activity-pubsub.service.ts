@@ -9,6 +9,7 @@ import {
 } from './config/activity-listener.config.js';
 import { MessageAuth, QUEUES } from '../../../packages/queue/src/messages.js';
 import { processorActivitySchema } from '../../../packages/shared/src/activity-contracts.js';
+import { exchangeDiscoverySchema } from '../../../packages/shared/src/exchange-discovery.js';
 
 @Injectable()
 export class ActivityPubSubService implements OnModuleInit, OnApplicationShutdown {
@@ -61,6 +62,19 @@ export class ActivityPubSubService implements OnModuleInit, OnApplicationShutdow
             ? 'Provider event is missing reset epoch'
             : 'Stale provider event reset epoch';
         await this.quarantine(message.id, reason, rawPayload);
+        message.ack();
+        return;
+      }
+      if (decoded && typeof decoded === 'object' && 'schemaVersion' in decoded) {
+        const discovery = exchangeDiscoverySchema.safeParse(decoded);
+        if (!discovery.success) {
+          await this.quarantine(message.id, 'Invalid versioned exchange discovery', rawPayload);
+          message.ack();
+          return;
+        }
+        const jobId = `exchange-discovery-${createHash('sha256').update(message.id).digest('hex')}`;
+        const payload = { type: 'exchange.discovery.received' as const, discovery: discovery.data };
+        await this.activities.add(payload.type, this.auth.seal(payload, jobId), { jobId });
         message.ack();
         return;
       }

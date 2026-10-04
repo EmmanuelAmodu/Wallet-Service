@@ -12,6 +12,7 @@ import { AuthModule } from './auth/auth.module.js';
 import { WalletsModule } from './wallets/wallets.module.js';
 import { TransactionsModule } from './transactions/transactions.module.js';
 import { WalletMessagingModule } from './messaging/wallet-messaging.module.js';
+import { CustomersModule } from './customers/customers.module.js';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { WalletMessagingModule } from './messaging/wallet-messaging.module.js';
     WalletsModule,
     TransactionsModule,
     WalletMessagingModule,
+    CustomersModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: SafeErrorsFilter }],
 })

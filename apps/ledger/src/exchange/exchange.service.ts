@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   ExchangeEvent,
   exchangeEventSchema,
@@ -9,6 +9,7 @@ import { DepositsService } from '../deposits/deposits.service.js';
 import { ReservationsService } from '../reservations/reservations.service.js';
 import { SettlementsService } from '../settlements/settlements.service.js';
 import { ExchangeRegistryService } from './registry.service.js';
+import { IncidentsService } from '../incidents/incidents.service.js';
 
 @Injectable()
 export class LedgerExchangeService {
@@ -18,6 +19,7 @@ export class LedgerExchangeService {
     private readonly reservations: ReservationsService,
     private readonly settlements: SettlementsService,
     @Inject(queueConfig.KEY) private readonly config: Pick<QueueConfig, 'resetEpoch'>,
+    @Optional() private readonly incidents?: IncidentsService,
   ) {}
 
   async handle(input: ExchangeEvent) {
@@ -25,8 +27,17 @@ export class LedgerExchangeService {
     if (event.resetEpoch !== this.config.resetEpoch)
       throw new ActionRejectedError('Stale reset epoch');
     if (
+      event.type === 'custody.loss.detected.v1' ||
+      event.type === 'custody.loss.reverted.v1' ||
+      event.type === 'custody.incident.opened.v1'
+    ) {
+      if (!this.incidents) throw new Error('Custody incident accounting unavailable');
+      return this.incidents.handle(event);
+    }
+    if (
       event.type === 'customer-wallet.registry.requested.v1' ||
-      event.type === 'custody-wallet.registry.requested.v1'
+      event.type === 'custody-wallet.registry.requested.v1' ||
+      event.type === 'customer.registry.requested.v1'
     )
       return this.registry.handle(event);
     if (
