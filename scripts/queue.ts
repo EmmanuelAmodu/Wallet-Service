@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { connection } from '../packages/queue/src/messaging.module.js';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
+import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
 import { required } from '../packages/shared/src/config.js';
 
 export async function reconcileActivity(queue: Queue, identifier: string, auth: MessageAuth) {
@@ -44,6 +45,8 @@ export async function reconcileActivity(queue: Queue, identifier: string, auth: 
 }
 
 async function main() {
+  if (process.env.RESET_IN_PROGRESS)
+    throw new Error('Development reset is in progress; queue maintenance is blocked');
   const [action, name, id] = process.argv.slice(2);
   if (
     !Object.values(QUEUES).some((q) => q === name) ||
@@ -53,9 +56,10 @@ async function main() {
     throw new Error(
       'Usage: npm run queue -- failed|retry QUEUE [job-id] | reconcile activity-actions ACTIVITY_IDENTIFIER',
     );
+  const resetEpoch = required('RESET_EPOCH');
   const queue = new Queue(name, {
     connection: { ...connection(required('REDIS_URL')), maxRetriesPerRequest: 1 },
-    prefix: process.env.QUEUE_PREFIX ?? 'waas',
+    prefix: epochQueuePrefix(process.env.QUEUE_PREFIX ?? 'waas', resetEpoch),
   });
   try {
     if (action === 'failed') {
@@ -80,7 +84,9 @@ async function main() {
       console.log('Queued retry of existing action; signed bytes are unchanged');
     } else {
       if (!id) throw new Error('An activity identifier is required');
-      console.log(await reconcileActivity(queue, id, new MessageAuth(required('QUEUE_AUTH_KEY'))));
+      console.log(
+        await reconcileActivity(queue, id, new MessageAuth(required('QUEUE_AUTH_KEY'), resetEpoch)),
+      );
     }
   } finally {
     await queue.close();

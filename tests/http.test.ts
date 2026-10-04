@@ -14,6 +14,7 @@ import { createDatabase } from '../apps/wallet/src/prisma/prisma.service.js';
 import { migrate } from '../scripts/migrate.js';
 import { connection } from '../packages/queue/src/messaging.module.js';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
+import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
 
 async function freePort() {
   const server = createServer();
@@ -77,6 +78,7 @@ test(
       apiKey = 'a'.repeat(64),
       queueKey = 'b'.repeat(64),
       prefix = `test-${randomUUID()}`,
+      resetEpoch = randomUUID(),
       walletPort = await freePort();
     const raws: string[] = [];
     let accepted = false,
@@ -136,6 +138,7 @@ test(
 
       REDIS_URL: process.env.TEST_REDIS_URL,
       QUEUE_PREFIX: prefix,
+      RESET_EPOCH: resetEpoch,
       QUEUE_AUTH_KEY: queueKey,
       SIGNER_SEED_FILE: seed,
       SIGNER_SEED_ID: 'http-events',
@@ -177,7 +180,11 @@ test(
     }
 
     const queues = Object.values(QUEUES).map(
-      (name) => new Queue(name, { connection: connection(process.env.TEST_REDIS_URL!), prefix }),
+      (name) =>
+        new Queue(name, {
+          connection: connection(process.env.TEST_REDIS_URL!),
+          prefix: epochQueuePrefix(prefix, resetEpoch),
+        }),
     );
     const base = `http://127.0.0.1:${walletPort}`;
     const request = (path: string, body?: unknown, extra: Record<string, string> = {}) =>
@@ -298,7 +305,7 @@ test(
       const old = await queue.getJob(resultId);
       assert(old);
       await old.remove();
-      const auth = new MessageAuth(queueKey),
+      const auth = new MessageAuth(queueKey, resetEpoch),
         payload = {
           type: 'transaction.signed' as const,
           transactionId: tx.id,

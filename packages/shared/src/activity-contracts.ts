@@ -28,6 +28,7 @@ export const walletBalanceChangesSchema = z
 
 export const processorActivitySchema = z
   .object({
+    resetEpoch: z.string().min(1).max(128).optional(),
     identifier: z.string().min(1).max(512),
     completedAtTimestamp: z.number().finite().nonnegative(),
     metadata: z.record(z.string(), z.unknown()),

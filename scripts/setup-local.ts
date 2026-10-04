@@ -1,6 +1,6 @@
 import { initWasm } from '@trustwallet/wallet-core';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 
 async function setup() {
   for (const path of ['.env', 'secrets/local.mnemonic']) {
@@ -19,12 +19,15 @@ async function setup() {
       flag: 'wx',
     });
     const template = await readFile('.env.example', 'utf8');
+    const resetEpoch = randomUUID();
     await writeFile(
       '.env',
       template
         .replace('REPLACE_WITH_RANDOM_32_BYTE_TOKEN', randomBytes(32).toString('hex'))
         .replace('REPLACE_WITH_A_DIFFERENT_RANDOM_TOKEN', randomBytes(32).toString('hex'))
-        .replace('REPLACE_WITH_A_THIRD_RANDOM_TOKEN', randomBytes(32).toString('hex')),
+        .replace('REPLACE_WITH_A_THIRD_RANDOM_TOKEN', randomBytes(32).toString('hex'))
+        .replace('REPLACE_WITH_RESET_EPOCH', resetEpoch)
+        .replaceAll('REPLACE_WITH_EPOCH_SUFFIX', resetEpoch.slice(0, 8)),
       { mode: 0o600, flag: 'wx' },
     );
     console.log(

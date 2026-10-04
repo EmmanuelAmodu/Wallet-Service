@@ -254,6 +254,6 @@ export const signedSchema = z
   .strict();
 export function derivationPath(chain: Chain, account: number): string {
   accountSchema.parse(account);
-  if (chain === 'solana') return `m/44'/501'/${account}'/0'`;
+  if (chain === 'solana') return `m/44'/501'/${account}'`;
   return chain === 'bitcoin' ? `m/84'/0'/${account}'/0/0` : `m/44'/60'/${account}'/0/0`;
 }

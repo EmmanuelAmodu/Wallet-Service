@@ -34,7 +34,7 @@ function wallet(chain: 'ethereum' | 'bitcoin' | 'solana') {
 test('canonical BIP44/BIP84 and fully hardened Solana derivation', () => {
   assert.equal(wallet('ethereum').address, '0x9858EfFD232B4033E47d90003D41EC34EcaEda94');
   assert.equal(wallet('bitcoin').address, 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu');
-  assert.equal(derivationPath('solana', 0), "m/44'/501'/0'/0'");
+  assert.equal(derivationPath('solana', 0), "m/44'/501'/0'");
   for (const chain of ['ethereum', 'bitcoin', 'solana'] as const)
     assert.notEqual(
       wallet(chain).address,
@@ -42,6 +42,22 @@ test('canonical BIP44/BIP84 and fully hardened Solana derivation', () => {
     );
   assert.throws(() => derivationPath('ethereum', -1));
   assert.throws(() => derivationPath('ethereum', 2147483648));
+});
+
+test('exchange hot, management, and customer accounts use the hardened account component', () => {
+  const paths = {
+    ethereum: (account: number) => `m/44'/60'/${account}'/0/0`,
+    bitcoin: (account: number) => `m/84'/0'/${account}'/0/0`,
+    solana: (account: number) => `m/44'/501'/${account}'`,
+  };
+  for (const chain of ['ethereum', 'bitcoin', 'solana'] as const) {
+    for (const account of [0, 1, 9, 10]) {
+      const derived = core.derive({ chain, account, seedId: 'test' });
+      assert.equal(derived.path, paths[chain](account));
+      assert.equal(derivationPath(chain, account), paths[chain](account));
+      assert.ok(derived.address);
+    }
+  }
 });
 
 test('every enabled Wallet Core coin derives a wallet address', () => {

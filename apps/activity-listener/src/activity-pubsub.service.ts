@@ -51,6 +51,19 @@ export class ActivityPubSubService implements OnModuleInit, OnApplicationShutdow
         message.ack();
         return;
       }
+      const sourceEpoch =
+        decoded && typeof decoded === 'object' && 'resetEpoch' in decoded
+          ? decoded.resetEpoch
+          : undefined;
+      if (sourceEpoch !== this.auth.resetEpoch) {
+        const reason =
+          sourceEpoch === undefined
+            ? 'Provider event is missing reset epoch'
+            : 'Stale provider event reset epoch';
+        await this.quarantine(message.id, reason, rawPayload);
+        message.ack();
+        return;
+      }
       const parsed = processorActivitySchema.safeParse(decoded);
       if (!parsed.success) {
         const reason = parsed.error.issues

@@ -65,6 +65,21 @@ test('chain network settings require per-chain RPC and EVM chain identifiers', (
   assert.throws(() => chainNetworkOverridesFromEnv(), /valid JSON/);
 });
 
+test('development chain defaults identify Sepolia and Solana Devnet without enabling Bitcoin regtest', (t) => {
+  const original = process.env.CHAIN_NETWORKS;
+  t.after(() => {
+    if (original === undefined) delete process.env.CHAIN_NETWORKS;
+    else process.env.CHAIN_NETWORKS = original;
+  });
+  delete process.env.CHAIN_NETWORKS;
+
+  const networks = chainNetworksFromEnv('11155111', 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG');
+  assert.equal(networks.ethereum.network, '11155111');
+  assert.equal(networks.solana.network, 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG');
+  assert.equal(networks.bitcoin.network, 'mainnet');
+  assert.equal(networks.bitcoin.rpcUrl, undefined);
+});
+
 test('application configuration is scoped and rejects unsafe settings at startup', async (t) => {
   const { walletConfig } = await import('../apps/wallet/src/config/wallet.config.js');
   const { broadcastConfig } = await import('../apps/broadcast/src/config/broadcast.config.js');

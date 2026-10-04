@@ -4,7 +4,13 @@ import { randomUUID } from 'node:crypto';
 import { Queue, Worker } from 'bullmq';
 import { connection } from '../packages/queue/src/messaging.module.js';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
+import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
 import { reconcileActivity } from '../scripts/queue.js';
+
+test('queue prefix includes the reset epoch', () => {
+  assert.equal(epochQueuePrefix('waas', 'epoch-123'), 'waas:epoch-123');
+  assert.throws(() => epochQueuePrefix('waas', 'epoch:123'), /reset epoch/);
+});
 
 test('queue envelopes reject tampering, wrong job IDs, action substitution and wrong keys', () => {
   const auth = new MessageAuth('a'.repeat(64));
@@ -21,6 +27,17 @@ test('queue envelopes reject tampering, wrong job IDs, action substitution and w
   assert.throws(() => auth.open(envelope, randomUUID(), message.type));
   assert.throws(() => auth.open(envelope, envelope.id, 'transaction.sign'));
   assert.throws(() => new MessageAuth('b'.repeat(64)).open(envelope, envelope.id, message.type));
+});
+
+test('queue envelopes reject messages from a retired reset epoch', () => {
+  const message = { type: 'transaction.prepare' as const, transactionId: randomUUID() };
+  const retired = new MessageAuth('a'.repeat(64), 'epoch-old');
+  const current = new MessageAuth('a'.repeat(64), 'epoch-new');
+  const envelope = retired.seal(message);
+
+  assert.equal(retired.open(envelope, envelope.id, message.type).type, message.type);
+  assert.throws(() => current.open({ ...envelope, version: 1 }, envelope.id, message.type));
+  assert.throws(() => current.open(envelope, envelope.id, message.type), /Stale reset epoch/);
 });
 
 test('activity reconciliation retries the latest retained check and releases delayed checks', async () => {

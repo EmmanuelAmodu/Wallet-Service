@@ -118,6 +118,16 @@ export const messageSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('ledger.activity.update'), activity: ledgerActivitySchema }).strict(),
 ]);
 export type Message = z.infer<typeof messageSchema>;
+const queueEnvelopeSchema = z
+  .object({
+    version: z.literal(2),
+    id: z.string(),
+    resetEpoch: z.string().min(1).max(128),
+    payload: messageSchema,
+    mac: z.string().regex(/^[a-f0-9]{64}$/),
+  })
+  .strict();
+
 export function canonical(value: unknown): string {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
   if (value !== null && typeof value === 'object')
@@ -132,25 +142,22 @@ export function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 export class MessageAuth {
-  constructor(private readonly key: string) {
+  constructor(
+    private readonly key: string,
+    readonly resetEpoch = 'test-epoch',
+  ) {
     token(key);
+    if (!resetEpoch || resetEpoch.length > 128) throw new Error('Invalid reset epoch');
   }
 
   seal(payload: Message, id: string = randomUUID()) {
-    const body = { version: 1 as const, id, payload };
+    const body = { version: 2 as const, id, resetEpoch: this.resetEpoch, payload };
     return { ...body, mac: createHmac('sha256', this.key).update(canonical(body)).digest('hex') };
   }
 
   open(data: unknown, jobId: string, name: string): Message {
-    const envelope = z
-      .object({
-        version: z.literal(1),
-        id: z.string(),
-        payload: messageSchema,
-        mac: z.string().regex(/^[a-f0-9]{64}$/),
-      })
-      .strict()
-      .parse(data);
+    const envelope = queueEnvelopeSchema.parse(data);
+    if (envelope.resetEpoch !== this.resetEpoch) throw new Error('Stale reset epoch');
     const expected = this.seal(envelope.payload, envelope.id);
     if (
       envelope.id !== jobId ||

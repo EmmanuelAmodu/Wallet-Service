@@ -16,6 +16,7 @@
     "migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "setup:local": "tsx scripts/setup-local.ts",
     "setup:pubsub": "tsx --env-file-if-exists=.env scripts/setup-pubsub.ts",
+    "reset:development": "tsx --env-file-if-exists=.env scripts/reset-development.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write --print-width 100 eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",

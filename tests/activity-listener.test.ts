@@ -252,7 +252,7 @@ test('failed EVM transactions post the network fee but not reverted transfers', 
   }
 });
 
-test('failed Solana transactions use Helius fee data and omit reverted transfers', async () => {
+test('failed Solana transactions use provider-reported fees and omit reverted transfers', async () => {
   const state = workflow([{ state: 'failed', blockHash: 'block-hash', blockHeight: '20' }]);
   const source = activity();
   source.identifier = 'transaction:solana:signature';

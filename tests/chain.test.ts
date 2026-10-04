@@ -96,6 +96,37 @@ test('EVM and Bitcoin-family preparation use the configured chain RPC', async (t
   assert.deepEqual(fallbackCalls, []);
 });
 
+test('RPC network identity is checked for EVM, Bitcoin, and Solana', async (t) => {
+  const calls: string[] = [];
+  let mismatch = false;
+  const url = await rpcServer(t, calls, (method) => {
+    switch (method) {
+      case 'eth_chainId':
+        return mismatch ? '0x1' : '0xaa36a7';
+      case 'getblockchaininfo':
+        return { chain: mismatch ? 'regtest' : 'main' };
+      case 'getGenesisHash':
+        return mismatch ? 'wrong-genesis' : 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
+      default:
+        throw new Error(`Unexpected RPC method: ${method}`);
+    }
+  });
+  const rpc = new ChainRpcService({
+    ethereumUrl: url,
+    ethereumChainId: '11155111',
+    bitcoinUrl: url,
+    solanaUrl: url,
+    solanaGenesisHash: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG',
+  });
+
+  for (const chain of ['ethereum', 'bitcoin', 'solana'] as const) await rpc.verifyNetwork(chain);
+  assert.deepEqual(calls, ['eth_chainId', 'getblockchaininfo', 'getGenesisHash']);
+
+  mismatch = true;
+  for (const chain of ['ethereum', 'bitcoin', 'solana'] as const)
+    await assert.rejects(rpc.verifyNetwork(chain), /network mismatch/);
+});
+
 test('Bitcoin mempool transactions without confirmations are observed', async (t) => {
   const calls: string[] = [];
   const url = await rpcServer(t, calls, (method) => {

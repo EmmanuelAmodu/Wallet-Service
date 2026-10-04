@@ -42,7 +42,7 @@ export function jobOptions(retryDelayMs: number): JobsOptions {
     {
       provide: MessageAuth,
       inject: [queueConfig.KEY],
-      useFactory: (config: QueueConfig) => new MessageAuth(config.authKey),
+      useFactory: (config: QueueConfig) => new MessageAuth(config.authKey, config.resetEpoch),
     },
   ],
   exports: [BullModule, MessageAuth],
