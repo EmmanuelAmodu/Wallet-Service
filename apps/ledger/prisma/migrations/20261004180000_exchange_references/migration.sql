@@ -1,0 +1,14 @@
+ALTER TABLE exchange_wallets ADD CONSTRAINT exchange_wallets_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES exchange_customers(customer_id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE exchange_wallets ADD CONSTRAINT exchange_wallets_hot_wallet_id_fkey FOREIGN KEY (hot_wallet_id) REFERENCES exchange_wallets(wallet_id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE deposits ADD CONSTRAINT deposits_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES exchange_customers(customer_id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE deposits ADD CONSTRAINT deposits_wallet_id_fkey FOREIGN KEY (wallet_id) REFERENCES exchange_wallets(wallet_id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE deposits ADD CONSTRAINT deposits_credit_batch_id_fkey FOREIGN KEY (credit_batch_id) REFERENCES journal_batches(id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE deposits ADD CONSTRAINT deposits_reversal_batch_id_fkey FOREIGN KEY (reversal_batch_id) REFERENCES journal_batches(id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE withdrawal_reservations ADD CONSTRAINT withdrawal_reservations_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES exchange_customers(customer_id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE withdrawal_reservations ADD CONSTRAINT withdrawal_reservations_reserve_batch_id_fkey FOREIGN KEY (reserve_batch_id) REFERENCES journal_batches(id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE withdrawal_reservations ADD CONSTRAINT withdrawal_reservations_release_batch_id_fkey FOREIGN KEY (release_batch_id) REFERENCES journal_batches(id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE exchange_operations ADD CONSTRAINT exchange_operations_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES exchange_customers(customer_id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE exchange_operations ADD CONSTRAINT exchange_operations_reservation_id_fkey FOREIGN KEY (reservation_id) REFERENCES withdrawal_reservations(id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE exchange_operations ADD CONSTRAINT exchange_operations_settlement_batch_id_fkey FOREIGN KEY (settlement_batch_id) REFERENCES journal_batches(id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE ledger_incidents ADD CONSTRAINT ledger_incidents_customer_id_fkey FOREIGN KEY (customer_id) REFERENCES exchange_customers(customer_id) ON DELETE NO ACTION ON UPDATE NO ACTION;
+ALTER TABLE ledger_incidents ADD CONSTRAINT ledger_incidents_deposit_id_fkey FOREIGN KEY (deposit_id) REFERENCES deposits(id) ON DELETE NO ACTION ON UPDATE NO ACTION;

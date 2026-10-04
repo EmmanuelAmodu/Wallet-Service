@@ -5,21 +5,23 @@ import { required } from '../packages/shared/src/config.js';
 
 export async function migrate(
   url: string,
-  application: 'wallet' | 'broadcast' | 'ledger' = 'wallet',
+  application: 'wallet' | 'broadcast' | 'ledger' | 'activity' = 'wallet',
 ) {
   const config =
     application === 'wallet'
       ? 'prisma.config.ts'
       : application === 'broadcast'
         ? 'prisma.broadcast.config.ts'
-        : 'prisma.ledger.config.ts';
+        : application === 'ledger'
+          ? 'prisma.ledger.config.ts'
+          : 'prisma.activity.config.ts';
   run(['migrate', 'deploy', '--config', config], url, application);
 }
 
 function run(
   args: string[],
   url: string,
-  application: 'wallet' | 'broadcast' | 'ledger' = 'wallet',
+  application: 'wallet' | 'broadcast' | 'ledger' | 'activity' = 'wallet',
 ) {
   const result = spawnSync(
     process.execPath,
@@ -31,6 +33,7 @@ function run(
         ...(application === 'wallet' ? { WALLET_DATABASE_URL: url } : {}),
         ...(application === 'broadcast' ? { BROADCAST_DATABASE_URL: url } : {}),
         ...(application === 'ledger' ? { LEDGER_DATABASE_URL: url } : {}),
+        ...(application === 'activity' ? { ACTIVITY_DATABASE_URL: url } : {}),
       },
       stdio: 'inherit',
     },
@@ -45,9 +48,10 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
       application &&
       application !== 'wallet' &&
       application !== 'broadcast' &&
-      application !== 'ledger'
+      application !== 'ledger' &&
+      application !== 'activity'
     )
-      throw new Error('Expected wallet, broadcast, or ledger');
+      throw new Error('Expected wallet, broadcast, ledger, or activity');
     if (!application || application === 'wallet') await migrate(required('WALLET_DATABASE_URL'));
     if (!application || application === 'broadcast')
       await migrate(required('BROADCAST_DATABASE_URL'), 'broadcast');
@@ -58,6 +62,14 @@ if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.m
             ? required('LEDGER_DATABASE_URL')
             : 'postgresql://ledger:ledger_local_only@127.0.0.1:5434/ledger'),
         'ledger',
+      );
+    if (!application || application === 'activity')
+      await migrate(
+        process.env.ACTIVITY_DATABASE_URL ??
+          (process.env.NODE_ENV === 'production'
+            ? required('ACTIVITY_DATABASE_URL')
+            : 'postgresql://activity:activity_local_only@127.0.0.1:5435/activity'),
+        'activity',
       );
   };
   runMigrations().catch(() => {

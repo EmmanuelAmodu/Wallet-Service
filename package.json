@@ -21,7 +21,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write --print-width 100 eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
     "format:check": "prettier --check --print-width 100 eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
-    "db:generate": "prisma generate && prisma generate --config prisma.broadcast.config.ts && prisma generate --config prisma.ledger.config.ts",
+    "db:generate": "prisma generate && prisma generate --config prisma.broadcast.config.ts && prisma generate --config prisma.ledger.config.ts && prisma generate --config prisma.activity.config.ts",
     "dev:broadcast": "npm run db:generate && nest start broadcast --watch",
     "start:broadcast": "node dist/apps/broadcast/src/main.js",
     "queue": "tsx --env-file-if-exists=.env scripts/queue.ts",
@@ -33,6 +33,7 @@
     "build:activity-listener": "npm run db:generate && nest build activity-listener",
     "build:ledger": "npm run db:generate && nest build ledger",
     "migrate:ledger": "npm run migrate -- ledger",
+    "migrate:activity": "npm run migrate -- activity",
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "license": "ISC",

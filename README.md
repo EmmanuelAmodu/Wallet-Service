@@ -95,12 +95,12 @@ The Wallet-Service transaction API sends native assets only: Ethereum atomic mul
 ## Local setup
 
 Requires Node.js **22.22.3+ within Node 22, 24.15+ within Node 24, or Node 26+**, PostgreSQL 14+, and Redis 7+. Docker Compose provides PostgreSQL 17 and Redis 7.4 with AOF persistence, synchronous fsync, and `noeviction`.
-The local stack also includes a third PostgreSQL database for Ledger and the Google Cloud Pub/Sub emulator.
+Wallet, Broadcast, Ledger, and ActivityListener each own a PostgreSQL database. The local stack also includes the Google Cloud Pub/Sub emulator.
 
 ```sh
 npm ci
 npm run setup:local
-docker compose up -d postgres broadcast-postgres ledger-postgres redis pubsub
+docker compose up -d postgres broadcast-postgres ledger-postgres activity-postgres redis pubsub
 npm run setup:pubsub
 npm run migrate
 npm run build
@@ -134,15 +134,19 @@ Wallet-Service exposes the tenant API at `127.0.0.1:3000` by default. Swagger is
 - Signer: no database URL or database access.
 - ActivityListener: no database; it consumes Pub/Sub and publishes through Redis queues.
 
-`npm run migrate` migrates wallet, broadcast, and ledger databases. For independent deployment use `npm run migrate:wallet`, `npm run migrate:broadcast`, or `npm run migrate:ledger`, supplying only that application's URL. Each service should receive only its own database credentials. Separate databases may live on one PostgreSQL server with separate roles and access restrictions, or on separate servers as in Compose.
+`npm run migrate` migrates Wallet, Broadcast, Ledger, and ActivityListener databases. For independent deployment use `npm run migrate:wallet`, `npm run migrate:broadcast`, `npm run migrate:ledger`, or `npm run migrate:activity`, supplying only that application's URL. Each service should receive only its own database credentials. Separate databases may live on one PostgreSQL server with separate roles and access restrictions, or on separate servers as in Compose.
 
 ### Migration Reset
 
-The migration history was intentionally replaced with one fresh baseline per database: Wallet, Broadcast, and Ledger. This reset drops all database contents; it is not an upgrade path and does not preserve wallets, transactions, activities, or ledger balances. Back up any data you need before using these baselines against another environment. Older schemas and migration histories are not supported by this reset.
+The earlier development reset established fresh Wallet, Broadcast, and Ledger baselines. Phase 2 preserves those baselines and adds exchange registry/accounting migrations plus an ActivityListener baseline. Normal migration deployment applies these changes without resetting databases. The coordinated development reset remains a separate destructive setup procedure.
 
-The baseline migration files are generated under each service's `apps/<service>/prisma/migrations` directory. Run `npm run migrate` to apply the three baselines, or use `npm run migrate:wallet`, `npm run migrate:broadcast`, and `npm run migrate:ledger` separately. Each service continues to use its own database credentials. The wrapper no longer recognizes or baselines the former `schema_migrations` history.
+The baseline migration files are generated under each service's `apps/<service>/prisma/migrations` directory. Run `npm run migrate` to apply all four databases’ migrations, or use the application-specific migration commands separately. Each service continues to use its own database credentials. The wrapper no longer recognizes or baselines the former `schema_migrations` history.
 
 The local reset preserved the existing seed and `.env` credentials, but recreated the service databases and their test databases. Configure `REDIS_URL`, `QUEUE_PREFIX`, required `RESET_EPOCH`, `QUEUE_AUTH_KEY`, a distinct production `LEDGER_API_KEY`, Pub/Sub project/topic/subscription settings, and provider RPC/network settings for any new environment. All workers and the external publisher must use the same epoch, and provider payloads must carry it as top-level `resetEpoch`. Do not mix old and new workers or replay old queue jobs against the fresh schemas.
+
+## Exchange accounting
+
+Phase 2 provides tenant-free customer liabilities and holds, immutable balanced journals, durable per-consumer registry delivery, and Ledger outbox/reconciliation. See [Phase 2 implementation notes](docs/exchange-wallet-phase2.md) for the internal API, migration setup, and verification. Customer address publication remains blocked until Phase 1 custody bootstrap and Phase 3 provider coverage are complete.
 
 ## API changes
 
@@ -237,7 +241,7 @@ PostgreSQL outbox/inbox records are retained for recovery and currently have no 
 
 ## Prisma and deployment
 
-`apps/wallet/prisma`, `apps/broadcast/prisma`, and `apps/ledger/prisma` contain independent schemas and migrations. `prisma.config.ts`, `prisma.broadcast.config.ts`, and `prisma.ledger.config.ts` configure them. `npm run db:generate` generates all three clients. Ordinary queries and writes use Prisma Client with the PostgreSQL adapter. Database sessions use UTC so delayed actions retain their intended timestamps. Small parameterized raw queries remain for row/advisory locks, `SKIP LOCKED`, and the existing non-recycling account sequence. Partial unique indexes and CHECK constraints are maintained in migration SQL; do not replace migrations with `db push`.
+`apps/wallet/prisma`, `apps/broadcast/prisma`, `apps/ledger/prisma`, and `apps/activity-listener/prisma` contain independent schemas and migrations. Their configuration files are `prisma.config.ts`, `prisma.broadcast.config.ts`, `prisma.ledger.config.ts`, and `prisma.activity.config.ts`. `npm run db:generate` generates all four clients. Ordinary queries and writes use Prisma Client with the PostgreSQL adapter. Database sessions use UTC so delayed actions retain their intended timestamps. Small parameterized raw queries remain for row/advisory locks, `SKIP LOCKED`, and the existing non-recycling account sequence. Partial unique indexes and CHECK constraints are maintained in migration SQL; do not replace migrations with `db push`.
 
 The Dockerfile provides a non-root runtime for any service. Override its command for signer, broadcast, activity-listener, or ledger. Build the `migrate` target to run `node dist/scripts/migrate.js` with the Prisma CLI available. Mount the seed read-only only in signer containers, owned by UID 1000 with mode 0600. Do not mount it in wallet, broadcast, activity-listener, or ledger containers.
 
@@ -253,12 +257,13 @@ npm test
 TEST_DATABASE_URL=postgresql://user:password@localhost:5432/wallet_test \
 TEST_BROADCAST_DATABASE_URL=postgresql://user:password@localhost:5433/broadcast_test \
 TEST_LEDGER_DATABASE_URL=postgresql://user:password@localhost:5434/ledger_test \
+TEST_ACTIVITY_DATABASE_URL=postgresql://user:password@localhost:5435/activity_test \
 TEST_REDIS_URL=redis://localhost:6379 npm test
 npm run format:check
 npm run lint
 npm audit
 ```
 
-Tests run serially against three dedicated test databases and clean their records. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC. Ledger integration tests cover deduplication, provisional-to-confirmed promotion, attention recovery, and reorg reversal; ActivityListener tests cover finality mapping and RPC retry exhaustion. It exercises offline consumers, async signing, signature verification, retries, lost responses after acceptance, duplicate delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. Pub/Sub ingestion is unit-tested; no test sends live funds. CI supplies all three PostgreSQL databases and Redis.
+Tests run serially against four dedicated test databases. Exchange journal fixtures use unique domains and preserve append-only history; legacy fixtures clean only their own records. The outbox interruption test creates and drops its own temporary database, so the dedicated Ledger test role needs database-creation permission. The integration suite starts real NestJS processes and multiple broadcast replicas, uses real Redis and PostgreSQL, and mocks blockchain RPC. Ledger integration tests cover deduplication, provisional-to-confirmed promotion, attention recovery, and reorg reversal; ActivityListener tests cover finality mapping and RPC retry exhaustion. It exercises offline consumers, async signing, signature verification, retries, lost responses after acceptance, duplicate delivery, tenant isolation, idempotency, outbox recovery, generation checks, reservation retention, and automatic confirmation. Pub/Sub ingestion is unit-tested; no test sends live funds. CI supplies all four PostgreSQL databases and Redis. Phase 2 tests cover simultaneous holds, per-asset balancing, immutable journals, duplicate/reordered events, deficit freezing, custody-only movements, actual fees, settlement reversal, registry acknowledgments, and a lost Redis acknowledgment after a committed reservation.
 
 References: [NestJS queues](https://docs.nestjs.com/techniques/queues), [BullMQ retries](https://docs.bullmq.io/guide/retrying-failing-jobs), [Prisma PostgreSQL integration](https://www.prisma.io/docs/orm/overview/databases/postgresql), [Prisma baselining](https://www.prisma.io/docs/orm/prisma-migrate/workflows/baselining), [Wallet Core usage](https://developer.trustwallet.com/developer/wallet-core/integration-guide/wallet-core-usage).

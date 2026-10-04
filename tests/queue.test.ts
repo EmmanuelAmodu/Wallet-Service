@@ -5,6 +5,7 @@ import { Queue, Worker } from 'bullmq';
 import { connection } from '../packages/queue/src/messaging.module.js';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
+import { exchangeEventSchema } from '../packages/queue/src/exchange-contracts.js';
 import { reconcileActivity } from '../scripts/queue.js';
 
 test('queue prefix includes the reset epoch', () => {
@@ -38,6 +39,100 @@ test('queue envelopes reject messages from a retired reset epoch', () => {
   assert.equal(retired.open(envelope, envelope.id, message.type).type, message.type);
   assert.throws(() => current.open({ ...envelope, version: 1 }, envelope.id, message.type));
   assert.throws(() => current.open(envelope, envelope.id, message.type), /Stale reset epoch/);
+});
+
+test('exchange contracts require versioned identity and validate canonical assets', () => {
+  const common = {
+    eventId: randomUUID(),
+    schemaVersion: 1,
+    resetEpoch: 'epoch-current',
+    occurredAt: '2026-10-04T12:00:00.000Z',
+    domainId: 'development',
+    correlationId: randomUUID(),
+    causationId: null,
+    aggregateId: `withdrawal:${randomUUID()}`,
+    revision: 1,
+    customerId: randomUUID(),
+    operationId: randomUUID(),
+    requestDigest: 'a'.repeat(64),
+    policyVersion: 'exchange-financial-v1',
+  };
+  const valid = {
+    ...common,
+    type: 'withdrawal.reserve.requested.v1',
+    data: {
+      principal: {
+        asset: { chain: 'ethereum', network: '11155111', assetId: 'token:ethereum:native' },
+        amount: '100',
+      },
+      hotWalletId: randomUUID(),
+      amounts: [
+        {
+          asset: { chain: 'ethereum', network: '11155111', assetId: 'token:ethereum:native' },
+          amount: '100',
+        },
+      ],
+      destination: '0x' + '11'.repeat(20),
+      quoteExpiresAt: '2026-10-04T12:05:00.000Z',
+    },
+  };
+
+  assert.equal(exchangeEventSchema.parse(valid).type, 'withdrawal.reserve.requested.v1');
+  assert.equal(exchangeEventSchema.safeParse({ ...valid, schemaVersion: 2 }).success, false);
+  assert.equal(
+    exchangeEventSchema.safeParse({
+      ...valid,
+      data: {
+        ...valid.data,
+        amounts: [
+          {
+            asset: { chain: 'ethereum', network: '11155111', assetId: 'token:polygon:native' },
+            amount: '100',
+          },
+        ],
+      },
+    }).success,
+    false,
+  );
+  assert.equal(
+    exchangeEventSchema.safeParse({ ...valid, requestDigest: 'not-a-digest' }).success,
+    false,
+  );
+});
+
+test('withdrawal execution contract targets an external address and binds an attempt', () => {
+  const event = {
+    eventId: randomUUID(),
+    schemaVersion: 1,
+    resetEpoch: 'epoch-current',
+    occurredAt: '2026-10-04T12:00:00.000Z',
+    domainId: 'development',
+    correlationId: randomUUID(),
+    causationId: randomUUID(),
+    aggregateId: `withdrawal:${randomUUID()}`,
+    revision: 1,
+    operationId: randomUUID(),
+    attemptId: randomUUID(),
+    requestDigest: 'b'.repeat(64),
+    type: 'withdrawal.execute.requested.v1',
+    data: {
+      sourceWalletId: randomUUID(),
+      destination: '0x' + '22'.repeat(20),
+      amount: {
+        asset: { chain: 'ethereum', network: '11155111', assetId: 'token:ethereum:native' },
+        amount: '100',
+      },
+    },
+  };
+
+  assert.equal(exchangeEventSchema.parse(event).type, event.type);
+  assert.equal(
+    exchangeEventSchema.safeParse({
+      ...event,
+      data: { ...event.data, destinationWalletId: randomUUID() },
+    }).success,
+    false,
+  );
 });
 
 test('activity reconciliation retries the latest retained check and releases delayed checks', async () => {

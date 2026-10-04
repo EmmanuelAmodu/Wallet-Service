@@ -6,7 +6,7 @@ import { migrate } from '../scripts/migrate.js';
 const testUrl = process.env.TEST_LEDGER_DATABASE_URL;
 
 test(
-  'fresh Ledger baseline deploys the current entry-owned schema in one migration',
+  'Ledger migrations preserve the baseline and add exchange account identities without mutable balances',
   { skip: !testUrl },
   async () => {
     await migrate(testUrl!, 'ledger');
@@ -17,8 +17,9 @@ test(
         FROM _prisma_migrations
         WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
       `;
-      assert.equal(migrations.length, 1);
-      assert.match(migrations[0].migration_name, /fresh_baseline/);
+      assert.equal(migrations.length, 3);
+      assert(migrations.some((migration) => /fresh_baseline/.test(migration.migration_name)));
+      assert(migrations.some((migration) => /exchange_accounting/.test(migration.migration_name)));
 
       const tables = await db.$queryRaw<
         {
@@ -37,7 +38,13 @@ test(
       assert.equal(tables[0].wallets, 'ledger_wallets');
       assert.equal(tables[0].activities, 'ledger_activities');
       assert.equal(tables[0].entries, 'ledger_entries');
-      assert.equal(tables[0].accounts, null);
+      assert.equal(tables[0].accounts, 'ledger_accounts');
+      const balanceColumns = await db.$queryRaw<{ column_name: string }[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='ledger_accounts'
+        AND column_name IN ('balance', 'next_sequence', 'balance_after')
+      `;
+      assert.equal(balanceColumns.length, 0);
 
       const hashIndex = await db.$queryRaw<{ indexname: string }[]>`
         SELECT indexname

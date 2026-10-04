@@ -44,6 +44,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  activity-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: activity
+      POSTGRES_PASSWORD: activity_local_only
+      POSTGRES_DB: activity
+    ports:
+      - '127.0.0.1:5435:5432'
+    volumes:
+      - activity-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U activity -d activity']
+      interval: 5s
+      timeout: 3s
+      retries: 10
   redis:
     image: redis:7.4-alpine
     command:
@@ -83,4 +98,5 @@ volumes:
   postgres-data:
   broadcast-postgres-data:
   ledger-postgres-data:
+  activity-postgres-data:
   redis-data:

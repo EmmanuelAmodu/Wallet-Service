@@ -1,0 +1,49 @@
+generator client {
+  provider = "prisma-client-js"
+  output = "../../../node_modules/.prisma/activity-client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model ExchangeWalletRegistration {
+  wallet_id String @id @db.Uuid
+  domain_id String
+  reset_epoch String
+  chain String
+  network String
+  address String
+  role String
+  account Int
+  customer_id String? @db.Uuid
+  hot_wallet_id String? @db.Uuid
+  registry_revision Int
+  request Json
+  status String @default("awaiting_provider_coverage")
+  start_cursor String?
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, chain, network, address])
+  @@map("exchange_wallet_registry")
+}
+
+model Inbox {
+  id String @id
+  payload_hash String
+  processed_at DateTime @default(now()) @db.Timestamptz
+  @@map("inbox")
+}
+
+model Outbox {
+  id String @id @db.Uuid
+  queue String
+  dedupe_key String @unique
+  payload Json
+  available_at DateTime @default(now()) @db.Timestamptz
+  published_at DateTime? @db.Timestamptz
+  created_at DateTime @default(now()) @db.Timestamptz
+  @@index([published_at, available_at])
+  @@map("outbox")
+}

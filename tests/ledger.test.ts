@@ -411,7 +411,7 @@ test(
       entries,
     );
     const journal = await db!.ledgerEntry.findMany({
-      where: { asset: 'token:ethereum:native' },
+      where: { asset: 'token:ethereum:native', account_id: null },
       orderBy: [{ account_key: 'asc' }, { sequence: 'asc' }],
     });
     const accountChains = new Map<string, typeof journal>();

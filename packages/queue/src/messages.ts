@@ -6,6 +6,7 @@ import {
 } from '../../shared/src/activity-contracts.js';
 import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../shared/src/contracts.js';
 import { matches, token } from '../../shared/src/security/tokens.js';
+import { exchangeEventSchema, ExchangeEvent } from './exchange-contracts.js';
 
 export const QUEUES = {
   wallet: 'wallet-actions',
@@ -26,7 +27,7 @@ export const broadcastSnapshotSchema = z
     if (value.chain === 'solana' && value.lastValidBlockHeight === undefined)
       ctx.addIssue({ code: 'custom', message: 'Solana expiry height required' });
   });
-export const messageSchema = z.discriminatedUnion('type', [
+const legacyMessageSchema = z.discriminatedUnion('type', [
   z
     .object({ type: z.literal('wallet.derive'), walletId: z.uuid(), request: deriveSchema })
     .strict(),
@@ -117,7 +118,11 @@ export const messageSchema = z.discriminatedUnion('type', [
     .strict(),
   z.object({ type: z.literal('ledger.activity.update'), activity: ledgerActivitySchema }).strict(),
 ]);
+export const messageSchema = z.union([legacyMessageSchema, exchangeEventSchema]);
 export type Message = z.infer<typeof messageSchema>;
+export function isExchangeEvent(message: Message): message is ExchangeEvent {
+  return 'schemaVersion' in message;
+}
 const queueEnvelopeSchema = z
   .object({
     version: z.literal(2),
@@ -151,6 +156,8 @@ export class MessageAuth {
   }
 
   seal(payload: Message, id: string = randomUUID()) {
+    if ('resetEpoch' in payload && payload.resetEpoch !== this.resetEpoch)
+      throw new Error('Stale business reset epoch');
     const body = { version: 2 as const, id, resetEpoch: this.resetEpoch, payload };
     return { ...body, mac: createHmac('sha256', this.key).update(canonical(body)).digest('hex') };
   }

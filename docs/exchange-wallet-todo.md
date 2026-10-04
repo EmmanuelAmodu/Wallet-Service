@@ -1,7 +1,8 @@
 # Exchange wallet implementation TODO
 
 Date: 4 October 2026  
-Status: implementation pending  
+Status: Phase 2 implemented and verified; other phase gates remain pending
+
 Design reference: [Exchange wallet implementation plan](exchange-wallet-implementation-plan.md)
 
 Initial configuration and worker answers: [implementation decisions](exchange-wallet-initial-decisions.md). The target is one exchange per deployment, with no tenant model.
@@ -18,7 +19,7 @@ Initial configuration and worker answers: [implementation decisions](exchange-wa
 | --- | --- | --- | --- |
 | 0 | Agreed configuration and contracts | None | Pending |
 | 1 | Custody roles, allocation, and clean bootstrap | 0 | Pending |
-| 2 | Durable messaging and exchange accounting | 1 | Pending |
+| 2 | Durable messaging and exchange accounting | 1 | Complete (implementation; deployment gated) |
 | 3 | Deposit detection, credit, and customer APIs | 2 | Pending |
 | 4 | Safe execution and native sweeps | 3 | Pending |
 | 5 | Hot-wallet withdrawals | 4 | Pending |
@@ -33,7 +34,7 @@ Initial configuration and worker answers: [implementation decisions](exchange-wa
 - [x] **P0-02** Confirm the derivation convention: hardened `Wallet.account` 0 for hot, 1–9 reserved for management, and customer accounts starting at 10. Define account 1's gas/fee purpose and limits. Per-chain derivation paths and management budgets are recorded; signer fixtures verify accounts 0, 1, 9, and 10. Role enforcement and allocator boundaries remain P1 work.
 - [x] **P0-03** Define canonical asset metadata and adapter capabilities, including native assets, allowlisted ERC-20/SPL assets, decimals, token identity/program, and unsupported-asset handling. The decisions record now defines `(chain, network, asset_id)`, native and token ID forms, pinned metadata, lifecycle certification gates, conservative ERC-20/SPL scope, and custody-exception behavior. Runtime registry and enforcement remain later implementation work.
 - [x] **P0-04** Implement/version the financial defaults in the decision record: Ethereum finalized blocks, Bitcoin 6 confirmations, Solana finalized, positive base-unit credit, sweep economics, fee/rent/funding caps, zero development customer withdrawal fee, cancellation fences, and deficit handling. Require hot liquidity before execution. `exchange-financial-v1` is the normative development policy; accepted operations retain their policy version, and withdrawal signing/submission requires atomic hot0 liquidity reservations.
-- [x] **P0-05** Define operation/attempt state machines and versioned queue contracts, including registry acknowledgments, deposit credit/reversal, reservation, execution, settlement, release, and incidents. The implementation plan separates business schema versions from the HMAC transport envelope and specifies event identities, outbox/inbox delivery guarantees, aggregate transitions, and cancellation/reorg safety. Shared runtime schemas remain P2-01 implementation work.
+- [x] **P0-05** Define operation/attempt state machines and versioned queue contracts, including registry acknowledgments, deposit credit/reversal, reservation, execution, settlement, release, and incidents. The implementation plan separates business schema versions from the HMAC transport envelope and specifies event identities, outbox/inbox delivery guarantees, aggregate transitions, and cancellation/reorg safety. Shared runtime schemas are implemented in P2-01.
 - [x] **P0-06** Confirm RPC/indexer/provider capabilities for deposit subscriptions, transfer identities, historical backfill, Bitcoin UTXO discovery, and Solana token accounts. Record required changes in the external provider. Source review confirms webhook intake but no wallet-watch lifecycle/backfill cursor or Bitcoin UTXO adapter, and identifies lost BTC/EVM/Solana transfer identity/base-unit details. Helius is deprecated for the exchange; Solana provider selection and deployed QuickNode capabilities remain pre-enable gates because credentials/config are unavailable here.
 - [ ] **P0-07** Write the coordinated development reset procedure and tooling: stop workers/publisher, reset owned databases and project queue/registry state, remove old subscriptions, configure fresh state, bootstrap, and restart. Queue envelope v2 and Pub/Sub ingress enforce `RESET_EPOCH`; provider payloads require top-level `resetEpoch`; BullMQ keys are epoch-prefixed. The reset tool reads durable `.env` directly despite stale shell exports and holds an exclusive owner-token lock through destructive work and final marker clearing; completion verifies the durable epoch and marker. Services reject conflicting runtime epochs. Persist `RESET_IN_PROGRESS` before destructive work, block service startup, and resume the same epoch/old namespaces after failure; stale-lock recovery must be explicit. **Still open:** execute the coordinated reset after the Phase 1 schemas are ready and rehearse a failure/resume cycle. Provider watch removal/publisher reconfiguration and wallet bootstrap remain explicit operator steps.
 
@@ -54,18 +55,20 @@ Initial configuration and worker answers: [implementation decisions](exchange-wa
 
 ## Phase 2 — Durable messaging and exchange accounting
 
-- [ ] **P2-01** Implement the shared versioned contracts in `packages/queue`, with domain/customer, canonical asset/network, operation/attempt IDs, request digest, correlation/causation IDs, revision, and schema version.
-- [ ] **P2-02** Add explicit outbox fan-out to consumer-owned queues. Deliver registry events separately to Ledger and ActivityListener; persist acknowledgments. Retain database inbox deduplication and transition guards beyond queue retention.
-- [ ] **P2-03** Extend Ledger's Prisma schema with metadata-only `LedgerAccount` identities/types/owners, journal batches independent of on-chain activities, deposits, withdrawal reservations, operation/journal links, inbox records, and its own transactional outbox. Keep balances in append-only entries; wire the Ledger outbox relay.
-- [ ] **P2-04** Implement Ledger feature boundaries for accounts, deposits, reservations, and settlements. Preserve immutable balanced journals, sequence locking, predecessor links, and compensating-entry references.
-- [ ] **P2-05** Separate physical custody accounts from customer pending/available/reserved/frozen liabilities. Use bounded integer base units and separate balances for each asset/network; exclude in-transit custody from spendable hot liquidity.
-- [ ] **P2-06** Implement final-deposit credit exactly once and pending/final/reverted transitions. Atomically publish `deposit.credited` with its journal entry; add deficit/freeze handling when reversing funds already withdrawn.
-- [ ] **P2-07** Implement atomic balance-check-and-reserve, idempotent release, and reservation result events. Reserve principal plus the accepted customer fee, using separate holds when fee assets differ.
-- [ ] **P2-08** Implement custody-only sweep/funding postings and withdrawal settlement, with actual native network fees, accepted fee revenue, failed-on-chain fees, and versioned settlement reversals. Unknown outcomes retain holds.
-- [ ] **P2-09** Add reservation reconciliation for missing operations/events and expose authenticated customer balance reads through Ledger. Keep all applications on their own databases.
-- [ ] **P2-10** Verify simultaneous holds cannot overspend; duplicate/reordered events cannot credit or settle twice; funding/sweeps leave customer liabilities unchanged; journal entries balance per asset; crashes after reservation commit recover through the outbox.
+- [x] **P2-01** Implement the shared versioned contracts in `packages/queue`, with domain/customer, canonical asset/network, operation/attempt IDs, request digest, correlation/causation IDs, revision, and schema version. `packages/queue/src/exchange-contracts.ts` now provides strict `schemaVersion: 1` runtime schemas for registry, deposit/deficit, reservation/release, execution, settlement, and incident events. Producer/consumer routing and transactional fan-out are implemented in P2-02.
+- [x] **P2-02** Add explicit outbox fan-out to consumer-owned queues. Deliver registry events separately to Ledger and ActivityListener; persist acknowledgments. Retain database inbox deduplication and transition guards beyond queue retention.
+- [x] **P2-03** Extend Ledger's Prisma schema with metadata-only `LedgerAccount` identities/types/owners, journal batches independent of on-chain activities, deposits, withdrawal reservations, operation/journal links, inbox records, and its own transactional outbox. Keep balances in append-only entries; wire the Ledger outbox relay.
+- [x] **P2-04** Implement Ledger feature boundaries for accounts, deposits, reservations, and settlements. Preserve immutable balanced journals, sequence locking, predecessor links, and compensating-entry references.
+- [x] **P2-05** Separate physical custody accounts from customer pending/available/reserved/frozen liabilities. Use bounded integer base units and separate balances for each asset/network; exclude in-transit custody from spendable hot liquidity.
+- [x] **P2-06** Implement final-deposit credit exactly once and pending/final/reverted transitions. Atomically publish `deposit.credited` with its journal entry; add deficit/freeze handling when reversing funds already withdrawn.
+- [x] **P2-07** Implement atomic balance-check-and-reserve, idempotent release, and reservation result events. Reserve principal plus the accepted customer fee, using separate holds when fee assets differ.
+- [x] **P2-08** Implement custody-only sweep/funding postings and withdrawal settlement, with actual native network fees, accepted fee revenue, failed-on-chain fees, and versioned settlement reversals. Unknown outcomes retain holds.
+- [x] **P2-09** Add reservation reconciliation for missing operations/events and expose authenticated customer balance reads through Ledger. Keep all applications on their own databases.
+- [x] **P2-10** Verify simultaneous holds cannot overspend; duplicate/reordered events cannot credit or settle twice; funding/sweeps leave customer liabilities unchanged; journal entries balance per asset; crashes after reservation commit recover through the outbox.
 
-**Gate:** Ledger owns customer balances and holds durably. Every financial transition is idempotent, balanced, and recoverable without cross-application database reads.
+**Gate:** verified against isolated PostgreSQL databases and Redis: Ledger owns customer balances and holds durably. Financial transitions are idempotent, balanced, and recoverable without cross-application database reads.
+
+**Verification:** 122 tests passed, with no failures or skips; application/tooling build, ESLint, formatting, and diff checks passed. See [Phase 2 implementation notes](exchange-wallet-phase2.md) for code mapping, APIs, migrations, and verification setup. Phase 1 custody bootstrap and Phase 3 provider readiness still gate customer-facing deployment. Application data was not reset and deployment databases were not migrated.
 
 ## Phase 3 — Deposit listener and customer deposit APIs
 

@@ -8,16 +8,23 @@ import { activityListenerConfig } from './config/activity-listener.config.js';
 import { ActivityPubSubService } from './activity-pubsub.service.js';
 import { ActivityProcessor } from './activity.processor.js';
 import { ActivityWorkflowService } from './activity-workflow.service.js';
+import { activityRegistryConfig } from './config/activity-registry.config.js';
+import { ActivityRegistryModule } from './registry/registry.module.js';
+import { ActivityPrismaModule } from './prisma/prisma.module.js';
+import { ActivityPrismaService } from './prisma/prisma.service.js';
+import { OutboxModule } from '../../../packages/queue/src/outbox.module.js';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      load: [queueConfig, networkConfig, activityListenerConfig],
+      load: [queueConfig, networkConfig, activityListenerConfig, activityRegistryConfig],
     }),
     MessagingModule,
     ChainModule,
+    ActivityRegistryModule,
+    OutboxModule.register(ActivityPrismaModule, ActivityPrismaService),
   ],
   providers: [ActivityPubSubService, ActivityProcessor, ActivityWorkflowService],
 })

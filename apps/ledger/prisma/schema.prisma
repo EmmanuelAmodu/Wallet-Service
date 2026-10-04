@@ -41,6 +41,59 @@ enum LedgerEntryKind {
   reversal
 }
 
+enum LedgerAccountType {
+  custody_deposit
+  custody_hot
+  custody_management
+  custody_in_transit
+  customer_available
+  customer_reserved
+  customer_frozen
+  customer_pending
+  fee_expense
+  fee_revenue
+  equity
+  deficit
+  reconciliation
+}
+
+enum LedgerAccountOwnerKind {
+  customer
+  wallet
+  exchange
+}
+
+enum ExchangeWalletRole {
+  customer
+  hot
+  management
+}
+
+enum ExchangeCustomerState {
+  active
+  frozen
+}
+
+enum DepositState {
+  pending
+  finalized
+  reverted
+}
+
+enum WithdrawalReservationState {
+  held
+  rejected
+  released
+  settled
+  frozen
+}
+
+enum ExchangeOperationKind {
+  sweep
+  funding
+  withdrawal
+}
+
 model LedgerWallet {
   wallet_id   String        @id @db.Uuid
   tenant_id   String
@@ -56,24 +109,24 @@ model LedgerWallet {
 }
 
 model LedgerActivity {
-  identifier               String        @id
+  identifier               String                     @id
   chain                    String
   network                  String
   transaction_hash         String
   transaction_hash_key     String
   state                    LedgerActivityState
-  revision                 Int           @default(0)
-  observation_sequence     BigInt        @default(0)
-  canonical_reconciliation Boolean       @default(false)
+  revision                 Int                        @default(0)
+  observation_sequence     BigInt                     @default(0)
+  canonical_reconciliation Boolean                    @default(false)
   block_hash               String?
   block_height             BigInt?
   completed_at_ms          BigInt
   source_status            LedgerActivitySourceStatus
   payload                  Json
   last_error               String?
-  created_at               DateTime      @default(now()) @db.Timestamptz
-  updated_at               DateTime      @updatedAt @db.Timestamptz
-  finalized_at             DateTime?     @db.Timestamptz
+  created_at               DateTime                   @default(now()) @db.Timestamptz
+  updated_at               DateTime                   @updatedAt @db.Timestamptz
+  finalized_at             DateTime?                  @db.Timestamptz
   entries                  LedgerEntry[]
 
   @@index([chain, network, block_height])
@@ -83,33 +136,251 @@ model LedgerActivity {
 }
 
 model LedgerEntry {
-  id                  String         @id @db.Uuid
-  activity_identifier String
-  activity            LedgerActivity @relation(fields: [activity_identifier], references: [identifier], onDelete: NoAction, onUpdate: NoAction)
+  id                  String                  @id @db.Uuid
+  activity_identifier String?
+  activity            LedgerActivity?         @relation(fields: [activity_identifier], references: [identifier], onDelete: NoAction, onUpdate: NoAction)
+  account_id          String?                 @db.Uuid
+  account             LedgerAccount?          @relation(fields: [account_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  batch_id            String?                 @db.Uuid
+  batch               JournalBatch?           @relation(fields: [batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   revision            Int
   account_key         String
   sequence            BigInt
-  wallet_id           String?        @db.Uuid
-  wallet              LedgerWallet?  @relation(fields: [wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
+  wallet_id           String?                 @db.Uuid
+  wallet              LedgerWallet?           @relation(fields: [wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
   asset               String
-  account_kind        LedgerEntryAccountKind
+  account_kind        LedgerEntryAccountKind?
   side                LedgerEntrySide
-  amount              Decimal        @db.Decimal(96, 18)
-  balance_after       Decimal        @db.Decimal(96, 18)
-  balance_state       LedgerBalanceState
-  entry_kind          LedgerEntryKind
-  previous_entry_id   String?        @unique @db.Uuid
-  previous_entry      LedgerEntry?   @relation("LedgerEntryPrevious", fields: [previous_entry_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  next_entries        LedgerEntry[]  @relation("LedgerEntryPrevious")
-  reversal_of_id      String?        @db.Uuid
-  reversal_of         LedgerEntry?   @relation("LedgerEntryReversal", fields: [reversal_of_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
-  reversals           LedgerEntry[]  @relation("LedgerEntryReversal")
-  created_at          DateTime       @default(now()) @db.Timestamptz
+  amount              Decimal                 @db.Decimal(96, 18)
+  balance_after       Decimal                 @db.Decimal(96, 18)
+  balance_state       LedgerBalanceState?
+  entry_kind          LedgerEntryKind?
+  previous_entry_id   String?                 @unique @db.Uuid
+  previous_entry      LedgerEntry?            @relation("LedgerEntryPrevious", fields: [previous_entry_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  next_entries        LedgerEntry[]           @relation("LedgerEntryPrevious")
+  reversal_of_id      String?                 @db.Uuid
+  reversal_of         LedgerEntry?            @relation("LedgerEntryReversal", fields: [reversal_of_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversals           LedgerEntry[]           @relation("LedgerEntryReversal")
+  created_at          DateTime                @default(now()) @db.Timestamptz
 
   @@unique([account_key, sequence])
   @@index([activity_identifier, revision])
   @@index([wallet_id, account_key, sequence(sort: Desc)])
+  @@index([account_id, sequence(sort: Desc)])
+  @@index([batch_id])
   @@map("ledger_entries")
+}
+
+model LedgerAccount {
+  id          String                 @id @db.Uuid
+  account_key String                 @unique
+  domain_id   String
+  chain       String
+  network     String
+  asset_id    String
+  type        LedgerAccountType
+  owner_kind  LedgerAccountOwnerKind
+  owner_id    String
+  normal_side LedgerEntrySide
+  created_at  DateTime               @default(now()) @db.Timestamptz
+  entries     LedgerEntry[]
+
+  @@unique([domain_id, chain, network, asset_id, type, owner_kind, owner_id])
+  @@index([domain_id, owner_kind, owner_id])
+  @@map("ledger_accounts")
+}
+
+model JournalBatch {
+  credited_deposits    Deposit[]               @relation("DepositCreditBatch")
+  reversed_deposits    Deposit[]               @relation("DepositReversalBatch")
+  reserved_withdrawals WithdrawalReservation[] @relation("ReservationReserveBatch")
+  released_withdrawals WithdrawalReservation[] @relation("ReservationReleaseBatch")
+  settled_operations   ExchangeOperation[]
+  id                   String                  @id @db.Uuid
+  key                  String                  @unique
+  domain_id            String
+  operation_id         String?                 @db.Uuid
+  revision             Int
+  kind                 String
+  request_digest       String
+  reversal_of_batch_id String?                 @db.Uuid
+  reversal_of          JournalBatch?           @relation("JournalBatchReversal", fields: [reversal_of_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversals            JournalBatch[]          @relation("JournalBatchReversal")
+  created_at           DateTime                @default(now()) @db.Timestamptz
+  created_transaction  BigInt                  @default(dbgenerated("txid_current()"))
+  entries              LedgerEntry[]
+
+  @@index([domain_id, operation_id, revision])
+  @@map("journal_batches")
+}
+
+model ExchangeWallet {
+  customer          ExchangeCustomer?  @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
+  hot_wallet        ExchangeWallet?    @relation("ExchangeWalletHot", fields: [hot_wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
+  customer_wallets  ExchangeWallet[]   @relation("ExchangeWalletHot")
+  deposits          Deposit[]
+  wallet_id         String             @id @db.Uuid
+  domain_id         String
+  customer_id       String?            @db.Uuid
+  chain             String
+  network           String
+  address           String
+  address_key       String
+  hot_wallet_id     String?            @db.Uuid
+  role              ExchangeWalletRole
+  account           Int
+  registry_revision Int
+  reset_epoch       String
+  created_at        DateTime           @default(now()) @db.Timestamptz
+  updated_at        DateTime           @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, chain, network, address_key])
+  @@unique([domain_id, chain, network, account])
+  @@index([domain_id, customer_id])
+  @@map("exchange_wallets")
+}
+
+model ExchangeCustomer {
+  wallets      ExchangeWallet[]
+  deposits     Deposit[]
+  reservations WithdrawalReservation[]
+  operations   ExchangeOperation[]
+  incidents    LedgerIncident[]
+  customer_id  String                  @id @db.Uuid
+  domain_id    String
+  state        ExchangeCustomerState   @default(active)
+  created_at   DateTime                @default(now()) @db.Timestamptz
+  updated_at   DateTime                @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, customer_id])
+  @@map("exchange_customers")
+}
+
+model Deposit {
+  customer          ExchangeCustomer @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
+  wallet            ExchangeWallet?  @relation(fields: [wallet_id], references: [wallet_id], onDelete: NoAction, onUpdate: NoAction)
+  credit_batch      JournalBatch?    @relation("DepositCreditBatch", fields: [credit_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  reversal_batch    JournalBatch?    @relation("DepositReversalBatch", fields: [reversal_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  incidents         LedgerIncident[]
+  id                String           @id @db.Uuid
+  domain_id         String
+  customer_id       String           @db.Uuid
+  wallet_id         String?          @db.Uuid
+  chain             String
+  network           String
+  asset_id          String
+  transfer_id       String
+  transfer_identity Json
+  transaction_hash  String
+  amount            Decimal?         @db.Decimal(96, 18)
+  revision          Int
+  state             DepositState
+  identity_digest   String?
+  pending_batch_id  String?          @db.Uuid
+  credit_batch_id   String?          @db.Uuid
+  reversal_batch_id String?          @db.Uuid
+  block_hash        String?
+  payload           Json
+  reset_epoch       String
+  created_at        DateTime         @default(now()) @db.Timestamptz
+  updated_at        DateTime         @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, chain, network, asset_id, transfer_id])
+  @@index([domain_id, customer_id, state])
+  @@map("deposits")
+}
+
+model WithdrawalReservation {
+  customer         ExchangeCustomer           @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
+  reserve_batch    JournalBatch?              @relation("ReservationReserveBatch", fields: [reserve_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  release_batch    JournalBatch?              @relation("ReservationReleaseBatch", fields: [release_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  operations       ExchangeOperation[]
+  id               String                     @id @db.Uuid
+  operation_id     String                     @unique @db.Uuid
+  domain_id        String
+  customer_id      String                     @db.Uuid
+  request_digest   String
+  policy_version   String
+  revision         Int
+  state            WithdrawalReservationState
+  amounts          Json
+  request          Json
+  reserve_batch_id String?                    @db.Uuid
+  release_batch_id String?                    @db.Uuid
+  reset_epoch      String
+  created_at       DateTime                   @default(now()) @db.Timestamptz
+  updated_at       DateTime                   @updatedAt @db.Timestamptz
+
+  @@index([domain_id, customer_id, state])
+  @@map("withdrawal_reservations")
+}
+
+model ExchangeOperation {
+  customer            ExchangeCustomer?      @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
+  reservation         WithdrawalReservation? @relation(fields: [reservation_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  settlement_batch    JournalBatch?          @relation(fields: [settlement_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  id                  String                 @id @db.Uuid
+  domain_id           String
+  customer_id         String?                @db.Uuid
+  reservation_id      String?                @db.Uuid
+  request_digest      String
+  kind                ExchangeOperationKind
+  payload             Json
+  attempt_id          String?                @db.Uuid
+  attempt_revision    Int                    @default(0)
+  state               String
+  settlement_revision Int                    @default(0)
+  settlement_batch_id String?                @db.Uuid
+  settlement_payload  Json?
+  settlement_identity String?                @unique
+  settlement_digest   String?
+  settlement_outcome  String?
+  reset_epoch         String
+  created_at          DateTime               @default(now()) @db.Timestamptz
+  updated_at          DateTime               @updatedAt @db.Timestamptz
+
+  @@index([domain_id, customer_id, state])
+  @@map("exchange_operations")
+}
+
+model LedgerIncident {
+  customer     ExchangeCustomer? @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
+  deposit      Deposit?          @relation(fields: [deposit_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  id           String            @id @db.Uuid
+  domain_id    String
+  customer_id  String?           @db.Uuid
+  operation_id String?           @db.Uuid
+  deposit_id   String?           @db.Uuid
+  reason       String
+  amount       Json?
+  state        String
+  created_at   DateTime          @default(now()) @db.Timestamptz
+  updated_at   DateTime          @updatedAt @db.Timestamptz
+
+  @@index([domain_id, state])
+  @@map("ledger_incidents")
+}
+
+model Outbox {
+  id           String    @id @db.Uuid
+  queue        String
+  dedupe_key   String    @unique
+  payload      Json
+  available_at DateTime  @default(now()) @db.Timestamptz
+  published_at DateTime? @db.Timestamptz
+  created_at   DateTime  @default(now()) @db.Timestamptz
+
+  @@index([published_at, available_at])
+  @@map("outbox")
+}
+
+model ExchangeInbox {
+  event_id     String   @id
+  digest       String
+  reset_epoch  String
+  processed_at DateTime @default(now()) @db.Timestamptz
+
+  @@map("exchange_inbox")
 }
 
 model Inbox {

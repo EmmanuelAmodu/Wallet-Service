@@ -3,8 +3,9 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
-import { Message, MessageAuth, messageSchema, QUEUES } from './messages.js';
+import { Message, MessageAuth, messageSchema, QUEUES, canonical } from './messages.js';
 import { queueConfig, QueueConfig } from './queue.config.js';
+import { ExchangeEvent, exchangeEventSchema } from './exchange-contracts.js';
 
 export const OUTBOX_DATABASE = Symbol('OUTBOX_DATABASE');
 type OutboxRow = { id: string; queue: string; payload: unknown };
@@ -47,6 +48,28 @@ export async function enqueue(
       available_at: new Date(Date.now() + delayMs),
     },
   });
+}
+
+// The caller supplies its transaction so the producer's state and all consumer deliveries commit together.
+export async function enqueueFanOut(
+  db: Pick<OutboxTransaction, 'outbox'>,
+  event: ExchangeEvent,
+  queues: readonly string[],
+) {
+  const payload = exchangeEventSchema.parse(event);
+  if (!queues.length || new Set(queues).size !== queues.length)
+    throw new Error('Fan-out requires distinct consumer queues');
+  const allowed = new Set<string>(Object.values(QUEUES));
+  if (queues.some((queue) => !allowed.has(queue)))
+    throw new Error('Unknown fan-out consumer queue');
+  const deliveries = [];
+  for (const queue of queues) {
+    const delivery = await enqueue(db, queue, payload, `exchange-${payload.eventId}-${queue}`);
+    if (canonical(delivery.payload) !== canonical(payload))
+      throw new Error('Event identity reused with different outbox content');
+    deliveries.push(delivery);
+  }
+  return deliveries;
 }
 @Injectable()
 export class OutboxRelay implements OnModuleInit, OnModuleDestroy {

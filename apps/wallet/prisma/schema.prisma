@@ -48,10 +48,10 @@ model Wallet {
 }
 
 model Transaction {
-  id                   String   @id @db.Uuid
+  id                   String                  @id @db.Uuid
   tenant_id            String
-  wallet_id            String   @db.Uuid
-  wallet               Wallet   @relation(fields: [wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  wallet_id            String                  @db.Uuid
+  wallet               Wallet                  @relation(fields: [wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   idempotency_key      String
   request_hash         String
   intent               Json
@@ -59,16 +59,16 @@ model Transaction {
   signed               Json?
   tx_hash              String?
   status               WalletTransactionStatus
-  broadcast_attempts   Int      @default(0)
-  broadcast_generation Int      @default(0)
-  broadcast_revision   Int      @default(0)
+  broadcast_attempts   Int                     @default(0)
+  broadcast_generation Int                     @default(0)
+  broadcast_revision   Int                     @default(0)
   last_error           String?
-  created_at           DateTime @default(now()) @db.Timestamptz
-  updated_at           DateTime @default(now()) @updatedAt @db.Timestamptz
+  created_at           DateTime                @default(now()) @db.Timestamptz
+  updated_at           DateTime                @default(now()) @updatedAt @db.Timestamptz
 
   @@unique([tenant_id, idempotency_key])
-  @@index([tenant_id, created_at], map: "transactions_tenant")
   @@unique([wallet_id], where: raw("\"status\" IN ('preparing', 'signing', 'signed', 'queued', 'broadcasting', 'submitted', 'attention')"), map: "one_pending_per_wallet")
+  @@index([tenant_id, created_at], map: "transactions_tenant")
   @@map("transactions")
 }
 
@@ -90,4 +90,60 @@ model Inbox {
   processed_at DateTime @default(now()) @db.Timestamptz
 
   @@map("inbox")
+}
+
+// Exchange projections are separate from the legacy wallet API until Phase 1 owns issuance.
+model ExchangeWalletRegistry {
+  wallet_id             String   @id @db.Uuid
+  domain_id             String
+  reset_epoch           String
+  chain                 String
+  network               String
+  address               String
+  role                  String
+  account               Int
+  customer_id           String?  @db.Uuid
+  hot_wallet_id         String?  @db.Uuid
+  registry_revision     Int
+  request               Json
+  ledger_status         String   @default("pending")
+  listener_status       String   @default("pending")
+  ledger_ack_revision   Int      @default(0)
+  listener_ack_revision Int      @default(0)
+  ledger_reason         String?
+  listener_reason       String?
+  start_cursor          String?
+  ready                 Boolean  @default(false)
+  created_at            DateTime @default(now()) @db.Timestamptz
+  updated_at            DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, chain, network, address])
+  @@map("exchange_wallet_registry")
+}
+
+model ExchangeEventReceipt {
+  event_id     String   @id @db.Uuid
+  payload_hash String
+  payload      Json
+  created_at   DateTime @default(now()) @db.Timestamptz
+
+  @@map("exchange_event_receipts")
+}
+
+model ExchangeOperationProjection {
+  operation_id     String   @id @db.Uuid
+  domain_id        String
+  reset_epoch      String
+  customer_id      String?  @db.Uuid
+  request_digest   String
+  source_type      String
+  request          Json
+  state            String
+  result_revision  Int      @default(0)
+  result_revisions Json     @default("{}")
+  result           Json?
+  created_at       DateTime @default(now()) @db.Timestamptz
+  updated_at       DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@map("exchange_operation_projections")
 }

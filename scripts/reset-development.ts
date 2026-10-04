@@ -23,6 +23,7 @@ const databaseTargets = [
     config: 'prisma.broadcast.config.ts',
   },
   { name: 'ledger', envName: 'LEDGER_DATABASE_URL', config: 'prisma.ledger.config.ts' },
+  { name: 'activity', envName: 'ACTIVITY_DATABASE_URL', config: 'prisma.activity.config.ts' },
 ] as const;
 
 function isLoopback(hostname: string) {
@@ -263,7 +264,9 @@ function resetConfiguration(environment: NodeJS.ProcessEnv) {
       environment[target.envName] ??
       (target.name === 'ledger'
         ? 'postgresql://ledger:ledger_local_only@127.0.0.1:5434/ledger'
-        : undefined);
+        : target.name === 'activity'
+          ? 'postgresql://activity:activity_local_only@127.0.0.1:5435/activity'
+          : undefined);
     if (!url) throw new Error(`Missing configuration: ${target.envName}`);
     return { ...target, url, database: localDatabaseName(url) };
   });
