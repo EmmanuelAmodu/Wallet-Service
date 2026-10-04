@@ -6,6 +6,8 @@ Status: implementation proposal; this document does not change application behav
 
 Track implementation in the [phased TODO checklist](exchange-wallet-todo.md). This document remains the design reference.
 
+Use the [initial implementation decisions](exchange-wallet-initial-decisions.md) for the single-exchange identity model, development networks, financial defaults, provider dependencies, management budgets, and Ledger account representation.
+
 Development assumption: existing application records can be discarded. Implement the exchange schema against clean service databases, with no legacy-address or balance migration.
 
 ## 1. Target behavior and decisions
@@ -23,11 +25,11 @@ Transform the current wallet-as-a-service monorepo into exchange custody infrast
 ### Explicit interpretations and proposed defaults
 
 1. **Index means the existing `Wallet.account` derivation account.** `walletCoreMetadata()` replaces the hardened account component of the Wallet Core path. It does not change the final receiving-address index. Preserve this convention rather than silently introducing another derivation scheme.
-2. **A hot wallet belongs to the exchange, not to an individual customer.** Default to one exchange custody domain per deployment, with a hot wallet per enabled chain/network. If multiple tenant exchanges are supported, give each a separate custody domain and seed configuration. Never pool their assets or liabilities accidentally.
+2. **A hot wallet belongs to the exchange, not to an individual customer.** Use one exchange per deployment and remove tenant ownership. Identify customers by internal UUID and globally unique `external_id`. Retain a technical custody domain/generation for seed/network configuration, with a hot wallet per enabled chain/network.
 3. **Network isolation must respect key identity.** The existing unique key `(seed_id, chain, account)` means one seed cannot create separate rows at account 0 for the same chain on multiple networks. Use a distinct custody seed/domain for those networks initially. Do not bypass the constraint and treat the same key as two unrelated wallets.
 4. **Credit at deposit finality; sweep afterward.** A finalized deposit becomes available before its sweep finishes. Withdrawals also require sufficient hot-wallet liquidity. A customer with available balance can have a withdrawal queued while the sweep supplies liquidity. This is the proposed credit policy, configurable before launch.
 5. **All assets means all explicitly supported assets.** Native coins are the first delivery milestone, followed by allowlisted ERC-20 and SPL tokens. Unknown tokens, NFTs, unusual token extensions, and unsweepable dust enter a visible exception state. The project must not advertise support for an asset that it can record but cannot sweep and withdraw.
-6. **Fees cannot be swept as assets.** Sweep the maximum economically transferable amount, retain only required fee/rent reserves where necessary, and rescan for residuals. Start with exchange-paid sweep/gas costs and a disclosed withdrawal fee. Persist the fee quote accepted by the customer.
+6. **Fees cannot be swept as assets.** Sweep the maximum economically transferable amount, retain only required fee/rent reserves where necessary, and rescan for residuals. Start with exchange-paid network costs and zero customer withdrawal fee in development, within the documented budgets. Persist the fee quote accepted by the customer even when it is zero.
 7. **The five current applications remain.** Add exchange orchestration as NestJS feature modules in `apps/wallet` initially. Keep Signer stateless, Broadcast responsible for signed-byte submission/retries, ActivityListener responsible for deposit-address observations, and Ledger responsible for financial state. A separate Treasury application can be extracted later if operational load justifies its own database.
 
 ## 2. Current implementation and required changes
@@ -54,12 +56,12 @@ Use the development reset workflow described in `README.md` to recreate the Wall
 
 | Model | Essential fields and constraints |
 | --- | --- |
-| `CustodyDomain` | Exchange/tenant owner, seed identifier, enabled chain/network configuration, operational status; private seed material remains outside PostgreSQL |
+| `CustodyDomain` | Technical exchange custody generation, seed identifier, enabled chain/network configuration, operational status; private seed material remains outside PostgreSQL |
 | `Wallet` extensions | `custody_domain_id`, `role`, optional `customer_id`, `active`, and configuration revision; roles: `hot`, `management`, `customer_deposit` |
 | `ManagementWalletPurpose` | Reserved account, purpose, permitted actions, funding limits; internal administration only |
 | `AddressSubscription` | Wallet/address identity, chain/network, subscription status, start block/slot, backfill cursor, provider acknowledgment; SPL token-account addresses mapped to their customer owner |
 | `AssetConfiguration` | Canonical asset/network, contract or mint/program identity, decimals, enabled adapter capabilities, finality/fee/threshold policy and version |
-| `Customer` or customer mapping | Stable customer ID plus `(tenant_id, external_id)` mapping; do not confuse tenant ownership with customer identity |
+| `Customer` or customer mapping | Stable internal UUID plus globally unique `external_id` supplied by the authenticated exchange backend; no tenant model |
 
 Maintain canonical address normalization per chain and immutable seed/account/path ownership once an address is published.
 
@@ -84,7 +86,7 @@ If multiple seed-isolated domains or same-chain networks are enabled later, add 
 
 1. Stop application workers and the development provider publisher.
 2. Recreate the Wallet, Broadcast, and Ledger development/test databases from the exchange baselines.
-3. Clear this project's queue namespace and registry projections; reset the development Pub/Sub backlog/subscription and remove old provider address subscriptions.
+3. Fence stale work with a new persisted reset epoch; use epoch-specific project queue/registry and development Pub/Sub namespaces, retire the previous backlog, and remove old provider address subscriptions. Follow the complete P0-07 procedure in the decision record.
 4. Configure the development custody seed, networks, assets, and signer policy. A record reset does not clear blockchain state; use fresh local chain state or a fresh development seed when an empty on-chain starting point is required.
 5. Bootstrap the hot wallet at account 0, then any explicitly configured management wallets in 1–9. Begin customer allocation at exactly 10.
 6. Install fresh customer subscriptions, seed test fixtures deliberately, and start the exchange workers.
@@ -155,7 +157,7 @@ For a reorged sweep, compensate the custody move and reassess its inputs/balance
 
 ### Ledger persistence
 
-Extend the Ledger schema with explicit account types/owners, `Deposit`, `WithdrawalReservation`, operation-to-journal references, inbox deduplication, and outbox events. Preserve journal sequence locking, predecessor links, immutable entries, and reversal references.
+Extend the Ledger schema with a metadata-only `LedgerAccount` for immutable type/owner/asset/network identity, journal batches independent of on-chain activities, `Deposit`, `WithdrawalReservation`, operation-to-journal references, inbox deduplication, and outbox events. Journal entries reference the account; balances remain in append-only entries, without a mutable account balance/cursor. Preserve journal sequence locking, predecessor links, immutable entries, and reversal references.
 
 The reservation transaction must atomically check available balance, create the hold, record its idempotency key, and enqueue the result event. A committed reservation cannot be forgotten because Wallet crashes before receiving its event. Add reconciliation for reservations with no corresponding active operation.
 
@@ -235,7 +237,7 @@ Fee-on-transfer, rebasing, frozen, delegated, or Token-2022 extension assets req
 
 Initially reject destinations registered as exchange-owned hot, management, or customer deposit addresses. A future internal-transfer API can atomically debit the sender liability and credit the recipient without an on-chain withdrawal or another deposit credit. Revalidate ownership against the registry at execution and in signer policy to cover registry changes after request acceptance.
 
-Use the existing authenticated exchange backend as the caller, with customer ownership bound to its tenant. Extend authorization before offering direct customer access. Do not expose internal management creation, generic signing, or private source controls through these endpoints.
+Use the authenticated exchange backend as the caller, with explicit customer ownership validation and no tenant context. Extend authorization before offering direct customer access. Do not expose internal management creation, generic signing, or private source controls through these endpoints.
 
 Remove or restrict `POST /v1/wallets/:id/transactions` for customer deposit wallets. A customer withdrawal cannot use a deposit wallet as a liquidity fallback.
 
@@ -249,7 +251,7 @@ Use `rejected` for definitive validation/reservation failure, `cancelled` only a
 
 ### Reservation and execution saga
 
-1. Wallet stores the withdrawal intent and fee quote under a tenant/customer-scoped idempotency key, then emits `withdrawal.reserve.requested`.
+1. Wallet stores the withdrawal intent and fee quote under a customer/operation-scoped idempotency key, then emits `withdrawal.reserve.requested`.
 2. Ledger checks and reserves funds atomically; emits `withdrawal.reserved` or a definitive insufficient-funds rejection.
 3. Wallet records the result and schedules the withdrawal against the configured hot wallet. Insufficient hot liquidity keeps the operation queued with an explicit reason.
 4. The hot execution scheduler reserves resources, prepares, signs, and automatically broadcasts.
@@ -345,7 +347,7 @@ Required regression scenarios:
 
 - Hot account 0; customer account 10 first on an empty deployment; accounts 1–9 inaccessible to customer creation; allocator exhaustion and concurrent bootstrap.
 - Reset removes old records and async work; explicit hot/management creation leaves the first customer allocation at 10.
-- Tenant/network/seed isolation and address reuse across EVM chains with independent financial scopes.
+- Customer authorization, network/seed isolation, and address reuse across EVM chains with independent financial scopes.
 - Provider replay, alias/case changes, several outputs/logs, customer registry lag, resubscription/backfill, and out-of-order finality.
 - External deposit credited once; sweep receipt at hot creates no new customer credit; management funding creates no deposit credit.
 - Deposit reorg before/after sweeping and after withdrawal, with explicit deficit handling.

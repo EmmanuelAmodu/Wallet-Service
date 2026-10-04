@@ -4,6 +4,8 @@ Date: 4 October 2026
 Status: implementation pending  
 Design reference: [Exchange wallet implementation plan](exchange-wallet-implementation-plan.md)
 
+Initial configuration and worker answers: [implementation decisions](exchange-wallet-initial-decisions.md). The target is one exchange per deployment, with no tenant model.
+
 ## How to work through this checklist
 
 - Work through phases 0–8 in order. Phase 9 contains optional follow-up work.
@@ -27,10 +29,10 @@ Design reference: [Exchange wallet implementation plan](exchange-wallet-implemen
 
 ## Phase 0 — Configuration and contracts
 
-- [ ] **P0-01** Record the initial custody domain, seed identifier, chain/network choices, and exchange/tenant ownership. Start with one configured Signer seed; document isolation required before enabling another same-chain network or seed.
+- [ ] **P0-01** Apply the initial single-exchange decisions: globally unique customer external IDs, one development seed, Sepolia, Bitcoin regtest, and Solana Devnet; one network per chain. Record the configured seed identifier and verify each RPC identity before enabling its adapter.
 - [ ] **P0-02** Confirm the derivation convention: hardened `Wallet.account` 0 for hot, 1–9 reserved for management, and customer accounts starting at 10. Define account 1's gas/fee purpose and limits.
 - [ ] **P0-03** Define canonical asset metadata and adapter capabilities, including native assets, allowlisted ERC-20/SPL assets, decimals, token identity/program, and unsupported-asset handling.
-- [ ] **P0-04** Specify deposit finality, minimum credit/sweep amounts, fee/rent budgets, exchange-paid sweep fees, and the withdrawal fee quote/cancellation policy. Credit finalized deposits before sweeping; require hot liquidity before execution.
+- [ ] **P0-04** Implement/version the financial defaults in the decision record: Ethereum finalized blocks, Bitcoin 6 confirmations, Solana finalized, positive base-unit credit, sweep economics, fee/rent/funding caps, zero development customer withdrawal fee, cancellation fences, and deficit handling. Require hot liquidity before execution.
 - [ ] **P0-05** Define operation/attempt state machines and versioned queue contracts, including registry acknowledgments, deposit credit/reversal, reservation, execution, settlement, release, and incidents.
 - [ ] **P0-06** Confirm RPC/indexer/provider capabilities for deposit subscriptions, transfer identities, historical backfill, Bitcoin UTXO discovery, and Solana token accounts. Record required changes in the external provider.
 - [ ] **P0-07** Write the coordinated development reset procedure and tooling: stop workers/publisher, reset owned databases and project queue/registry state, remove old subscriptions, configure fresh state, bootstrap, and restart. Add a reset epoch or equivalent stale-job rejection mechanism.
@@ -39,14 +41,14 @@ Design reference: [Exchange wallet implementation plan](exchange-wallet-implemen
 
 ## Phase 1 — Custody roles, allocation, and bootstrap
 
-- [ ] **P1-01** Add Wallet-owned Prisma models for custody domains, customer mappings, wallet roles, management purposes, asset configuration, and subscription readiness. Keep seed material outside PostgreSQL.
+- [ ] **P1-01** Add Wallet-owned Prisma models for custody domains, globally unique customer external IDs, wallet roles, management purposes, asset configuration, and subscription readiness. Remove tenant fields from the exchange model/contracts/authentication as it is implemented; keep seed material outside PostgreSQL.
 - [ ] **P1-02** Add database constraints for hot account 0, management accounts 1–9, customer accounts >=10, and one active hot wallet per domain/chain/network. Preserve seed/chain/account key uniqueness and canonical addresses.
 - [ ] **P1-03** Update the customer allocator and baseline sequence to start at 10, remain noncycling, enforce the account bound, and allocate safely across replicas. Explicit hot/management inserts must not advance it.
 - [ ] **P1-04** Implement `custody/` and `customers/` NestJS modules with idempotent hot bootstrap, explicit management creation, and immutable published seed/account/path ownership.
-- [ ] **P1-05** Bind bootstrap and address derivation requests/results to the configured domain, seed, chain, and network; verify returned addresses and paths against expected derivation.
+- [ ] **P1-05** Bind bootstrap and address derivation requests/results to the configured domain, seed, chain, and network; verify returned addresses and paths against expected derivation. Add explicit Bitcoin regtest address/signing/RPC support before enabling that development adapter.
 - [ ] **P1-06** Implement readiness state: customer addresses remain unavailable until the hot destination, Ledger registration, provider subscription, and listener registry are acknowledged.
 - [ ] **P1-07** Run the coordinated development reset after the custody schema is ready. Bootstrap hot0 and configured management wallets, then verify the first customer account is 10 and customer liabilities start empty. Use a fresh development seed/local chain when empty on-chain state is required.
-- [ ] **P1-08** Verify concurrent bootstrap/allocation, reserved-index rejection, tenant/seed/network isolation, allocator exhaustion, repeated reset/bootstrap, and rejection of jobs from a prior reset.
+- [ ] **P1-08** Verify concurrent bootstrap/allocation, reserved-index rejection, customer authorization and seed/network isolation, allocator exhaustion, repeated reset/bootstrap, and rejection of jobs from a prior reset.
 
 **Gate:** hot0 is deterministic; customer allocation cannot use 0–9; concurrent workers cannot create conflicting wallets. Address publication stays gated until phase 3 completes subscription readiness.
 
@@ -54,7 +56,7 @@ Design reference: [Exchange wallet implementation plan](exchange-wallet-implemen
 
 - [ ] **P2-01** Implement the shared versioned contracts in `packages/queue`, with domain/customer, canonical asset/network, operation/attempt IDs, request digest, correlation/causation IDs, revision, and schema version.
 - [ ] **P2-02** Add explicit outbox fan-out to consumer-owned queues. Deliver registry events separately to Ledger and ActivityListener; persist acknowledgments. Retain database inbox deduplication and transition guards beyond queue retention.
-- [ ] **P2-03** Extend Ledger's Prisma schema with account types/owners, deposits, withdrawal reservations, operation/journal links, inbox records, and its own transactional outbox. Wire the Ledger outbox relay.
+- [ ] **P2-03** Extend Ledger's Prisma schema with metadata-only `LedgerAccount` identities/types/owners, journal batches independent of on-chain activities, deposits, withdrawal reservations, operation/journal links, inbox records, and its own transactional outbox. Keep balances in append-only entries; wire the Ledger outbox relay.
 - [ ] **P2-04** Implement Ledger feature boundaries for accounts, deposits, reservations, and settlements. Preserve immutable balanced journals, sequence locking, predecessor links, and compensating-entry references.
 - [ ] **P2-05** Separate physical custody accounts from customer pending/available/reserved/frozen liabilities. Use bounded integer base units and separate balances for each asset/network; exclude in-transit custody from spendable hot liquidity.
 - [ ] **P2-06** Implement final-deposit credit exactly once and pending/final/reverted transitions. Atomically publish `deposit.credited` with its journal entry; add deficit/freeze handling when reversing funds already withdrawn.
@@ -74,7 +76,7 @@ Design reference: [Exchange wallet implementation plan](exchange-wallet-implemen
 - [ ] **P3-05** Classify external deposits, internal funding, persisted authorized sweeps, and unexpected outflows. Use trusted registry/operation data; unrelated external counterparties must not fail the whole observation.
 - [ ] **P3-06** Publish observed/finalized/reverted deposit events and maintain Wallet's deposit/history projection from Ledger results. Normalize addresses and assets consistently across services.
 - [ ] **P3-07** Persist incidents for unexpected customer-wallet outflows, apply configured freezes, and reconcile custody loss without silently reducing customer liabilities. Match sweeps by attempt, source, asset, hot destination, amount, and fee bounds.
-- [ ] **P3-08** Add idempotent customer deposit-address assignment, balance, and deposit-history APIs with tenant/customer authorization. Expose addresses only after all readiness acknowledgments.
+- [ ] **P3-08** Add idempotent customer deposit-address assignment, balance, and deposit-history APIs with exchange-backend authentication and customer ownership validation. Expose addresses only after all readiness acknowledgments.
 - [ ] **P3-09** Verify replay, multiple outputs/logs, alias/case normalization, out-of-order finality, registry lag, resubscription/backfill, and reorgs. Internal funding and hot sweep receipts must never create a second customer credit.
 
 **Gate:** supported external deposits credit the correct customer once; registry/subscription gaps are recoverable; only ready addresses are published.
@@ -99,7 +101,7 @@ Design reference: [Exchange wallet implementation plan](exchange-wallet-implemen
 ## Phase 5 — Hot-wallet withdrawals
 
 - [ ] **P5-01** Add logical withdrawal models and `withdrawals/` module, including customer/domain, destination, principal, accepted fee quote, scoped idempotency key/digest, Ledger hold, hot generation, status/reason, and linked attempts.
-- [ ] **P5-02** Add withdrawal request/status APIs with tenant/customer authorization and canonical amount/destination validation. Reject exchange-owned deposit/hot/management destinations and conflicting idempotency payloads.
+- [ ] **P5-02** Add withdrawal request/status APIs with exchange-backend authentication, customer ownership validation, and canonical amount/destination checks. Reject exchange-owned deposit/hot/management destinations and conflicting customer-scoped idempotency payloads.
 - [ ] **P5-03** Restrict the existing customer-wallet transaction route and internal management/signing interfaces. Customer requests must not choose a source wallet, path, nonce, UTXOs, or deposit-wallet fallback.
 - [ ] **P5-04** Implement the reservation saga through durable commands/results. Persist intent before requesting a hold; recover lost result delivery and rejected or orphaned reservations.
 - [ ] **P5-05** Implement hot liquidity checks and durable scheduling. Queue many logical withdrawals while executing one active hot transaction; report insufficient liquidity separately from insufficient customer balance.
@@ -154,6 +156,6 @@ These tasks increase throughput or scope after the core exchange flow is accepte
 - [ ] **P9-02** Add Bitcoin withdrawal batches with immutable output-to-withdrawal mappings, fee attribution, reserved UTXOs, and hot-owned change. Certify multi-source/multi-key sweep aggregation separately.
 - [ ] **P9-03** Add supported Solana withdrawal batching/concurrency with source/token/fee reservations, account-contention limits, instruction-size limits, expiry, and per-withdrawal attribution.
 - [ ] **P9-04** Evaluate an EVM batch-contract/smart-account adapter with independent approval and certification before enabling it.
-- [ ] **P9-05** Add multiple custody domains/seeds with isolated signing routes, and safe generation rotation that continues monitoring funded older addresses.
+- [ ] **P9-05** Add multiple technical custody domains/seeds with isolated signing routes, and safe generation rotation that continues monitoring funded older addresses. Keep the single-exchange ownership model.
 - [ ] **P9-06** Add an explicit internal-transfer API with atomic liability transfers if exchange-owned destinations should be supported.
 - [ ] **P9-07** Extract Treasury into a separate NestJS application/database if operational load warrants it; preserve queue contracts and database ownership.
