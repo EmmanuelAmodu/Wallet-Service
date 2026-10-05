@@ -13,6 +13,7 @@ import { WalletsModule } from './wallets/wallets.module.js';
 import { TransactionsModule } from './transactions/transactions.module.js';
 import { WalletMessagingModule } from './messaging/wallet-messaging.module.js';
 import { CustomersModule } from './customers/customers.module.js';
+import { CustodyApiModule } from './custody-api/custody-api.module.js';
 
 @Module({
   imports: [
@@ -27,6 +28,7 @@ import { CustomersModule } from './customers/customers.module.js';
     TransactionsModule,
     WalletMessagingModule,
     CustomersModule,
+    CustodyApiModule,
   ],
   providers: [{ provide: APP_FILTER, useClass: SafeErrorsFilter }],
 })

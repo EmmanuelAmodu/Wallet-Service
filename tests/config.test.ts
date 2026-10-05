@@ -60,6 +60,10 @@ test('chain network settings require per-chain RPC and EVM chain identifiers', (
     polygon: { network: '137', chainId: '137' },
   });
   assert.throws(() => chainNetworksFromEnv('11155111', 'devnet'), /rpcUrl/);
+  process.env.CHAIN_NETWORKS = JSON.stringify({
+    ethereum: { network: '11155111', chainId: '1' },
+  });
+  assert.throws(() => chainNetworkOverridesFromEnv(), /network must equal/);
 
   process.env.CHAIN_NETWORKS = '{';
   assert.throws(() => chainNetworkOverridesFromEnv(), /valid JSON/);
@@ -80,6 +84,26 @@ test('development chain defaults identify Sepolia and Solana Devnet without enab
   assert.equal(networks.bitcoin.rpcUrl, undefined);
 });
 
+test('Bitcoin regtest overrides bind address network and RPC network while other forks remain mainnet', (t) => {
+  const original = process.env.CHAIN_NETWORKS;
+  t.after(() => {
+    if (original === undefined) delete process.env.CHAIN_NETWORKS;
+    else process.env.CHAIN_NETWORKS = original;
+  });
+  process.env.CHAIN_NETWORKS = JSON.stringify({ bitcoin: { network: 'regtest' } });
+  const networks = chainNetworksFromEnv('11155111', 'devnet');
+  assert.equal(networks.bitcoin.network, 'regtest');
+  assert.equal(networks.bitcoin.rpcNetwork, 'regtest');
+  process.env.CHAIN_NETWORKS = JSON.stringify({
+    bitcoin: { network: 'regtest', rpcNetwork: 'main' },
+  });
+  assert.throws(() => chainNetworksFromEnv('11155111', 'devnet'), /rpcNetwork/);
+  process.env.CHAIN_NETWORKS = JSON.stringify({ litecoin: { network: 'regtest' } });
+  assert.throws(() => chainNetworksFromEnv('11155111', 'devnet'), /mainnet/);
+  process.env.CHAIN_NETWORKS = JSON.stringify({ bitcoin: { network: 'testnet' } });
+  assert.throws(() => chainNetworksFromEnv('11155111', 'devnet'), /mainnet/);
+});
+
 test('application configuration is scoped and rejects unsafe settings at startup', async (t) => {
   const { walletConfig } = await import('../apps/wallet/src/config/wallet.config.js');
   const { broadcastConfig } = await import('../apps/broadcast/src/config/broadcast.config.js');
@@ -98,6 +122,7 @@ test('application configuration is scoped and rejects unsafe settings at startup
     'SIGNER_SEED_ID',
     'ETH_CHAIN_ID',
     'SOLANA_GENESIS_HASH',
+    'EXCHANGE_DOMAIN_ID',
     'CHAIN_NETWORKS',
     'ALLOW_BROADCAST',
     'WALLET_PORT',
@@ -119,6 +144,8 @@ test('application configuration is scoped and rejects unsafe settings at startup
     SIGNER_SEED_FILE: '/test/seed',
     SIGNER_SEED_ID: 'test',
     ETH_CHAIN_ID: '11155111',
+    SOLANA_GENESIS_HASH: 'devnet',
+    EXCHANGE_DOMAIN_ID: 'test-domain',
   });
   Object.assign(process.env, {
     LEDGER_DATABASE_URL: 'postgresql://localhost/ledger',

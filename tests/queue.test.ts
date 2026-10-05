@@ -3,11 +3,78 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Queue, Worker } from 'bullmq';
 import { connection } from '../packages/queue/src/messaging.module.js';
-import { MessageAuth, QUEUES, messageSchema } from '../packages/queue/src/messages.js';
+import {
+  MessageAuth,
+  QUEUES,
+  messageSchema,
+  derivationRequestDigest,
+} from '../packages/queue/src/messages.js';
 import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
 import { exchangeEventSchema } from '../packages/queue/src/exchange-contracts.js';
 import { ledgerWalletRegistrationSchema } from '../packages/shared/src/activity-contracts.js';
 import { reconcileActivity } from '../scripts/queue.js';
+
+test('derivation commands/results bind role, network, seed, path, domain and request identity', () => {
+  const binding = {
+    walletId: randomUUID(),
+    requestId: randomUUID(),
+    domainId: 'exchange-development',
+    network: 'regtest',
+    role: 'customer_deposit' as const,
+    path: "m/84'/1'/10'/0/0",
+    request: { chain: 'bitcoin' as const, account: 10, seedId: 'test-seed' },
+  };
+  const message = {
+    ...binding,
+    requestDigest: derivationRequestDigest(binding),
+    type: 'wallet.derive' as const,
+  };
+  assert.equal(messageSchema.parse(message).type, 'wallet.derive');
+  assert.equal(
+    messageSchema.parse({ ...message, type: 'wallet.derived', address: 'bcrt1qtest' }).type,
+    'wallet.derived',
+  );
+  assert.equal(
+    messageSchema.parse({ ...message, type: 'wallet.rejected' }).type,
+    'wallet.rejected',
+  );
+  for (const update of [
+    { requestId: randomUUID() },
+    { walletId: randomUUID() },
+    { domainId: 'other-domain' },
+    { network: 'mainnet' },
+    { path: "m/84'/0'/10'/0/0" },
+    { role: 'legacy' },
+    { request: { ...binding.request, account: 11 } },
+    { request: { ...binding.request, seedId: 'other-seed' } },
+  ])
+    assert.equal(messageSchema.safeParse({ ...message, ...update }).success, false);
+  for (const [role, account] of [
+    ['customer_deposit', 0],
+    ['legacy', 9],
+    ['hot', 10],
+    ['management', 0],
+    ['management', 10],
+  ] as const) {
+    const changed = { ...binding, role, request: { ...binding.request, account } };
+    assert.equal(
+      messageSchema.safeParse({
+        ...changed,
+        requestDigest: derivationRequestDigest(changed),
+        type: 'wallet.derive',
+      }).success,
+      false,
+    );
+  }
+  assert.equal(
+    messageSchema.safeParse({
+      type: 'wallet.derive',
+      walletId: binding.walletId,
+      request: binding.request,
+    }).success,
+    false,
+  );
+});
 
 test('queue prefix includes the reset epoch', () => {
   assert.equal(epochQueuePrefix('waas', 'epoch-123'), 'waas:epoch-123');

@@ -167,3 +167,49 @@ test('EVM receipt absence distinguishes pending transactions from transactions n
   });
   assert.deepEqual(calls, ['eth_chainId', 'eth_getTransactionReceipt', 'eth_getTransactionByHash']);
 });
+
+test('Bitcoin regtest preparation verifies its node and rejects mainnet recipients before loading UTXOs', async (t) => {
+  const calls: string[] = [];
+  let wrongNetwork = false;
+  const address = 'bcrt1q6rz28mcfaxtmd6v789l9rrlrusdprr9pz3cppk';
+  const script = '0014d0c4a3ef09e997b6e99e397e518fe3e41a118ca1';
+  const url = await rpcServer(t, calls, (method) => {
+    if (method === 'getblockchaininfo') return { chain: wrongNetwork ? 'main' : 'regtest' };
+    if (method === 'gettxout')
+      return {
+        value: 0.001,
+        confirmations: 6,
+        coinbase: false,
+        scriptPubKey: { hex: script, address },
+      };
+    throw new Error('Unexpected RPC method');
+  });
+  const rpc = new ChainRpcService({
+    ethereumChainId: '11155111',
+    solanaGenesisHash: 'devnet',
+    chainNetworks: { bitcoin: { network: 'regtest', rpcNetwork: 'regtest', rpcUrl: url } },
+  });
+  const transfer: Transfer = {
+    chain: 'bitcoin',
+    outputs: [{ address, amount: '10000' }],
+    utxos: [{ txid: '02'.repeat(32), vout: 0 }],
+    satsPerVbyte: 2,
+  };
+  assert.equal(rpc.networkIdentity('bitcoin'), 'regtest');
+  const prepared = await rpc.prepare(address, transfer);
+  assert.ok('utxos' in prepared);
+  assert.equal(prepared.utxos[0].amount, '100000');
+  assert.equal(prepared.utxos[0].script, script);
+  assert.deepEqual(calls, ['getblockchaininfo', 'gettxout']);
+  await assert.rejects(
+    rpc.prepare(address, {
+      ...transfer,
+      outputs: [{ address: 'bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu', amount: '10000' }],
+    }),
+    /regtest/,
+  );
+  assert.equal(calls.filter((method) => method === 'gettxout').length, 1);
+  wrongNetwork = true;
+  await assert.rejects(rpc.prepare(address, transfer), /network mismatch/);
+  assert.equal(calls.filter((method) => method === 'gettxout').length, 1);
+});

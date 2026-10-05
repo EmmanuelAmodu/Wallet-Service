@@ -19,6 +19,7 @@ import { SigningCore } from './signing.core.js';
           config.seedId,
           config.ethereumChainId,
           config.ethereumChainIds,
+          { domainId: config.domainId, chainNetworks: config.chainNetworks },
         ),
     },
   ],

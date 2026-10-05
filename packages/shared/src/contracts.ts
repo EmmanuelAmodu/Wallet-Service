@@ -188,7 +188,7 @@ export const deriveSchema = z
 export type DeriveRequest = z.infer<typeof deriveSchema>;
 export const signSchema = z
   .object({
-    wallet: deriveSchema.extend({ address }),
+    wallet: deriveSchema.extend({ address, network: z.string().min(1).max(128).optional() }),
     transaction: z.discriminatedUnion('chain', [
       z
         .object({
@@ -252,8 +252,10 @@ export const signedSchema = z
     encoding: z.enum(['hex', 'base64']),
   })
   .strict();
-export function derivationPath(chain: Chain, account: number): string {
+export function derivationPath(chain: Chain, account: number, network = 'mainnet'): string {
   accountSchema.parse(account);
   if (chain === 'solana') return `m/44'/501'/${account}'`;
-  return chain === 'bitcoin' ? `m/84'/0'/${account}'/0/0` : `m/44'/60'/${account}'/0/0`;
+  return chain === 'bitcoin'
+    ? `m/84'/${network === 'regtest' ? 1 : 0}'/${account}'/0/0`
+    : `m/44'/60'/${account}'/0/0`;
 }

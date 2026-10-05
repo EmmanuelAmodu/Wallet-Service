@@ -36,8 +36,16 @@ export function chainNetworkOverridesFromEnv(): ChainNetworkMap {
     const family = chainFamily(chain.data);
     if (family === 'ethereum' && !settings.chainId)
       throw new Error(`CHAIN_NETWORKS.${name}.chainId is required for EVM chains`);
-    if (family === 'bitcoin' && settings.network !== 'mainnet')
-      throw new Error(`CHAIN_NETWORKS.${name}.network must be mainnet`);
+    if (family === 'ethereum' && settings.network !== settings.chainId)
+      throw new Error(`CHAIN_NETWORKS.${name}.network must equal its EVM chainId`);
+    if (family === 'bitcoin') {
+      if (settings.network !== 'mainnet' && !(name === 'bitcoin' && settings.network === 'regtest'))
+        throw new Error(`CHAIN_NETWORKS.${name}.network must be mainnet or Bitcoin regtest`);
+      const expected = settings.network === 'regtest' ? 'regtest' : 'main';
+      if (settings.rpcNetwork && settings.rpcNetwork !== expected)
+        throw new Error(`CHAIN_NETWORKS.${name}.rpcNetwork does not match its network`);
+      settings.rpcNetwork = expected;
+    }
     if (family === 'solana' && !settings.genesisHash)
       throw new Error(`CHAIN_NETWORKS.${name}.genesisHash is required for Solana`);
   }

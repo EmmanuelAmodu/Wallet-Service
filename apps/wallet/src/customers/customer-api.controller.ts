@@ -27,7 +27,7 @@ import { walletConfig, WalletSettings } from '../config/wallet.config.js';
 
 const emptyQuery = z.object({}).strict();
 const assignment = z
-  .object({ chain: z.enum(['ethereum', 'solana']), network: z.string().min(1).max(128) })
+  .object({ chain: z.enum(['ethereum', 'bitcoin', 'solana']), network: z.string().min(1).max(128) })
   .strict();
 const history = z
   .object({

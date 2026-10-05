@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import {
   createDevelopmentResetPlan,
+  developmentResetConfiguration,
   epochResourceName,
   localDatabaseName,
   localPubSubEndpoint,
@@ -59,6 +60,90 @@ test('queue config blocks services while a development reset is fenced', () => {
   } finally {
     if (original === undefined) delete process.env.RESET_IN_PROGRESS;
     else process.env.RESET_IN_PROGRESS = original;
+  }
+});
+
+test('reset requires explicit distinct databases for every service and rejects endpoint overrides', () => {
+  const names = [
+    'WALLET_DATABASE_URL',
+    'BROADCAST_DATABASE_URL',
+    'LEDGER_DATABASE_URL',
+    'ACTIVITY_DATABASE_URL',
+    'SWEEP_DATABASE_URL',
+    'USER_DATABASE_URL',
+  ];
+  const environment: NodeJS.ProcessEnv = { REDIS_URL: 'redis://127.0.0.1:6379/15' };
+  for (let index = 0; index < names.length; index++)
+    environment[names[index]] = `postgresql://user:pass@127.0.0.1:${5432 + index}/owned_service`;
+  assert.equal(developmentResetConfiguration(environment).urls.length, 6);
+  for (const name of names) {
+    const incomplete = { ...environment };
+    delete incomplete[name];
+    assert.throws(
+      () => developmentResetConfiguration(incomplete),
+      new RegExp(`Missing configuration: ${name}`),
+    );
+  }
+  assert.throws(
+    () =>
+      developmentResetConfiguration({
+        ...environment,
+        USER_DATABASE_URL: 'postgresql://different:pass@localhost:5432/owned_service',
+      }),
+    /six distinct owned service databases/,
+  );
+  for (const value of [
+    'redis://localhost:6379/15?host=other',
+    'redis://localhost:6379/15#override',
+    'redis://localhost:6379/not-a-database',
+  ])
+    assert.throws(() => localRedisUrl(value), /overrides|invalid database paths/);
+  for (const value of [
+    'http://localhost:8086/path',
+    'http://user:pass@localhost:8086',
+    'http://localhost:8086?endpoint=other',
+    'ftp://localhost:8086',
+  ])
+    assert.throws(() => localPubSubEndpoint(value), /overrides|paths|loopback Pub/);
+});
+
+test('resume rejects changed queue/project or replacement names before destructive work', async (t) => {
+  for (const changed of ['foreign-prefix', 'current-queue', 'topic', 'subscription']) {
+    const envPath = await resetFixture(t);
+    await assert.rejects(
+      runDevelopmentReset({
+        envPath,
+        environment: {},
+        performReset: async () => {
+          throw new Error('Injected reset interruption');
+        },
+      }),
+      /Injected reset interruption/,
+    );
+    const disk = readResetEnvironment(envPath);
+    const values: Record<string, string> =
+      changed === 'foreign-prefix'
+        ? { RESET_PREVIOUS_QUEUE_PREFIX: 'another-project:epoch-old' }
+        : changed === 'current-queue'
+          ? { RESET_PREVIOUS_QUEUE_PREFIX: `waas:${disk.RESET_EPOCH}` }
+          : changed === 'topic'
+            ? { PUBSUB_TOPIC: 'foreign-topic' }
+            : { PUBSUB_SUBSCRIPTION: 'foreign-subscription' };
+    await writeFile(envPath, updateEnvContent(await readFile(envPath, 'utf8'), values));
+    let mutations = 0;
+    await assert.rejects(
+      runDevelopmentReset({
+        envPath,
+        environment: {},
+        resume: true,
+        performReset: async () => {
+          mutations++;
+        },
+      }),
+      /another project prefix|current reset namespace|does not match the reset epoch/,
+    );
+    assert.equal(mutations, 0);
+    assert.equal(readResetEnvironment(envPath).RESET_IN_PROGRESS, disk.RESET_IN_PROGRESS);
   }
 });
 

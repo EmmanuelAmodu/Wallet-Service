@@ -51,6 +51,10 @@ export class TransactionsService {
       await db.$queryRaw`SELECT id FROM wallets WHERE id=${walletId}::uuid FOR UPDATE`;
       const wallet = await db.wallet.findFirst({ where: { id: walletId } });
       if (!wallet) throw new NotFoundException('Wallet not found');
+      if (wallet.custody_role !== 'legacy')
+        throw new ConflictException(
+          'Custody wallets require an authorized sweep or withdrawal operation',
+        );
       if (wallet.status !== 'ready') throw new ConflictException('Wallet address is not ready');
       if (wallet.chain !== intent.chain)
         throw new BadRequestException('Wallet and transaction chain mismatch');

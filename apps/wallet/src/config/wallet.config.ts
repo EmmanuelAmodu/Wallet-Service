@@ -17,6 +17,9 @@ export const walletConfig = registerAs('wallet', () => {
   if (process.env.NODE_ENV === 'production' && ledgerApiKey === queueAuthKey)
     throw new Error('Use a distinct ledger API key in production');
   return {
+    domainId:
+      process.env.EXCHANGE_DOMAIN_ID ??
+      (process.env.NODE_ENV === 'production' ? required('EXCHANGE_DOMAIN_ID') : 'legacy-internal'),
     databaseUrl: required('WALLET_DATABASE_URL'),
     seedId: required('SIGNER_SEED_ID'),
     ethereumChainId,
@@ -36,4 +39,4 @@ export type WalletConfig = Pick<
   WalletSettings,
   'seedId' | 'ethereumChainId' | 'solanaGenesisHash'
 > &
-  Partial<Pick<WalletSettings, 'chainNetworks'>>;
+  Partial<Pick<WalletSettings, 'chainNetworks' | 'domainId'>>;

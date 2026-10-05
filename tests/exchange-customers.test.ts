@@ -21,9 +21,15 @@ import { migrate } from '../scripts/migrate.js';
 import { SafeErrorsFilter } from '../packages/shared/src/http/safe-errors.filter.js';
 import { LedgerPrismaService } from '../apps/ledger/src/prisma/prisma.service.js';
 import { ExchangeRegistryService } from '../apps/ledger/src/exchange/registry.service.js';
+import { CustodyService } from '../apps/wallet/src/custody/custody.service.js';
+import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
+import { custodySettings, isolatedDatabase, testMnemonic } from './helpers/custody-fixture.js';
 
 const enabled = !!process.env.TEST_DATABASE_URL;
-const db = enabled ? createDatabase(process.env.TEST_DATABASE_URL!) : undefined;
+let db: ReturnType<typeof createDatabase>;
+let fixture: Awaited<ReturnType<typeof isolatedDatabase>>;
+let custody: CustodyService;
+let signing: SigningCore;
 const ledgerDb =
   enabled && process.env.TEST_LEDGER_DATABASE_URL
     ? new LedgerPrismaService({ databaseUrl: process.env.TEST_LEDGER_DATABASE_URL })
@@ -41,9 +47,7 @@ const ledger = {
     balances: [],
   }),
 } as unknown as LedgerClient;
-const service = db
-  ? new ExchangeCustomersService(db as WalletPrismaService, settings, auth, ledger)
-  : undefined;
+let service: ExchangeCustomersService;
 const externalPrefix = `customers-${randomUUID()}`;
 
 function event<T extends ExchangeEvent['type']>(
@@ -78,89 +82,82 @@ async function register(customerId: string, ready = false) {
       status: 'ready',
     }),
   );
-  const hotWalletId = randomUUID();
-  const walletId = randomUUID();
-  const common = {
-    domain_id: settings.domainId,
-    reset_epoch: auth.resetEpoch,
-    chain: asset.chain,
-    network: asset.network,
-    registry_revision: 1,
-    request: {},
-    ledger_status: 'ready',
-    ledger_ack_revision: 1,
-  };
-  let management = await db!.exchangeWalletRegistry.findFirst({
-    where: {
-      domain_id: settings.domainId,
-      role: 'management',
-      account: 1,
+  const hot = await db.wallet.findFirstOrThrow({
+    where: { chain: asset.chain, custody_role: 'hot' },
+  });
+  const manager = await db.wallet.findFirstOrThrow({
+    where: { chain: asset.chain, custody_role: 'management' },
+  });
+  const owned = await db.$transaction((tx) =>
+    custody.allocateCustomer(tx, customerId, asset.chain, asset.network),
+  );
+  for (const wallet of [hot, manager, owned]) {
+    const derived = signing.derive({
       chain: asset.chain,
-      network: asset.network,
-    },
-  });
-  management ??= await db!.exchangeWalletRegistry.create({
-    data: {
-      ...common,
-      wallet_id: randomUUID(),
-      role: 'management',
-      account: 1,
-      address: `0x${randomUUID().replaceAll('-', '').padEnd(40, 'c')}`,
-    },
-  });
-  await db!.exchangeWalletRegistry.create({
-    data: {
-      ...common,
-      wallet_id: hotWalletId,
-      role: 'hot',
-      account: 0,
-      address: `0x${randomUUID().replaceAll('-', '').padEnd(40, 'a')}`,
-    },
-  });
-  await db!.exchangeWalletRegistry.create({
-    data: {
-      ...common,
-      wallet_id: walletId,
-      role: 'customer_deposit',
-      account: 10,
-      address: `0x${randomUUID().replaceAll('-', '').padEnd(40, 'b')}`,
-      customer_id: customerId,
-      hot_wallet_id: hotWalletId,
-      listener_status: ready ? 'ready' : 'pending',
-      listener_ack_revision: ready ? 1 : 0,
-      start_cursor: ready ? 'verified-block-1' : null,
-      ready,
-    },
-  });
+      seedId: wallet.seed_id,
+      account: wallet.account,
+    });
+    await db.$transaction(async (tx) => {
+      await tx.wallet.update({
+        where: { id: wallet.id },
+        data: { status: 'ready', address: derived.address.toLowerCase() },
+      });
+      await custody.markPublished(tx, wallet.id, 1);
+    });
+    await db.exchangeWalletRegistry.upsert({
+      where: { wallet_id: wallet.id },
+      update: {},
+      create: {
+        wallet_id: wallet.id,
+        domain_id: settings.domainId,
+        reset_epoch: auth.resetEpoch,
+        chain: asset.chain,
+        network: asset.network,
+        registry_revision: 1,
+        request: {},
+        ledger_status: 'ready',
+        ledger_ack_revision: 1,
+        role: wallet.custody_role,
+        account: wallet.account,
+        address: derived.address.toLowerCase(),
+        customer_id: wallet.customer_id,
+        hot_wallet_id: wallet.hot_wallet_id,
+        listener_status: ready && wallet.id === owned.id ? 'ready' : 'pending',
+        listener_ack_revision: ready && wallet.id === owned.id ? 1 : 0,
+        start_cursor: ready && wallet.id === owned.id ? 'verified-block-1' : null,
+        ready: ready && wallet.id === owned.id,
+      },
+    });
+  }
+  const hotWalletId = hot.id;
+  const walletId = owned.id;
+  const management = { wallet_id: manager.id };
   return { walletId, hotWalletId, managementWalletId: management.wallet_id };
 }
 
 before(async () => {
-  if (enabled) await migrate(process.env.TEST_DATABASE_URL!);
+  if (enabled) {
+    fixture = await isolatedDatabase(process.env.TEST_DATABASE_URL!);
+    db = createDatabase(fixture.url);
+    const config = custodySettings(settings.domainId);
+    custody = new CustodyService(db as WalletPrismaService, config, settings, auth);
+    signing = await SigningCore.create(testMnemonic, config.seedId, config.ethereumChainId);
+    service = new ExchangeCustomersService(
+      db as WalletPrismaService,
+      settings,
+      auth,
+      ledger,
+      custody,
+    );
+    await custody.bootstrap();
+  }
   if (ledgerDb) await migrate(process.env.TEST_LEDGER_DATABASE_URL!, 'ledger');
 });
 after(async () => {
   if (!enabled) return;
-  await db!.exchangeDepositProjection.deleteMany({ where: { domain_id: settings.domainId } });
-  await db!.exchangeDepositAddressAssignment.deleteMany({
-    where: { domain_id: settings.domainId },
-  });
-  await db!.exchangeCustomer.deleteMany({ where: { external_id: { startsWith: externalPrefix } } });
-  await db!.outbox.deleteMany({
-    where: { payload: { path: ['domainId'], equals: settings.domainId } },
-  });
-  const receipts = await db!.exchangeEventReceipt.findMany({
-    where: { payload: { path: ['domainId'], equals: settings.domainId } },
-    select: { event_id: true },
-  });
-  await db!.inbox.deleteMany({
-    where: { id: { in: receipts.map((row) => `wallet:${row.event_id}`) } },
-  });
-  await db!.exchangeEventReceipt.deleteMany({
-    where: { event_id: { in: receipts.map((row) => row.event_id) } },
-  });
-  await db!.exchangeWalletRegistry.deleteMany({ where: { domain_id: settings.domainId } });
-  await db!.$disconnect();
+  signing.close();
+  await db.$disconnect();
+  await fixture.drop();
   if (ledgerDb) {
     await ledgerDb.outbox.deleteMany({
       where: { payload: { path: ['domainId'], equals: settings.domainId } },
@@ -176,7 +173,13 @@ test(
   { skip: !enabled },
   async () => {
     const externalId = `${externalPrefix}-replicas`;
-    const replica = new ExchangeCustomersService(db as WalletPrismaService, settings, auth, ledger);
+    const replica = new ExchangeCustomersService(
+      db as WalletPrismaService,
+      settings,
+      auth,
+      ledger,
+      custody,
+    );
     const customers = await Promise.all(
       Array.from({ length: 8 }, (_, i) => (i % 2 ? service! : replica).create(externalId)),
     );
@@ -363,6 +366,7 @@ test(
       (await service!.assignment(customer.customerId, assignment.assignmentId)).state,
       'ready',
     );
+    await db.$transaction((tx) => custody.markPublished(tx, walletId, 2));
     await db!.exchangeWalletRegistry.update({
       where: { wallet_id: walletId },
       data: {

@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   ledgerActivitySchema,
@@ -17,6 +17,66 @@ export const QUEUES = {
   ledger: 'ledger-actions',
   sweep: 'sweep-actions',
 } as const;
+export const derivationBindingSchema = z
+  .object({
+    walletId: z.uuid(),
+    requestId: z.uuid(),
+    requestDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    domainId: z.string().min(1).max(128),
+    network: z.string().min(1).max(128),
+    role: z.enum(['legacy', 'hot', 'management', 'customer_deposit']),
+    path: z.string().min(1).max(256),
+    request: deriveSchema,
+  })
+  .strict();
+export type DerivationBinding = z.infer<typeof derivationBindingSchema>;
+
+export function derivationRequestDigest(input: Omit<DerivationBinding, 'requestDigest'>) {
+  return createHash('sha256')
+    .update(
+      canonical({
+        walletId: input.walletId,
+        requestId: input.requestId,
+        domainId: input.domainId,
+        network: input.network,
+        role: input.role,
+        path: input.path,
+        request: input.request,
+      }),
+    )
+    .digest('hex');
+}
+
+function validDerivationBinding(input: DerivationBinding) {
+  return (
+    input.requestDigest === derivationRequestDigest(input) &&
+    (input.role === 'hot'
+      ? input.request.account === 0
+      : input.role === 'management'
+        ? input.request.account >= 1 && input.request.account <= 9
+        : input.request.account >= 10)
+  );
+}
+
+export const walletDeriveSchema = derivationBindingSchema
+  .extend({
+    type: z.literal('wallet.derive'),
+  })
+  .strict()
+  .refine(validDerivationBinding, 'Invalid derivation identity or account role');
+export const walletDerivedSchema = derivationBindingSchema
+  .extend({
+    type: z.literal('wallet.derived'),
+    address: z.string().min(1).max(256),
+  })
+  .strict()
+  .refine(validDerivationBinding, 'Invalid derivation identity or account role');
+export const walletRejectedSchema = derivationBindingSchema
+  .extend({
+    type: z.literal('wallet.rejected'),
+  })
+  .strict()
+  .refine(validDerivationBinding, 'Invalid derivation identity or account role');
 export const broadcastSnapshotSchema = z
   .object({
     chain: chainSchema,
@@ -31,6 +91,31 @@ export const broadcastSnapshotSchema = z
   });
 const legacyMessageSchema = z.discriminatedUnion('type', [
   z
+    .object({
+      type: z.literal('custody.assignment.issue'),
+      commandId: z.uuid(),
+      domainId: z.string().min(1).max(128),
+      assignmentId: z.uuid(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('custody.bootstrap'),
+      commandId: z.uuid(),
+      domainId: z.string().min(1).max(128),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal('custody.management.create'),
+      commandId: z.uuid(),
+      domainId: z.string().min(1).max(128),
+      chain: z.enum(['ethereum', 'bitcoin', 'solana']),
+      network: z.string().min(1).max(128),
+      account: z.number().int().min(1).max(9),
+    })
+    .strict(),
+  z
     .object({ type: z.literal('exchange.discovery.received'), discovery: exchangeDiscoverySchema })
     .strict(),
   z
@@ -39,18 +124,9 @@ const legacyMessageSchema = z.discriminatedUnion('type', [
       discoveryId: z.string().regex(/^[a-f0-9]{64}$/),
     })
     .strict(),
-  z
-    .object({ type: z.literal('wallet.derive'), walletId: z.uuid(), request: deriveSchema })
-    .strict(),
-  z
-    .object({
-      type: z.literal('wallet.derived'),
-      walletId: z.uuid(),
-      address: z.string().min(1),
-      path: z.string(),
-    })
-    .strict(),
-  z.object({ type: z.literal('wallet.rejected'), walletId: z.uuid() }).strict(),
+  walletDeriveSchema,
+  walletDerivedSchema,
+  walletRejectedSchema,
   z.object({ type: z.literal('transaction.prepare'), transactionId: z.uuid() }).strict(),
   z
     .object({ type: z.literal('transaction.sign'), transactionId: z.uuid(), request: signSchema })

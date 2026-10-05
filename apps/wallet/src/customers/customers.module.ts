@@ -10,6 +10,7 @@ import { MessagingModule } from '../../../../packages/queue/src/messaging.module
 import { customerAuthConfig } from '../config/customer-auth.config.js';
 import { CustomerAuthGuard } from '../auth/customer-auth.guard.js';
 import { CustomerApiController } from './customer-api.controller.js';
+import { CustodyModule } from '../custody/custody.module.js';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { CustomerApiController } from './customer-api.controller.js';
     ConfigModule.forFeature(customerAuthConfig),
     MessagingModule,
     WalletPrismaModule,
+    CustodyModule,
     LedgerClientModule,
   ],
   controllers: [ExchangeCustomersController, CustomerApiController],

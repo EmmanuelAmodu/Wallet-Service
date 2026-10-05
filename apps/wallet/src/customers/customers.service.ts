@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ExchangeCustomer, ExchangeDepositAddressAssignment, Prisma } from '@prisma/client';
@@ -13,12 +14,13 @@ import {
   exchangeEventSchema,
 } from '../../../../packages/queue/src/exchange-contracts.js';
 import { canonical, MessageAuth, QUEUES } from '../../../../packages/queue/src/messages.js';
-import { enqueueFanOut } from '../../../../packages/queue/src/outbox.service.js';
+import { enqueue, enqueueFanOut } from '../../../../packages/queue/src/outbox.service.js';
 import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { Chain, chainSchema, isEvmChain } from '../../../../packages/shared/src/contracts.js';
 import { exchangeApiConfig, ExchangeApiSettings } from '../config/exchange-api.config.js';
 import { LedgerClient } from '../ledger/ledger-client.service.js';
 import { WalletPrismaService } from '../prisma/prisma.service.js';
+import { CustodyService } from '../custody/custody.service.js';
 
 type DepositEvent = Extract<ExchangeEvent, { type: `deposit.${string}` }>;
 type AssignmentView = {
@@ -39,6 +41,7 @@ export class ExchangeCustomersService {
     @Inject(exchangeApiConfig.KEY) private readonly settings: ExchangeApiSettings,
     @Inject(MessageAuth) private readonly auth: MessageAuth,
     @Inject(LedgerClient) private readonly ledger: LedgerClient,
+    @Optional() private readonly custody?: CustodyService,
   ) {}
 
   private domain() {
@@ -148,6 +151,7 @@ export class ExchangeCustomersService {
   }
 
   async assign(customerId: string, chain: Chain, network: string) {
+    this.custody?.validateNetwork(chain, network);
     return this.db.$transaction(async (db) => {
       await this.customer(db, customerId);
       await lock(db, `exchange-assignment:${customerId}:${chain}:${network}`);
@@ -166,8 +170,89 @@ export class ExchangeCustomersService {
           },
         });
       await this.bindRegisteredWallet(db, assignment);
+      if (this.custody)
+        await enqueue(
+          db,
+          QUEUES.wallet,
+          {
+            type: 'custody.assignment.issue',
+            commandId: assignment.assignment_id,
+            domainId: assignment.domain_id,
+            assignmentId: assignment.assignment_id,
+          },
+          `assignment-issue-${assignment.assignment_id}`,
+        );
       return this.assignmentView(db, assignment.assignment_id, customerId);
     });
+  }
+
+  async issueAssignment(assignmentId: string, domainId: string) {
+    if (!this.custody) throw new Error('Custody issuance service is unavailable');
+    if (domainId !== this.domain()) throw new ActionRejectedError('Custody domain mismatch');
+    return this.db.$transaction(async (db) => {
+      const assignment = await db.exchangeDepositAddressAssignment.findUnique({
+        where: { assignment_id: assignmentId },
+      });
+      if (
+        !assignment ||
+        assignment.domain_id !== domainId ||
+        assignment.reset_epoch !== this.auth.resetEpoch
+      )
+        throw new ActionRejectedError('Address assignment domain or epoch mismatch');
+      await lock(
+        db,
+        `exchange-assignment:${assignment.customer_id}:${assignment.chain}:${assignment.network}`,
+      );
+      await this.customer(db, assignment.customer_id);
+      const wallet = await this.custody!.allocateCustomer(
+        db,
+        assignment.customer_id,
+        chainSchema.parse(assignment.chain),
+        assignment.network,
+      );
+      if (assignment.wallet_id && assignment.wallet_id !== wallet.id)
+        throw new ActionRejectedError('Address assignment ownership is immutable');
+      await db.exchangeDepositAddressAssignment.update({
+        where: { assignment_id: assignmentId },
+        data: { wallet_id: wallet.id },
+      });
+    });
+  }
+
+  async resumeIssuance(domainId: string, commandId: string) {
+    if (domainId !== this.domain()) throw new ActionRejectedError('Custody domain mismatch');
+    let after: string | undefined;
+    let count = 0;
+    for (;;) {
+      const page = await this.db.$transaction(async (db) => {
+        const assignments = await db.exchangeDepositAddressAssignment.findMany({
+          where: {
+            domain_id: domainId,
+            reset_epoch: this.auth.resetEpoch,
+            wallet_id: null,
+            ...(after ? { assignment_id: { gt: after } } : {}),
+          },
+          orderBy: { assignment_id: 'asc' },
+          take: 100,
+        });
+        for (const assignment of assignments)
+          await enqueue(
+            db,
+            QUEUES.wallet,
+            {
+              type: 'custody.assignment.issue',
+              commandId,
+              domainId,
+              assignmentId: assignment.assignment_id,
+            },
+            `assignment-issue-${assignment.assignment_id}-${commandId}`,
+          );
+        return assignments;
+      });
+      count += page.length;
+      if (page.length < 100) return count;
+      after = page.at(-1)!.assignment_id;
+    }
   }
 
   async assignment(customerId: string, assignmentId: string) {
@@ -212,10 +297,24 @@ export class ExchangeCustomersService {
     if (registered.length > 1)
       throw new ConflictException('Customer wallet registry ownership is ambiguous');
     if (registered.length === 1)
-      await db.exchangeDepositAddressAssignment.update({
-        where: { assignment_id: assignment.assignment_id },
-        data: { wallet_id: registered[0].wallet_id },
-      });
+      if (
+        await db.wallet.findFirst({
+          where: {
+            id: registered[0].wallet_id,
+            custody_domain_id: assignment.domain_id,
+            reset_epoch: assignment.reset_epoch,
+            customer_id: assignment.customer_id,
+            custody_role: 'customer_deposit',
+            active: true,
+            chain: assignment.chain,
+            network: assignment.network,
+          },
+        })
+      )
+        await db.exchangeDepositAddressAssignment.update({
+          where: { assignment_id: assignment.assignment_id },
+          data: { wallet_id: registered[0].wallet_id },
+        });
   }
 
   private async assignmentView(
@@ -239,9 +338,27 @@ export class ExchangeCustomersService {
       return { ...base, state: 'waiting', reason: 'customer_ledger_not_ready' };
     if (!assignment.wallet_id)
       return { ...base, state: 'waiting', reason: 'custody_bootstrap_required' };
+    const owned = await db.wallet.findUnique({ where: { id: assignment.wallet_id } });
+    if (
+      !owned ||
+      !owned.active ||
+      owned.custody_domain_id !== assignment.domain_id ||
+      owned.reset_epoch !== assignment.reset_epoch ||
+      owned.customer_id !== customerId ||
+      owned.custody_role !== 'customer_deposit' ||
+      owned.account < 10 ||
+      owned.chain !== assignment.chain ||
+      owned.network !== assignment.network
+    )
+      throw new ConflictException('Deposit address has no authoritative custody ownership');
+    if (owned.status !== 'ready' || !owned.address || !owned.published_at)
+      return { ...base, state: 'waiting', reason: 'address_derivation_not_ready' };
+    if (!this.custody || !(await this.custody.publicationAllowed(db, owned)))
+      return { ...base, state: 'waiting', reason: 'custody_configuration_not_ready' };
     const identity = await db.exchangeWalletRegistry.findUnique({
       where: { wallet_id: assignment.wallet_id },
     });
+    if (!identity) return { ...base, state: 'waiting', reason: 'registry_subscription_not_ready' };
     const requiresManagement =
       isEvmChain(chainSchema.parse(assignment.chain)) || assignment.chain === 'solana';
     const managementCandidates = requiresManagement
@@ -272,6 +389,14 @@ export class ExchangeCustomersService {
     if (wallet?.hot_wallet_id !== identity?.hot_wallet_id)
       throw new ConflictException('Deposit wallet registry changed during address assignment');
     if (
+      wallet &&
+      (wallet.address !== owned.address ||
+        wallet.account !== owned.account ||
+        wallet.hot_wallet_id !== owned.hot_wallet_id ||
+        wallet.registry_revision !== owned.registry_revision)
+    )
+      throw new ConflictException('Published address differs from its authoritative wallet');
+    if (
       !wallet ||
       wallet.domain_id !== assignment.domain_id ||
       wallet.reset_epoch !== assignment.reset_epoch ||
@@ -298,6 +423,22 @@ export class ExchangeCustomersService {
       hot.ledger_ack_revision <= 0
     )
       return { ...base, state: 'waiting', reason: 'hot_wallet_not_ready' };
+    const ownedHot = await db.wallet.findUnique({ where: { id: hot.wallet_id } });
+    if (
+      !ownedHot ||
+      !ownedHot.active ||
+      ownedHot.custody_role !== 'hot' ||
+      ownedHot.account !== 0 ||
+      ownedHot.custody_domain_id !== owned.custody_domain_id ||
+      ownedHot.reset_epoch !== owned.reset_epoch ||
+      ownedHot.seed_id !== owned.seed_id ||
+      ownedHot.chain !== owned.chain ||
+      ownedHot.network !== owned.network ||
+      ownedHot.address !== hot.address ||
+      !ownedHot.published_at ||
+      ownedHot.registry_revision !== hot.registry_revision
+    )
+      return { ...base, state: 'waiting', reason: 'hot_wallet_not_ready' };
     if (requiresManagement) {
       const management =
         managementCandidates.length === 1
@@ -316,6 +457,23 @@ export class ExchangeCustomersService {
         management.customer_id ||
         management.ledger_status !== 'ready' ||
         management.ledger_ack_revision <= 0
+      )
+        return { ...base, state: 'waiting', reason: 'management_wallet_not_ready' };
+      const ownedManagement = await db.wallet.findUnique({ where: { id: management.wallet_id } });
+      if (
+        !ownedManagement ||
+        !ownedManagement.active ||
+        ownedManagement.custody_role !== 'management' ||
+        ownedManagement.account !== 1 ||
+        ownedManagement.management_purpose !== 'gas_fee' ||
+        ownedManagement.custody_domain_id !== owned.custody_domain_id ||
+        ownedManagement.reset_epoch !== owned.reset_epoch ||
+        ownedManagement.seed_id !== owned.seed_id ||
+        ownedManagement.chain !== owned.chain ||
+        ownedManagement.network !== owned.network ||
+        ownedManagement.address !== management.address ||
+        !ownedManagement.published_at ||
+        ownedManagement.registry_revision !== management.registry_revision
       )
         return { ...base, state: 'waiting', reason: 'management_wallet_not_ready' };
     }

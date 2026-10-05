@@ -21,6 +21,7 @@ import { LedgerAuthGuard } from '../apps/ledger/src/ledger-auth.guard.js';
 import { ledgerConfig } from '../apps/ledger/src/config/ledger.config.js';
 
 const settings: WalletSettings = {
+  domainId: 'legacy-internal',
   apiKey: 'a'.repeat(64),
   databaseUrl: 'postgresql://unused:unused@localhost/unused',
   host: '127.0.0.1',

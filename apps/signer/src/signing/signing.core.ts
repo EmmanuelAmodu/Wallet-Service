@@ -2,6 +2,8 @@ import { BadRequestException } from '@nestjs/common';
 import { initWasm, TW, WalletCore } from '@trustwallet/wallet-core';
 import { readFileSync, statSync } from 'node:fs';
 import { walletCoreMetadata } from '../../../../packages/chain/src/coin-metadata.js';
+import { ChainNetworkMap, networkFor } from '../../../../packages/chain/src/config.js';
+import { regtestWitnessAddress } from '../../../../packages/chain/src/bitcoin-address.js';
 import {
   DeriveRequest,
   BitcoinChain,
@@ -10,7 +12,10 @@ import {
   SignRequest,
   SolanaChain,
   signSchema,
+  deriveSchema,
+  isEvmChain,
 } from '../../../../packages/shared/src/contracts.js';
+export type SignerDerivationPolicy = { domainId: string; chainNetworks: ChainNetworkMap };
 
 function bytes(value: string): Uint8Array {
   const n = BigInt(value);
@@ -27,6 +32,7 @@ export class SigningCore {
     readonly seedId: string,
     readonly ethereumChainId: string,
     readonly ethereumChainIds: Record<string, string>,
+    readonly policy?: SignerDerivationPolicy,
   ) {}
 
   static async fromFile(
@@ -34,6 +40,7 @@ export class SigningCore {
     seedId: string,
     ethereumChainId: string,
     ethereumChainIds: Record<string, string> = { ethereum: ethereumChainId },
+    policy?: SignerDerivationPolicy,
   ) {
     const stat = statSync(path);
     if (!stat.isFile() || (stat.mode & 0o077) !== 0)
@@ -43,6 +50,7 @@ export class SigningCore {
       seedId,
       ethereumChainId,
       ethereumChainIds,
+      policy,
     );
   }
 
@@ -51,6 +59,7 @@ export class SigningCore {
     seedId: string,
     ethereumChainId: string,
     ethereumChainIds: Record<string, string> = { ethereum: ethereumChainId },
+    policy?: SignerDerivationPolicy,
   ) {
     const core = await initWasm();
     if (!core.Mnemonic.isValid(mnemonic)) throw new Error('Invalid BIP39 mnemonic');
@@ -60,6 +69,7 @@ export class SigningCore {
       seedId,
       ethereumChainId,
       ethereumChainIds,
+      policy,
     );
   }
 
@@ -75,14 +85,50 @@ export class SigningCore {
     request: DeriveRequest,
     fn: (key: ReturnType<typeof this.hd.getKey>, address: string, path: string) => T,
   ): T {
+    request = deriveSchema.parse(request);
     if (request.seedId !== this.seedId) throw new BadRequestException('Unknown seed ID');
-    const { coin, path } = walletCoreMetadata(this.core, request.chain, request.account);
+    const network = this.network(request.chain);
+    const { coin, path } = walletCoreMetadata(this.core, request.chain, request.account, network);
     const key = this.hd.getKey(coin, path);
     try {
+      if (request.chain === 'bitcoin' && network === 'regtest') {
+        const publicKey = key.getPublicKeySecp256k1(true);
+        try {
+          const address = this.core.AnyAddress.createBech32WithPublicKey(publicKey, coin, 'bcrt');
+          try {
+            return fn(key, regtestWitnessAddress(address.description()).address, path);
+          } finally {
+            address.delete();
+          }
+        } finally {
+          publicKey.delete();
+        }
+      }
       return fn(key, this.core.CoinTypeExt.deriveAddress(coin, key), path);
     } finally {
       key.delete();
     }
+  }
+
+  network(chain: DeriveRequest['chain']) {
+    if (this.policy)
+      return networkFor(chain, {
+        ethereumChainId: this.ethereumChainId,
+        solanaGenesisHash: 'devnet',
+        chainNetworks: this.policy.chainNetworks,
+      });
+    if (chain === 'bitcoin') return 'mainnet';
+    if (chain === 'solana') return 'devnet';
+    return this.ethereumChainIds[chain] ?? 'mainnet';
+  }
+
+  validateDerivation(domainId: string, network: string, path: string, request: DeriveRequest) {
+    if (!this.policy || domainId !== this.policy.domainId)
+      throw new BadRequestException('Custody domain is not configured for this signer');
+    if (network !== this.network(request.chain))
+      throw new BadRequestException('Derivation network is not configured for this signer');
+    if (path !== walletCoreMetadata(this.core, request.chain, request.account, network).path)
+      throw new BadRequestException('Derivation path does not match its account and network');
   }
 
   derive(request: DeriveRequest) {
@@ -95,8 +141,20 @@ export class SigningCore {
 
   sign(request: SignRequest): SignedTransaction {
     request = signSchema.parse(request);
-    return this.withKey(request.wallet, (key, address) => {
-      if (address !== request.wallet.address)
+    const network = this.network(request.wallet.chain);
+    if (
+      (request.wallet.network !== undefined && request.wallet.network !== network) ||
+      (request.wallet.chain === 'bitcoin' &&
+        network === 'regtest' &&
+        request.wallet.network === undefined)
+    )
+      throw new BadRequestException('Signing wallet network does not match signer configuration');
+    const { address: requestedAddress, network: _network, ...derivation } = request.wallet;
+    return this.withKey(derivation, (key, address) => {
+      if (
+        (isEvmChain(request.wallet.chain) ? address.toLowerCase() : address) !==
+        (isEvmChain(request.wallet.chain) ? requestedAddress.toLowerCase() : requestedAddress)
+      )
         throw new BadRequestException('Wallet address does not match derivation');
       const privateKey = key.data();
       try {
@@ -151,12 +209,15 @@ export class SigningCore {
     address: string,
     privateKey: Uint8Array,
   ): SignedTransaction {
+    const regtest = tx.chain === 'bitcoin' && this.network(tx.chain) === 'regtest';
+    const signingAddress = (value: string) =>
+      regtest ? regtestWitnessAddress(value).signingAddress : value;
     tx.outputs.forEach((output) => this.assertValidAddress(output.address, tx.chain));
     if (new Set(tx.utxos.map((utxo) => `${utxo.txid}:${utxo.vout}`)).size !== tx.utxos.length)
       throw new BadRequestException('Duplicate UTXO');
 
     const coin = this.coin(tx.chain);
-    const script = this.core.BitcoinScript.lockScriptForAddress(address, coin);
+    const script = this.core.BitcoinScript.lockScriptForAddress(signingAddress(address), coin);
     let ownScript: string;
     try {
       ownScript = Buffer.from(script.data()).toString('hex');
@@ -172,13 +233,13 @@ export class SigningCore {
       coinType: coin.value,
       hashType: this.core.BitcoinScript.hashTypeForCoin(coin),
       amount: tx.outputs[0].amount,
-      toAddress: tx.outputs[0].address,
-      changeAddress: address,
+      toAddress: signingAddress(tx.outputs[0].address),
+      changeAddress: signingAddress(address),
       byteFee: String(tx.satsPerVbyte),
       useMaxUtxo: true,
       extraOutputs: tx.outputs
         .slice(1)
-        .map((output) => ({ toAddress: output.address, amount: output.amount })),
+        .map((output) => ({ toAddress: signingAddress(output.address), amount: output.amount })),
       utxo: tx.utxos.map((utxo) => ({
         amount: utxo.amount,
         script: Buffer.from(utxo.script, 'hex'),
@@ -269,6 +330,10 @@ export class SigningCore {
   }
 
   private assertValidAddress(address: string, chain: DeriveRequest['chain']) {
+    if (chain === 'bitcoin' && this.network(chain) === 'regtest') {
+      regtestWitnessAddress(address);
+      return;
+    }
     if (!this.core.AnyAddress.isValid(address, this.coin(chain)))
       throw new BadRequestException('Invalid recipient address');
   }

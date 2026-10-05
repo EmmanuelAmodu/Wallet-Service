@@ -74,13 +74,17 @@ export function localRedisUrl(value: string) {
   const url = new URL(value);
   if (!['redis:', 'rediss:'].includes(url.protocol) || !isLoopback(url.hostname))
     throw new Error('Development reset only accepts loopback Redis URLs');
+  if (url.search || url.hash || !/^\/?[0-9]*$/.test(url.pathname))
+    throw new Error('Development reset refuses Redis URL overrides or invalid database paths');
   return value;
 }
 
 export function localPubSubEndpoint(value: string) {
   const url = new URL(value.includes('://') ? value : `http://${value}`);
-  if (!isLoopback(url.hostname))
+  if (!['http:', 'https:'].includes(url.protocol) || !isLoopback(url.hostname))
     throw new Error('Development reset only accepts a loopback Pub/Sub emulator');
+  if (url.username || url.password || url.search || url.hash || url.pathname !== '/')
+    throw new Error('Development reset refuses Pub/Sub endpoint overrides or paths');
   return url.toString();
 }
 
@@ -111,6 +115,12 @@ export function createDevelopmentResetPlan(input: {
   topicBase: string;
   subscriptionBase: string;
 }): DevelopmentResetPlan {
+  epochQueuePrefix(input.basePrefix, input.resetEpoch ?? 'validation');
+  if (
+    input.currentSubscription &&
+    !/^[a-zA-Z][a-zA-Z0-9_-]{0,254}$/.test(input.currentSubscription)
+  )
+    throw new Error('Invalid current Pub/Sub subscription name');
   if (input.resetInProgress && !input.resume)
     throw new Error('A development reset is in progress; resume it before starting services');
   if (input.resume && !input.resetInProgress)
@@ -127,6 +137,23 @@ export function createDevelopmentResetPlan(input: {
       !input.currentSubscription
     )
       throw new Error('Persisted reset plan is incomplete; refusing to guess recovery targets');
+    const retired = input.previousQueuePrefix;
+    if (retired !== input.basePrefix) {
+      const expectedPrefix = `${input.basePrefix}:`;
+      if (!retired.startsWith(expectedPrefix))
+        throw new Error('Persisted retired queue belongs to another project prefix');
+      const retiredEpoch = retired.slice(expectedPrefix.length);
+      epochQueuePrefix(input.basePrefix, retiredEpoch);
+      if (retiredEpoch === resetEpoch)
+        throw new Error('Persisted retired queue cannot be the current reset namespace');
+    }
+    if (
+      input.currentTopic !== epochResourceName(input.topicBase, resetEpoch) ||
+      input.currentSubscription !== epochResourceName(input.subscriptionBase, resetEpoch)
+    )
+      throw new Error('Persisted Pub/Sub replacement namespace does not match the reset epoch');
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,254}$/.test(input.previousSubscription))
+      throw new Error('Invalid persisted Pub/Sub subscription name');
     return {
       resetEpoch,
       retiredQueuePrefix: input.previousQueuePrefix,
@@ -258,20 +285,23 @@ async function writeEnvironment(envPath: string, values: Record<string, string>)
   }
 }
 
-function resetConfiguration(environment: NodeJS.ProcessEnv) {
+export function developmentResetConfiguration(environment: NodeJS.ProcessEnv) {
   if (environment.NODE_ENV === 'production')
     throw new Error('Development reset is disabled in production');
   const urls = databaseTargets.map((target) => {
-    const url =
-      environment[target.envName] ??
-      (target.name === 'ledger'
-        ? 'postgresql://ledger:ledger_local_only@127.0.0.1:5434/ledger'
-        : target.name === 'activity'
-          ? 'postgresql://activity:activity_local_only@127.0.0.1:5435/activity'
-          : undefined);
+    const url = environment[target.envName];
     if (!url) throw new Error(`Missing configuration: ${target.envName}`);
     return { ...target, url, database: localDatabaseName(url) };
   });
+  const identities = new Set<string>();
+  for (const target of urls) {
+    const url = new URL(target.url);
+    // Loopback aliases can refer to the same server: ownership must still be distinct.
+    const identity = `${url.port || '5432'}:${target.database}`;
+    if (identities.has(identity))
+      throw new Error('Development reset requires six distinct owned service databases');
+    identities.add(identity);
+  }
   if (!environment.REDIS_URL) throw new Error('Missing configuration: REDIS_URL');
   return {
     urls,
@@ -279,6 +309,37 @@ function resetConfiguration(environment: NodeJS.ProcessEnv) {
     apiEndpoint: localPubSubEndpoint(environment.PUBSUB_API_ENDPOINT ?? '127.0.0.1:8086'),
     projectId: environment.PUBSUB_PROJECT_ID ?? 'wallet-local',
   };
+}
+
+export type DevelopmentResetStep =
+  | 'pubsub-created'
+  | `database:${(typeof databaseTargets)[number]['name']}`
+  | 'queues-retired'
+  | 'subscription-retired';
+
+// The CLI and isolated rehearsal execute exactly the same destructive sequence.
+// A failing hook retains the durable epoch/fence so the same operation can resume.
+export async function performDevelopmentReset(
+  environment: NodeJS.ProcessEnv,
+  plan: DevelopmentResetPlan,
+  afterStep?: (step: DevelopmentResetStep) => Promise<void> | void,
+) {
+  const { urls, redisUrl, apiEndpoint, projectId } = developmentResetConfiguration(environment);
+  await ensurePubSubNamespace(projectId, apiEndpoint, plan.topic, plan.subscription);
+  await afterStep?.('pubsub-created');
+  for (const target of urls) {
+    resetDatabase(target.name, target.envName, target.config, target.url, environment);
+    await afterStep?.(`database:${target.name}`);
+  }
+  await resetQueues(redisUrl, plan.retiredQueuePrefix);
+  await afterStep?.('queues-retired');
+  await retirePubSubSubscription(
+    projectId,
+    apiEndpoint,
+    plan.previousSubscription,
+    plan.subscription,
+  );
+  await afterStep?.('subscription-retired');
 }
 
 function persistedPlan(environment: NodeJS.ProcessEnv, resume: boolean) {
@@ -359,7 +420,7 @@ export async function runDevelopmentReset(options: {
 }
 
 function printPreview(environment: NodeJS.ProcessEnv, plan: DevelopmentResetPlan) {
-  const { urls } = resetConfiguration(environment);
+  const { urls } = developmentResetConfiguration(environment);
   const { resetEpoch, retiredQueuePrefix, previousSubscription, topic, subscription } = plan;
   console.log('Development reset preview:');
   console.log(`- Databases: ${urls.map(({ name, database }) => `${name}/${database}`).join(', ')}`);
@@ -410,24 +471,7 @@ async function main() {
     envPath,
     resume,
     prepare: printPreview,
-    performReset: async (environment, currentPlan) => {
-      const { urls, redisUrl, apiEndpoint, projectId } = resetConfiguration(environment);
-      await ensurePubSubNamespace(
-        projectId,
-        apiEndpoint,
-        currentPlan.topic,
-        currentPlan.subscription,
-      );
-      for (const target of urls)
-        resetDatabase(target.name, target.envName, target.config, target.url, environment);
-      await resetQueues(redisUrl, currentPlan.retiredQueuePrefix);
-      await retirePubSubSubscription(
-        projectId,
-        apiEndpoint,
-        currentPlan.previousSubscription,
-        currentPlan.subscription,
-      );
-    },
+    performReset: performDevelopmentReset,
   });
   const { resetEpoch, topic } = plan;
   console.log(`Reset complete. RESET_EPOCH=${resetEpoch}`);

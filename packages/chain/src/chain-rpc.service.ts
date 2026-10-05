@@ -16,6 +16,7 @@ import {
 } from '../../shared/src/contracts.js';
 
 import { ChainNetworkMap, ChainNetworkSettings, networkConfig } from './config.js';
+import { regtestWitnessAddress } from './bitcoin-address.js';
 
 const hex = z.string().regex(/^0x[0-9a-fA-F]+$/);
 type EvmTransfer = Extract<Transfer, { chain: EvmChain }>;
@@ -289,6 +290,14 @@ export class ChainRpcService {
     address: string,
     transfer: BitcoinTransfer,
   ): Promise<BitcoinTransaction> {
+    if (
+      transfer.chain === 'bitcoin' &&
+      this.networkSettings(transfer.chain).network === 'regtest'
+    ) {
+      if (regtestWitnessAddress(address).address !== address)
+        throw new BadRequestException('Bitcoin source address must be canonical');
+      for (const output of transfer.outputs) regtestWitnessAddress(output.address);
+    }
     if (new Set(transfer.utxos.map((u) => `${u.txid}:${u.vout}`)).size !== transfer.utxos.length)
       throw new BadRequestException('Duplicate UTXO');
     const utxos: BitcoinTransaction['utxos'] = [];

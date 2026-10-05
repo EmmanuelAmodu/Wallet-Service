@@ -13,6 +13,13 @@ enum WalletStatus {
   rejected
 }
 
+enum WalletCustodyRole {
+  legacy
+  hot
+  management
+  customer_deposit
+}
+
 enum WalletTransactionStatus {
   preparing
   signing
@@ -27,23 +34,126 @@ enum WalletTransactionStatus {
 }
 
 model Wallet {
-  id           String        @id @db.Uuid
-  external_id  String
-  chain        String
-  network      String
-  seed_id      String
-  account      Int           @default(autoincrement())
-  path         String
-  address      String?
-  status       WalletStatus  @default(deriving)
-  last_error   String?
-  created_at   DateTime      @default(now()) @db.Timestamptz
-  transactions Transaction[]
+  id                        String                   @id @db.Uuid
+  external_id               String
+  chain                     String
+  network                   String
+  seed_id                   String
+  account                   Int                      @default(autoincrement())
+  path                      String
+  address                   String?
+  status                    WalletStatus             @default(deriving)
+  last_error                String?
+  created_at                DateTime                 @default(now()) @db.Timestamptz
+  transactions              Transaction[]
+  custody_domain_id         String?
+  reset_epoch               String?
+  custody_role              WalletCustodyRole        @default(legacy)
+  customer_id               String?                  @db.Uuid
+  hot_wallet_id             String?                  @db.Uuid
+  management_purpose        String?
+  active                    Boolean                  @default(true)
+  configuration_revision    Int                      @default(0)
+  registry_revision         Int                      @default(0)
+  published_at              DateTime?                @db.Timestamptz
+  derivation_request_id     String?                  @unique @db.Uuid
+  derivation_request_digest String?
+  custody_domain            CustodyDomain?           @relation(fields: [custody_domain_id, reset_epoch, seed_id], references: [id, reset_epoch, seed_id], onDelete: NoAction, onUpdate: NoAction)
+  custody_network           CustodyNetwork?          @relation(fields: [custody_domain_id, chain, network], references: [domain_id, chain, network], onDelete: NoAction, onUpdate: NoAction)
+  customer                  ExchangeCustomer?        @relation(fields: [customer_id, custody_domain_id, reset_epoch], references: [customer_id, domain_id, reset_epoch], onDelete: NoAction, onUpdate: NoAction)
+  hot_wallet                Wallet?                  @relation("CustodyHotWallet", fields: [hot_wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  customer_wallets          Wallet[]                 @relation("CustodyHotWallet")
+  management_policy         ManagementWalletPurpose? @relation(fields: [custody_domain_id, chain, network, account, management_purpose], references: [domain_id, chain, network, account, purpose], onDelete: NoAction, onUpdate: NoAction)
 
   @@unique([external_id, chain, network])
   @@unique([seed_id, chain, account])
   @@unique([chain, network, address])
+  @@unique([custody_domain_id, chain, network], where: raw("\"custody_role\" = 'hot' AND \"active\""), map: "one_active_hot_per_custody_network")
+  @@unique([custody_domain_id, customer_id, chain, network], where: raw("\"custody_role\" = 'customer_deposit' AND \"active\""), map: "one_active_customer_deposit_wallet")
+  @@index([custody_domain_id, custody_role, active])
   @@map("wallets")
+}
+
+model CustodyDomain {
+  id                     String           @id
+  seed_id                String
+  reset_epoch            String
+  policy_version         String
+  configuration_revision Int              @default(1)
+  status                 String           @default("active")
+  created_at             DateTime         @default(now()) @db.Timestamptz
+  wallets                Wallet[]
+  networks               CustodyNetwork[]
+
+  @@unique([id, reset_epoch, seed_id])
+  @@map("custody_domains")
+}
+
+model CustodyNetwork {
+  domain_id              String
+  chain                  String
+  network                String
+  native_asset_id        String
+  configuration_revision Int                       @default(1)
+  enabled                Boolean                   @default(true)
+  domain                 CustodyDomain             @relation(fields: [domain_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  wallets                Wallet[]
+  assets                 AssetConfiguration[]
+  management_purposes    ManagementWalletPurpose[]
+  created_at             DateTime                  @default(now()) @db.Timestamptz
+
+  @@id([domain_id, chain, network])
+  @@unique([domain_id, chain])
+  @@map("custody_networks")
+}
+
+model ManagementWalletPurpose {
+  domain_id                  String
+  chain                      String
+  network                    String
+  account                    Int
+  purpose                    String
+  permitted_actions          Json
+  maximum_operation_units    String
+  maximum_customer_24h_units String
+  maximum_domain_24h_units   String
+  policy_version             String
+  configuration_revision     Int            @default(1)
+  custody_network            CustodyNetwork @relation(fields: [domain_id, chain, network], references: [domain_id, chain, network], onDelete: NoAction, onUpdate: NoAction)
+  wallets                    Wallet[]
+  created_at                 DateTime       @default(now()) @db.Timestamptz
+
+  @@id([domain_id, chain, network, account])
+  @@unique([domain_id, chain, network, account, purpose])
+  @@map("management_wallet_purposes")
+}
+
+model AssetConfiguration {
+  domain_id              String
+  chain                  String
+  network                String
+  asset_id               String
+  standard               String
+  decimals               Int
+  symbol                 String
+  name                   String
+  contract_address       String?
+  token_program          String?
+  mint                   String?
+  observation_enabled    Boolean        @default(false)
+  credit_enabled         Boolean        @default(false)
+  sweep_enabled          Boolean        @default(false)
+  withdrawal_enabled     Boolean        @default(false)
+  minimum_credit_units   String
+  minimum_sweep_units    String
+  maximum_fee_units      String
+  policy_version         String
+  configuration_revision Int            @default(1)
+  custody_network        CustodyNetwork @relation(fields: [domain_id, chain, network], references: [domain_id, chain, network], onDelete: NoAction, onUpdate: NoAction)
+  created_at             DateTime       @default(now()) @db.Timestamptz
+
+  @@id([domain_id, chain, network, asset_id])
+  @@map("asset_configurations")
 }
 
 model Transaction {
@@ -158,7 +268,9 @@ model ExchangeCustomer {
   updated_at               DateTime                           @default(now()) @updatedAt @db.Timestamptz
   assignments              ExchangeDepositAddressAssignment[]
   deposits                 ExchangeDepositProjection[]
+  custody_wallets          Wallet[]
 
+  @@unique([customer_id, domain_id, reset_epoch])
   @@map("exchange_customers")
 }
 

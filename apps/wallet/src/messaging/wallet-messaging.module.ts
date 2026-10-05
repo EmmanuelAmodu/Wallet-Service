@@ -5,8 +5,17 @@ import { WalletPrismaModule } from '../prisma/prisma.module.js';
 import { WalletProcessor } from './wallet.processor.js';
 import { WalletWorkflowService } from './wallet-workflow.service.js';
 import { ExchangeMessagingModule } from '../exchange-messaging/exchange-messaging.module.js';
+import { CustodyModule } from '../custody/custody.module.js';
+import { CustomersModule } from '../customers/customers.module.js';
 @Module({
-  imports: [MessagingModule, WalletPrismaModule, ChainModule, ExchangeMessagingModule],
+  imports: [
+    MessagingModule,
+    WalletPrismaModule,
+    ChainModule,
+    ExchangeMessagingModule,
+    CustodyModule,
+    CustomersModule,
+  ],
   providers: [WalletProcessor, WalletWorkflowService],
 })
 export class WalletMessagingModule {}

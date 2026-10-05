@@ -83,6 +83,7 @@ services:
       <<: [*queue, *chain]
       SIGNER_SEED_ID: ${SIGNER_SEED_ID:-local-v1}
       SIGNER_SEED_FILE: /run/secrets/custody-seed
+      EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
     secrets: [custody-seed]
     depends_on:
       redis: { condition: service_healthy }

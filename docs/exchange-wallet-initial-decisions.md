@@ -6,13 +6,13 @@ Scope: development policy; User and Sweep service boundaries supersede the origi
 
 Related: [TODO checklist](exchange-wallet-todo.md), [implementation plan](exchange-wallet-implementation-plan.md)
 
-Question 1 reflects the user's confirmed single-exchange requirement. Questions 2–7 record recommended implementation defaults so development can proceed. These settings belong in versioned configuration and tests; production gets a separately configured profile.
+Question 1 reflects the user's confirmed single-exchange requirement. Questions 2–7 record the initial development profile. Phase 1 now persists its custody identities, native asset metadata, and management caps; execution policies still require the later phase gates. Production gets a separately configured profile.
 
 ## 1. Custody and customer identity
 
 Use one exchange per deployment. Runtime tenancy has been removed from schemas, DTOs, queue contracts, authentication context, and ownership scopes. Historical migration SQL remains immutable; additive Wallet/Ledger migrations drop the old columns.
 
-- User service owns email/password registration in its own database. Wallet customer UUID and external ID equal the User UUID, provisioned by a secret-free registration event. Direct backend customer creation is removed. Login/session/email-verification features remain future work.
+- User service owns email/password registration and access-token issuance in its own database. Wallet customer UUID and external ID equal the User UUID, provisioned by a secret-free registration event. Wallet verifies User's RS256 tokens locally and derives ownership from the subject. Direct backend customer creation is removed. Refresh sessions, revocation, and email verification remain future work.
 - Authenticate the exchange backend; its API credentials do not create separate tenants. Keep customer ownership validation and separate internal/admin permissions.
 - Scope request idempotency by customer and operation type; include the immutable request digest.
 - Retain a technical custody domain/generation for seed/network configuration and rotation. It does not represent a tenant.
@@ -20,35 +20,37 @@ Use one exchange per deployment. Runtime tenancy has been removed from schemas, 
 
 ### Derivation account convention
 
-`Wallet.account` is the hardened BIP-44/BIP-84 account component, not the final address index. Use account 0 for the domain's hot wallet per enabled chain/network; reserve 1–9 for management; allocate customer deposit wallets from 10 upward. The current one-network-per-chain and `(seed_id, chain, account)` uniqueness constraints remain in force.
+`Wallet.account` is the hardened BIP-44/BIP-84 account component, not the final address index. Use account 0 for the domain's hot wallet per enabled chain/network; reserve 1–9 for management; allocate customer deposit wallets from 10 upward. The one-network-per-chain and `(seed_id, chain, account)` uniqueness constraints remain in force. The shared PostgreSQL sequence starts at 10 across chains, does not cycle, and fails explicitly at account `2147483647`. Rolled-back transactions can leave safe gaps; accounts are never recycled.
 
-| Chain family | Derivation path |
-| --- | --- |
-| EVM | `m/44'/60'/{account}'/0/0` |
-| Bitcoin | `m/84'/0'/{account}'/0/0` |
-| Solana | `m/44'/501'/{account}'` |
+| Chain family    | Derivation path            |
+| --------------- | -------------------------- |
+| EVM             | `m/44'/60'/{account}'/0/0` |
+| Bitcoin regtest | `m/84'/1'/{account}'/0/0`  |
+| Solana          | `m/44'/501'/{account}'`    |
 
-Account 1 is reserved for native gas/fee funding on EVM and Solana. It funds only approved same-domain customer-wallet fee shortfalls and account setup; it does not hold customer principal or serve as the hot withdrawal source. Bitcoin account 1 remains unallocated because Bitcoin transaction fees are paid from the transaction inputs. Accounts 2–9 remain unused until an explicit purpose and policy are approved. Management purpose enforcement and customer allocation boundaries are implemented with the P1 custody model, not by this decision record alone.
+Account 1 is reserved for native gas/fee funding on EVM and Solana. It funds only approved same-domain customer-wallet fee shortfalls and account setup; it does not hold customer principal or serve as the hot withdrawal source. Bitcoin account 1 remains unallocated because Bitcoin transaction fees are paid from the transaction inputs. Accounts 2–9 remain unused until an explicit purpose and policy are approved. The Phase 1 custody model enforces role/account boundaries and stores approved purposes and caps. Atomic spending-budget enforcement and funding execution remain Phase 4 work. Bitcoin mainnet's coin component remains `0` outside this initial regtest profile.
+
+Wallet owns `CustodyDomain`, `CustodyNetwork`, `ManagementWalletPurpose`, and `AssetConfiguration`. Composite constraints bind wallet ownership to the domain, epoch, seed, network, customer, and hot wallet. Partial uniqueness permits one active hot0 per configured network and one active deposit wallet per customer/network. Bootstrap is idempotent: it creates three hot0 wallets plus Ethereum/Solana management1 and commits each immutable, digest-bound derivation request to the Signer outbox in the same transaction. Repeating bootstrap or customer issuance preserves the allocated identities.
 
 ## 2. Initial networks and seeds
 
-| Chain | Initial development network | Identity |
-| --- | --- | --- |
-| Ethereum | Sepolia | Chain ID `11155111` |
-| Bitcoin | Local Bitcoin Core regtest | RPC network `regtest`; network-aware regtest addresses |
-| Solana | Devnet | Genesis hash `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`, verified through RPC |
+| Chain    | Initial development network | Identity                                                                          |
+| -------- | --------------------------- | --------------------------------------------------------------------------------- |
+| Ethereum | Sepolia                     | Chain ID `11155111`                                                               |
+| Bitcoin  | Local Bitcoin Core regtest  | RPC network `regtest`; network-aware regtest addresses                            |
+| Solana   | Devnet                      | Genesis hash `EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`, verified through RPC |
 
 Use one network per chain per deployment. The same seed can derive different chains' hot0 wallets without changing the current `(seed_id, chain, account)` uniqueness rule. Do not add multiple networks of the same chain under that seed in this delivery. Development and production use separate seeds and configurations.
 
 ### Development profile recorded for P0-01
 
-- Custody is single-exchange. `EXCHANGE_DOMAIN_ID` is the runtime technical configuration/rotation boundary; its complete custody generation/seed model remains P1 work. It does not represent an additional owner.
+- Custody is single-exchange. `EXCHANGE_DOMAIN_ID` identifies the persisted technical custody generation. Its seed, reset epoch, policy version, and configuration revision are immutable; changed configuration requires a new generation or a guarded development reset. It does not represent an additional owner.
 - The configured local seed identifier is `local-v1`; the seed material remains in the local secret file and is not copied into service databases or this document.
 - Ethereum is configured for Sepolia (`11155111`). Solana is configured for Devnet (`EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`). RPC URLs are currently unset in the local environment, so no live provider identity check has been performed.
-- Bitcoin's intended development network is regtest, but the current application default is mainnet and no Bitcoin RPC is configured. Do not enable Bitcoin transfers until P1-05 implements and tests regtest derivation, address handling, signing, and RPC identity verification.
+- Bitcoin regtest derivation, `bcrt` address handling, signing, and RPC identity verification are implemented and tested. The generic chain default remains mainnet: set `CHAIN_NETWORKS={"bitcoin":{"network":"regtest","rpcNetwork":"regtest"}}` consistently for the services. Custody bootstrap rejects a conflicting configured network. No Bitcoin RPC is configured in the current local environment, so live regtest acceptance remains pending.
 - The chain RPC service checks the configured EVM chain ID, Bitcoin network name, or Solana genesis hash before chain observations and transaction preparation. Automated tests cover matching and mismatching identities; live smoke checks remain pending configured RPC endpoints.
 
-Bitcoin currently enforces mainnet configuration and Wallet Core's default coin/address metadata. Implement regtest-aware derivation/address encoding, validation, signing, and RPC identity checks before enabling Bitcoin development transfers. Changing only the RPC URL is insufficient. Keep the adapter disabled until its tests pass; the native milestone still includes Bitcoin.
+Signer derives keys only for the configured custody domain, seed, network, role, account, and canonical path. Wallet accepts a derivation result only when its immutable request ID and digest match the authoritative wallet; delayed, altered, or stale results cannot register an address. Regtest uses coin component `1` and `bcrt` address encoding; signing checks network-correct input ownership and outputs. Changing only an RPC URL is insufficient. Live discovery/backfill, node identity, and the Phase 4/5 financial lifecycle gates remain required before enabling Bitcoin transfers.
 
 Use deterministic local-chain/mocked-RPC fixtures for automated tests, with Sepolia/Devnet smoke runs. [Bitcoin regtest](https://developer.bitcoin.org/examples/testing.html#regtest-mode) allows controlled block creation and reorg scenarios.
 
@@ -62,17 +64,17 @@ Do not credit unsupported tokens as available customer balances merely because t
 
 The canonical identity is the tuple `(chain, network, asset_id)`. `chain` is the canonical shared chain name (resolve aliases before persistence); `network` is the configured chain identity (EVM chain ID, Bitcoin RPC network, or Solana genesis hash). Display symbols and names are never identity.
 
-| Standard | Canonical `asset_id` | Identity rules |
-| --- | --- | --- |
-| Native | `token:<chain>:native` | Exactly one native asset per canonical chain/network. |
-| ERC-20 | `token:<evm-chain>:erc20:<contract>` | Contract is a 20-byte `0x` address, lowercased; chain and network are part of the tuple. |
-| SPL | `token:solana:spl:<token-program>:<mint>` | Program ID and mint are exact case-sensitive Base58 identities; Solana network/genesis hash is part of the tuple. |
+| Standard | Canonical `asset_id`                      | Identity rules                                                                                                    |
+| -------- | ----------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Native   | `token:<chain>:native`                    | Exactly one native asset per canonical chain/network.                                                             |
+| ERC-20   | `token:<evm-chain>:erc20:<contract>`      | Contract is a 20-byte `0x` address, lowercased; chain and network are part of the tuple.                          |
+| SPL      | `token:solana:spl:<token-program>:<mint>` | Program ID and mint are exact case-sensitive Base58 identities; Solana network/genesis hash is part of the tuple. |
 
 Each versioned allowlist record pins `chain`, `network`, `asset_id`, standard, decimals (integer 0–255), display symbol/name, contract or token-program-plus-mint identity, lifecycle capabilities, and policy version. Decimals are verified from the contract/mint against the pinned value; a mismatch or unrecognized identity is quarantined, not silently adopted. The key does not include decimals or display metadata. Existing provider token strings are discovery data only and must be resolved to an exact allowlist record before financial credit.
 
-Native metadata is fixed for the initial profile: Sepolia ETH uses 18 decimals, Bitcoin uses 8 decimal places (satoshis; regtest adapter remains disabled until P1-05), and Devnet SOL uses 9 decimal places (lamports). Tokens have no defaults and must be explicitly configured per network.
+Native metadata is pinned in `AssetConfiguration` for the initial profile: Sepolia ETH uses 18 decimals, regtest Bitcoin uses 8 decimal places (satoshis), and Devnet SOL uses 9 decimal places (lamports). Tokens have no defaults and must be explicitly configured per network.
 
-An asset is financially enabled only when its adapter is certified for all four capabilities: exact transfer observation/finality, deposit credit, sweep, and withdrawal. Partial capability may be used for discovery/reconciliation only and cannot create an available customer balance. Native EVM/Solana signing and RPC primitives exist, but their exchange lifecycle remains subject to phase 3–5 certification; Bitcoin regtest is not enabled. ERC-20 and SPL adapters are not implemented and remain phase 6 work.
+An asset is financially enabled for live customers only when its adapter is certified for all four capabilities: exact transfer observation/finality, deposit credit, sweep, and withdrawal. Partial capability is not approval to create live available customer balances. The development bootstrap records native observation/credit capabilities separately; sweep and withdrawal capabilities remain disabled. Controlled tests can exercise completed deposit accounting without declaring deployment ready. All three native chains still require live provider/RPC acceptance and phase 3–5 lifecycle certification. ERC-20 and SPL adapters are not implemented and remain phase 6 work.
 
 The initial ERC-20 allowlist accepts conventional exact-value transfer semantics only. Fee-on-transfer, rebasing, frozen/blocked, delegated, or otherwise nonstandard behavior requires separate explicit certification. Initial SPL support targets the classic SPL Token Program; Token-2022 and each extension require separate certification. ERC-721/1155, NFTs, unknown mints/contracts, and ambiguous legacy identifiers are unsupported.
 
@@ -84,11 +86,11 @@ This section defines `exchange-financial-v1`, the normative initial development 
 
 ### Finality and credit
 
-| Chain | Spendable deposit credit and outgoing settlement policy |
-| --- | --- |
+| Chain            | Spendable deposit credit and outgoing settlement policy                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Ethereum/Sepolia | Successful receipt in a canonical block at or below the RPC `finalized` head; verify block identity. Replace the current 12-confirmation shortcut for this exchange flow. |
-| Bitcoin/regtest | 6 canonical confirmations. Apply coinbase maturity checks in addition to confirmation policy before using inputs. |
-| Solana/Devnet | Successful transaction at `finalized` commitment, with configured genesis identity. |
+| Bitcoin/regtest  | 6 canonical confirmations. Apply coinbase maturity checks in addition to confirmation policy before using inputs.                                                         |
+| Solana/Devnet    | Successful transaction at `finalized` commitment, with configured genesis identity.                                                                                       |
 
 Ethereum exposes a [`finalized` block tag](https://ethereum.org/developers/docs/apis/json-rpc/#the-block-parameter); Solana defines [`finalized` commitment](https://solana.com/docs/rpc#configuring-state-commitment). Treat unavailable/stalled finality as pending, never as a reason to fall back silently to a weaker threshold. Tests may use explicit local overrides; defaults remain unchanged.
 
@@ -97,10 +99,10 @@ Credit every positive finalized transfer of an enabled asset: minimum credit is 
 ### Native sweep economics
 
 | Asset | Minimum net amount transferred to hot |
-| --- | --- |
-| ETH | `1000000000000000` wei = 0.001 ETH |
-| BTC | `10000` satoshis = 0.0001 BTC |
-| SOL | `1000000` lamports = 0.001 SOL |
+| ----- | ------------------------------------- |
+| ETH   | `1000000000000000` wei = 0.001 ETH    |
+| BTC   | `10000` satoshis = 0.0001 BTC         |
+| SOL   | `1000000` lamports = 0.001 SOL        |
 
 For native sweeps, require the conservative capped network-fee estimate to be **at most 1% of the net sweep principal**. Enforce both the minimum above and actual chain validity/dust rules. Coalesce deposits first; otherwise record `deferred_dust` and retry when balance/fee conditions change. Do not round or discard the liability. Fee/rent reserves are separate from the amount transferred.
 
@@ -110,11 +112,11 @@ For enabled tokens, the initial minimum is 1 token base unit, subject to native 
 
 These are hard upper bounds, not fixed prices. Estimate from RPC, apply capped headroom, and defer/reject work that cannot execute within policy.
 
-| Asset/network | Initial hard bounds |
-| --- | --- |
-| Sepolia ETH | `maxFeePerGas` <=100 gwei; priority fee <=2 gwei and <=max fee; maximum transaction fee budget 0.005 ETH (`5000000000000000` wei) |
-| Regtest BTC | Explicit fallback 2 sat/vbyte when fee estimation lacks data; maximum 50 sat/vbyte and total fee 10,000 satoshis |
-| Devnet SOL | Total transaction fee <=100,000 lamports; rent funding <=10,000,000 lamports per operation |
+| Asset/network | Initial hard bounds                                                                                                               |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| Sepolia ETH   | `maxFeePerGas` <=100 gwei; priority fee <=2 gwei and <=max fee; maximum transaction fee budget 0.005 ETH (`5000000000000000` wei) |
+| Regtest BTC   | Explicit fallback 2 sat/vbyte when fee estimation lacks data; maximum 50 sat/vbyte and total fee 10,000 satoshis                  |
+| Devnet SOL    | Total transaction fee <=100,000 lamports; rent funding <=10,000,000 lamports per operation                                        |
 
 For EVM use the gas limit multiplied by the capped max fee as the reservation bound. For Bitcoin use a conservative signed-size bound and verify actual signed size/fee before broadcasting. For Solana include base and priority fees; query [rent requirements for the actual account size](https://solana.com/docs/rpc/http/getminimumbalanceforrentexemption), rather than hardcoding an account rent amount.
 
@@ -174,6 +176,8 @@ Account **1** is the gas/fee wallet on enabled EVM and Solana chains where fundi
 - Allow only registered same-domain deposit wallets and approved same-domain account creation/fee sponsorship. Enforce purpose, recipient, fee, and budget bounds in orchestration and trusted signer policy.
 - Hot-to-management replenishment is a separate authorized treasury operation, not automatic replenishment that bypasses the limits above.
 
+`ManagementWalletPurpose` persists these account 1 purposes and caps under `exchange-financial-v1`; the hardcoded initial custody profile matches the amounts above. This metadata does not yet reserve budgets or authorize spending. Phase 4 must enforce the rolling limits and signer policy before emitting funding commands.
+
 ## 7. Ledger account representation
 
 Add a small **metadata-only `LedgerAccount` chart of accounts**. Fields: immutable account ID/key, account type, normal side, owner kind/reference (`customer`, `wallet`, or `exchange`), canonical asset/network, and operational status. Enforce valid owner/type combinations and uniqueness in PostgreSQL.
@@ -186,15 +190,21 @@ This preserves the recent balance simplification while giving custody, liabiliti
 
 ## P0-07 — Complete the asynchronous-state reset
 
-The reported PostgreSQL reset does not establish that the surrounding asynchronous state is clean. `npm run reset:development` is a dry-run-first local tool: it accepts only loopback PostgreSQL/Redis/Pub/Sub endpoints, resets the four service-owned databases to their Prisma baselines, obliterates only the retired project BullMQ prefix, creates a new Pub/Sub topic/subscription, retires the old subscription, and rotates `RESET_EPOCH` in `.env`. It reads the durable `.env` file directly, using the persisted plan even when shell exports are stale. Services reject a runtime epoch that conflicts with durable state. An exclusive `.env.reset.lock` binds the reset to its owner token; the owner holds it throughout destructive work and final marker clearing. Applying or resuming concurrently is rejected. The tool does not flush Redis, remove provider watches, start/stop processes, or bootstrap wallets. Applying it requires explicit `--workers-stopped --publisher-stopped --provider-watches-removed` acknowledgments. The coordinated reset and failure/resume rehearsal remain pending until the Phase 1 schemas are ready.
+The reported PostgreSQL reset does not establish that the surrounding asynchronous state is clean. `npm run reset:development` is a dry-run-first local tool: it requires explicit, distinct loopback databases for Wallet, Broadcast, Ledger, ActivityListener, Sweep, and User, resets their Prisma baselines, obliterates only the retired project BullMQ prefix, creates a new Pub/Sub topic/subscription, retires the old subscription, and rotates `RESET_EPOCH` in `.env`. Redis and Pub/Sub endpoints must also be loopback. Resume rejects changed project namespaces before mutation. It reads the durable `.env` file directly, using the persisted plan even when shell exports are stale. Services reject a runtime epoch that conflicts with durable state. An exclusive `.env.reset.lock` binds the reset to its owner token; applying or resuming concurrently is rejected. The tool does not flush Redis, remove provider watches, start/stop processes, or bootstrap wallets. Applying it requires explicit `--workers-stopped --publisher-stopped --provider-watches-removed` acknowledgments. The isolated six-database failure/resume and bootstrap rehearsal passes; the actual deployment reset and external watch-retirement evidence remain pending.
 
 1. Stop all application workers and the provider publisher; disable address issuance. Remove old provider watches and record the provider's removal acknowledgment.
 2. Run `npm run reset:development` once without arguments to review the local database targets and retired/new namespaces. Do not proceed if any database, Redis, or Pub/Sub endpoint is not loopback.
 3. Apply with `npm run reset:development -- --apply --workers-stopped --publisher-stopped --provider-watches-removed`. The tool acquires the exclusive lock and verifies durable reset state before destructive work. Before any database/queue/Pub/Sub change, it atomically persists `RESET_IN_PROGRESS`, the new epoch, and the retired namespace identifiers in `.env`. It checks lock ownership before destructive work and verifies ownership, epoch, and durable marker before final clearing. Queue-backed services fail startup while the lock or marker exists.
 4. Configure the external provider publisher to use the printed epoch and new Pub/Sub topic, with top-level `resetEpoch` on every discovery payload. The tool cannot modify the separately deployed listener/provider. Install fresh watches, then verify per-address acknowledgment and backfill coverage before marking any address ready.
-5. Run the normal setup/bootstrap steps: confirm baseline migrations, bootstrap hot0 and configured management wallets, and verify the first customer account is 10. The reset tool does not start services or bootstrap addresses.
-6. Start provider publisher and workers with the new epoch/configuration. Replay an old queue envelope, old provider delivery, and old signer/broadcast result. Queue envelopes/results must fail the epoch check; provider events with missing or stale top-level `resetEpoch` must be quarantined even if sent to the current topic. The old Pub/Sub subscription is retired, and the new topic must receive only current-epoch publisher traffic.
+5. Confirm baseline migrations and consistent custody/network/seed settings. Start the revised workers with the new epoch, then submit `{}` to Wallet's service-authenticated `POST /internal/custody/bootstrap`. HTTP 202 means queued; poll `GET /internal/custody` to verify derived/published hot0 and configured management1. `POST /internal/custody/management-wallets` queues a reserved account request, but the worker refuses an account without approved purpose policy. Verify the first customer account is 10. The reset tool does not start services or bootstrap addresses.
+6. Start the provider publisher with the new epoch/configuration. Replay an old queue envelope, old provider delivery, and old signer/broadcast result. Queue envelopes/results must fail the epoch check; provider events with missing or stale top-level `resetEpoch` must be quarantined even if sent to the current topic. The old Pub/Sub subscription is retired, and the new topic must receive only current-epoch publisher traffic. Expose customer addresses only after the current Ledger, hot/management, watch, and historical-coverage acknowledgments are ready.
 
 If the reset command fails after the marker is written, keep every worker and publisher stopped and rerun with `npm run reset:development -- --resume --apply --workers-stopped --publisher-stopped --provider-watches-removed`. Resume acquires the exclusive lock, uses the persisted epoch, old queue prefix, and old subscription, and safely repeats the baselines/cleanup. For a lock left by an exited process, inspect its token/PID, confirm no reset process is running, remove only the confirmed orphan `<envfile>.reset.lock`, then run `--resume`. Never remove a live owner's lock. Never clear `RESET_IN_PROGRESS` manually; only the successful completion path may remove the fence after validating its lock ownership, epoch, and durable reset state.
 
-The authenticated queue envelope is now transport version 2 and includes `resetEpoch`; every consumer compares it to its configured epoch before any financial transition. Version-1 envelopes and mismatched epochs are unrecoverable. BullMQ prefixes include the epoch, so retired jobs cannot be selected by current workers. Service-owned databases are reset to remove old outbox/operation rows; later registry and operation models must persist the same epoch. Every external provider discovery payload must carry top-level `resetEpoch` equal to the current configured epoch; the listener quarantines a missing or mismatched value before queueing or sealing the event. Epoch-specific topics provide an additional fence and never replace payload validation. Queue cleanup alone cannot fence an already signed on-chain transaction. A record reset also does not clear chain balances; use fresh seed/local chain state or explicit fixtures as appropriate.
+The authenticated queue envelope is transport version 2 and includes `resetEpoch`; every consumer compares it to its configured epoch before any financial transition. Version-1 envelopes and mismatched epochs are unrecoverable. BullMQ prefixes include the epoch, so retired jobs cannot be selected by current workers. Custody, registry, and operation ownership retain the epoch in their records. Every external provider discovery payload must carry top-level `resetEpoch` equal to the current configured epoch; the listener quarantines a missing or mismatched value before queueing or sealing the event. Epoch-specific topics provide an additional fence and never replace payload validation. Queue cleanup alone cannot fence an already signed on-chain transaction. A record reset also does not clear chain balances; use fresh seed/local chain state or explicit fixtures as appropriate.
+
+### Isolated reset and bootstrap rehearsal
+
+Run `npm run rehearse:reset` with `TEST_DATABASE_URL`, `TEST_BROADCAST_DATABASE_URL`, `TEST_LEDGER_DATABASE_URL`, `TEST_ACTIVITY_DATABASE_URL`, `TEST_SWEEP_DATABASE_URL`, `TEST_USER_DATABASE_URL`, `TEST_REDIS_URL`, and a loopback Pub/Sub emulator (`TEST_PUBSUB_API_ENDPOINT`, default `127.0.0.1:8086`). PostgreSQL test roles need permission to create sibling databases. The harness creates and removes six fresh databases, dedicated queue/Pub/Sub resources, a temporary environment file, and a temporary seed; it does not reset the supplied test databases or actual application state.
+
+The default hook exercises real custody bootstrap and bound Wallet Core derivation after both resets. Acceptance checks cover failure after the third database reset and resume with the persisted epoch, stale queue rejection and provider quarantine, preservation of unrelated resources, three stable hot0 addresses across resets, first customer account 10, and empty Ledger journals/customer liabilities. It does not replace live provider-watch/backfill or RPC acceptance. No actual project `.env`, application database, or deployment seed was changed by this rehearsal.

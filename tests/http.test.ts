@@ -15,6 +15,7 @@ import { migrate } from '../scripts/migrate.js';
 import { connection } from '../packages/queue/src/messaging.module.js';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
+import { devnet, isolatedDatabase } from './helpers/custody-fixture.js';
 
 async function freePort() {
   const server = createServer();
@@ -65,8 +66,8 @@ test(
       databaseUrl: process.env.TEST_BROADCAST_DATABASE_URL!,
     });
     await migrate(process.env.TEST_BROADCAST_DATABASE_URL!, 'broadcast');
-    const db = createDatabase(process.env.TEST_DATABASE_URL!);
-    await migrate(process.env.TEST_DATABASE_URL!);
+    const walletFixture = await isolatedDatabase(process.env.TEST_DATABASE_URL!);
+    const db = createDatabase(walletFixture.url);
     const dir = await mkdtemp(join(tmpdir(), 'waas-events-')),
       seed = join(dir, 'seed');
     await writeFile(
@@ -146,8 +147,11 @@ test(
       QUEUE_AUTH_KEY: queueKey,
       SIGNER_SEED_FILE: seed,
       SIGNER_SEED_ID: 'http-events',
+      EXCHANGE_DOMAIN_ID: 'http-events',
+      EXCHANGE_API_KEY: 'e'.repeat(64),
       ETH_CHAIN_ID: '11155111',
-      SOLANA_GENESIS_HASH: 'devnet',
+      SOLANA_GENESIS_HASH: devnet,
+      CHAIN_NETWORKS: JSON.stringify({ bitcoin: { network: 'regtest', rpcNetwork: 'regtest' } }),
       WALLET_PORT: String(walletPort),
       WALLET_HOST: '127.0.0.1',
       WALLET_API_KEY: apiKey,
@@ -166,7 +170,7 @@ test(
         env: {
           ...env,
           DATABASE_URL: undefined,
-          WALLET_DATABASE_URL: name === 'wallet' ? process.env.TEST_DATABASE_URL : undefined,
+          WALLET_DATABASE_URL: name === 'wallet' ? walletFixture.url : undefined,
           BROADCAST_DATABASE_URL:
             name === 'broadcast' ? process.env.TEST_BROADCAST_DATABASE_URL : undefined,
           ...overrides,
@@ -213,6 +217,11 @@ test(
         },
         (s) => s === 401,
       );
+      assert.equal((await fetch(base + '/internal/custody')).status, 401);
+      assert.equal(
+        (await request('/internal/custody/bootstrap', { seedId: 'forged' })).status,
+        400,
+      );
       const created = await request('/internal/wallets', { chain: 'ethereum', externalId });
       assert.equal(created.status, 202);
       const wallet = (await created.json()) as { id: string; status: string; address: string };
@@ -254,7 +263,7 @@ test(
         (t) => t.status === 'signed',
       );
       const bytes = (signed.signed as { raw: string }).raw;
-      assert.equal(EthTransaction.from(bytes).from, ready.address);
+      assert.equal(EthTransaction.from(bytes).from!.toLowerCase(), ready.address);
       const duplicate = await request(`/internal/wallets/${wallet.id}/transactions`, intent, {
         'idempotency-key': 'payment-1',
       });
@@ -324,6 +333,67 @@ test(
         (await db.transaction.findUniqueOrThrow({ where: { id: tx.id } })).status,
         'confirmed',
       );
+      const bootstrap = await request('/internal/custody/bootstrap', {});
+      assert.equal(bootstrap.status, 202);
+      const custodyWallets = await eventually(
+        () => db.wallet.findMany({ where: { custody_role: { in: ['hot', 'management'] } } }),
+        (rows) =>
+          rows.length === 5 && rows.every((row) => row.status === 'ready' && !!row.published_at),
+      );
+      assert.equal(custodyWallets.filter((row) => row.account === 0).length, 3);
+      assert.equal(custodyWallets.filter((row) => row.account === 1).length, 2);
+      assert.match(custodyWallets.find((row) => row.chain === 'bitcoin')!.address!, /^bcrt1q/);
+      const userId = randomUUID(),
+        eventId = randomUUID();
+      const registration = {
+        type: 'user.registered.v1' as const,
+        eventId,
+        schemaVersion: 1 as const,
+        resetEpoch,
+        occurredAt: new Date().toISOString(),
+        domainId: env.EXCHANGE_DOMAIN_ID,
+        correlationId: userId,
+        causationId: null,
+        aggregateId: userId,
+        revision: 1,
+        customerId: userId,
+        data: { userId },
+      };
+      await queue.add(registration.type, auth.seal(registration, eventId), { jobId: eventId });
+      await eventually(
+        () => db.exchangeCustomer.findUnique({ where: { customer_id: userId } }),
+        Boolean,
+      );
+      const assigned = await request(
+        `/internal/customers/${userId}/deposit-addresses`,
+        { chain: 'bitcoin', network: 'regtest' },
+        { authorization: `Bearer ${env.EXCHANGE_API_KEY}` },
+      );
+      assert.equal(assigned.status, 201);
+      const assignment = (await assigned.json()) as { assignmentId: string; state: string };
+      assert.equal(assignment.state, 'waiting');
+      await eventually(
+        () => db.wallet.findFirst({ where: { customer_id: userId } }),
+        (row) => row?.status === 'ready' && !!row.published_at,
+      );
+      const view = await request(
+        `/internal/customers/${userId}/deposit-addresses/${assignment.assignmentId}`,
+        undefined,
+        { authorization: `Bearer ${env.EXCHANGE_API_KEY}` },
+      );
+      assert.equal(
+        'address' in (await view.json()),
+        false,
+        'Ledger/provider acknowledgments still gate public readiness',
+      );
+      assert.equal(
+        (
+          await request(`/internal/wallets/${custodyWallets[0].id}/transactions`, intent, {
+            'idempotency-key': 'forbidden-custody-spend',
+          })
+        ).status,
+        409,
+      );
     } catch (error) {
       console.error(logs);
       throw error;
@@ -347,9 +417,8 @@ test(
       });
       await broadcastDb.transaction.deleteMany({ where: { id: { in: txs.map((t) => t.id) } } });
       await broadcastDb.$disconnect();
-      await db.transaction.deleteMany({ where: { wallet: { external_id: externalId } } });
-      await db.wallet.deleteMany({ where: { external_id: externalId } });
       await db.$disconnect();
+      await walletFixture.drop();
       await rm(dir, { recursive: true });
     }
   },

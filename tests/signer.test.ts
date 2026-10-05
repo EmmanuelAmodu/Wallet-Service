@@ -6,6 +6,13 @@ let bitcoin: Awaited<typeof bitcoinPromise>;
 import { verify } from '@bitcoinerlab/secp256k1';
 import { createPublicKey, verify as verifyEd25519 } from 'node:crypto';
 import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
+import { SigningService } from '../apps/signer/src/signing/signing.service.js';
+import { derivationRequestDigest, walletDeriveSchema } from '../packages/queue/src/messages.js';
+import {
+  canonicalizeDerivedAddress,
+  coreDerivationPath,
+} from '../packages/chain/src/coin-metadata.js';
+import { randomUUID } from 'node:crypto';
 import { initWasm } from '@trustwallet/wallet-core';
 import {
   derivationPath,
@@ -336,5 +343,156 @@ test('invalid decimal strings fail validation without BigInt exceptions', () => 
       }).success,
       false,
     );
+  }
+});
+
+test('bound derivation authenticates domain, seed, network, role, and exact path without emitting secrets', async () => {
+  const policy = {
+    domainId: 'exchange-development',
+    chainNetworks: {
+      ethereum: { network: '11155111', chainId: '11155111' },
+      bitcoin: { network: 'regtest', rpcNetwork: 'regtest' },
+      solana: { network: 'devnet', genesisHash: 'devnet' },
+    },
+  };
+  const bound = await SigningCore.create(mnemonic, 'test', '11155111', undefined, policy);
+  const service = new SigningService(bound);
+  try {
+    for (const chain of ['ethereum', 'bitcoin', 'solana'] as const) {
+      for (const account of [0, 1, 9, 10, 2147483647]) {
+        const binding = {
+          walletId: randomUUID(),
+          requestId: randomUUID(),
+          domainId: policy.domainId,
+          network: policy.chainNetworks[chain].network,
+          role:
+            account === 0
+              ? ('hot' as const)
+              : account <= 9
+                ? ('management' as const)
+                : ('customer_deposit' as const),
+          request: { chain, account, seedId: 'test' },
+          path: await coreDerivationPath(chain, account, policy.chainNetworks[chain].network),
+        };
+        const action = walletDeriveSchema.parse({
+          ...binding,
+          type: 'wallet.derive',
+          requestDigest: derivationRequestDigest(binding),
+        });
+        const result = service.execute(action);
+        assert.equal(result.type, 'wallet.derived');
+        if (result.type !== 'wallet.derived') throw new Error('Unexpected rejection');
+        assert.deepEqual(result.request, action.request);
+        assert.equal(result.requestId, action.requestId);
+        assert.equal(result.requestDigest, action.requestDigest);
+        assert.equal(result.domainId, policy.domainId);
+        assert.equal(result.path, binding.path);
+        assert.equal(JSON.stringify(result).includes(mnemonic), false);
+        assert.equal(JSON.stringify(result).includes('privateKey'), false);
+        assert.equal(
+          result.address,
+          await canonicalizeDerivedAddress(chain, binding.network, result.address),
+        );
+        if (chain === 'bitcoin') {
+          assert.match(result.path, /^m\/84'\/1'\//);
+          assert.match(result.address, /^bcrt1q/);
+        }
+        for (const changed of [
+          { domainId: 'other-exchange' },
+          { network: 'wrong-network' },
+          { path: "m/0'" },
+          { request: { ...action.request, seedId: 'wrong-seed' } },
+        ]) {
+          const invalidBinding = { ...binding, ...changed };
+          const invalid = walletDeriveSchema.parse({
+            ...invalidBinding,
+            type: 'wallet.derive',
+            requestDigest: derivationRequestDigest(invalidBinding),
+          });
+          assert.deepEqual(service.execute(invalid), { ...invalid, type: 'wallet.rejected' });
+        }
+      }
+    }
+  } finally {
+    bound.close();
+  }
+});
+
+test('Bitcoin regtest signs exact witness scripts and rejects cross-network or omitted network identity', async () => {
+  const regtest = await SigningCore.create(mnemonic, 'test', '11155111', undefined, {
+    domainId: 'regtest-test',
+    chainNetworks: { bitcoin: { network: 'regtest', rpcNetwork: 'regtest' } },
+  });
+  try {
+    const { path: _path, ...source } = regtest.derive({
+      chain: 'bitcoin',
+      account: 10,
+      seedId: 'test',
+    });
+    const target = regtest.derive({ chain: 'bitcoin', account: 0, seedId: 'test' });
+    assert.equal(target.address, 'bcrt1q6rz28mcfaxtmd6v789l9rrlrusdprr9pz3cppk');
+    const sourceScript = bitcoin.address.toOutputScript(source.address, bitcoin.networks.regtest);
+    const targetScript = bitcoin.address.toOutputScript(target.address, bitcoin.networks.regtest);
+    const transaction = {
+      chain: 'bitcoin' as const,
+      outputs: [{ address: target.address, amount: '10000' }],
+      utxos: [
+        {
+          txid: '02'.repeat(32),
+          vout: 0,
+          amount: '100000',
+          script: Buffer.from(sourceScript).toString('hex'),
+        },
+      ],
+      satsPerVbyte: 2,
+    };
+    const signed = regtest.sign({ wallet: { ...source, network: 'regtest' }, transaction });
+    const parsed = bitcoin.Transaction.fromHex(signed.raw);
+    assert.equal(parsed.getId(), signed.txHash);
+    assert.equal(parsed.outs.length, 2);
+    assert.equal(parsed.outs[0].value, 10000n);
+    assert.deepEqual(parsed.outs[0].script, targetScript);
+    assert.deepEqual(parsed.outs[1].script, sourceScript);
+    const [signature, pubkey] = parsed.ins[0].witness;
+    const decoded = bitcoin.script.signature.decode(signature);
+    assert(
+      verify(
+        parsed.hashForWitnessV0(
+          0,
+          bitcoin.payments.p2pkh({ pubkey }).output!,
+          100000n,
+          decoded.hashType,
+        ),
+        pubkey,
+        decoded.signature,
+      ),
+    );
+    const fee = 100000n - parsed.outs.reduce((sum, out) => sum + out.value, 0n);
+    assert(fee >= BigInt(parsed.virtualSize() * 2));
+    assert(fee < 2000n);
+    assert.throws(() => regtest.sign({ wallet: source, transaction }), /network/);
+    assert.throws(
+      () => regtest.sign({ wallet: { ...source, network: 'mainnet' }, transaction }),
+      /network/,
+    );
+    assert.throws(
+      () =>
+        regtest.sign({
+          wallet: { ...source, network: 'regtest' },
+          transaction: {
+            ...transaction,
+            outputs: [{ address: wallet('bitcoin').address, amount: '10000' }],
+          },
+        }),
+      /regtest/,
+    );
+    await assert.rejects(canonicalizeDerivedAddress('bitcoin', 'mainnet', source.address));
+    await assert.rejects(
+      canonicalizeDerivedAddress('bitcoin', 'regtest', wallet('bitcoin').address),
+    );
+    const altered = source.address.slice(0, -1) + (source.address.endsWith('q') ? 'p' : 'q');
+    await assert.rejects(canonicalizeDerivedAddress('bitcoin', 'regtest', altered));
+  } finally {
+    regtest.close();
   }
 });

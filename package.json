@@ -42,7 +42,8 @@
     "dev:sweep": "npm run db:generate && nest start sweep --watch",
     "start:sweep": "node dist/apps/sweep/src/main.js",
     "build:sweep": "npm run db:generate && nest build sweep",
-    "migrate:sweep": "npm run migrate -- sweep"
+    "migrate:sweep": "npm run migrate -- sweep",
+    "rehearse:reset": "tsx --env-file-if-exists=.env scripts/rehearse-development-reset.ts --run"
   },
   "license": "ISC",
   "type": "module",
@@ -57,6 +58,7 @@
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@trustwallet/wallet-core": "^4.8.4",
+    "bech32": "^2.0.0",
     "bullmq": "^6.3.11",
     "ioredis": "^6.0.0",
     "jose": "^6.2.12",
