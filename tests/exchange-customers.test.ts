@@ -12,7 +12,7 @@ import { ExchangeCustomersController } from '../apps/wallet/src/customers/custom
 import { ExchangeBackendGuard } from '../apps/wallet/src/customers/exchange-backend.guard.js';
 import { exchangeApiConfig } from '../apps/wallet/src/config/exchange-api.config.js';
 import { walletConfig, WalletSettings } from '../apps/wallet/src/config/wallet.config.js';
-import { TenantAuthGuard } from '../apps/wallet/src/auth/tenant-auth.guard.js';
+import { WalletAuthGuard } from '../apps/wallet/src/auth/wallet-auth.guard.js';
 import { ExchangeMessagingService } from '../apps/wallet/src/exchange-messaging/exchange-messaging.service.js';
 import { LedgerClient } from '../apps/wallet/src/ledger/ledger-client.service.js';
 import { ExchangeEvent, exchangeEventSchema } from '../packages/queue/src/exchange-contracts.js';
@@ -552,7 +552,7 @@ test(
     class LegacyController {
       @Get()
       current(@Req() request: { tenant?: string }) {
-        return { tenant: request.tenant };
+        return { authenticated: true, hasTenant: 'tenant' in request };
       }
     }
     const legacyApiKey = 'legacy'.repeat(8);
@@ -560,8 +560,8 @@ test(
       controllers: [ExchangeCustomersController, LegacyController],
       providers: [
         ExchangeBackendGuard,
-        { provide: APP_GUARD, useClass: TenantAuthGuard },
-        { provide: walletConfig.KEY, useValue: { apiKeys: { legacy: legacyApiKey } } },
+        { provide: APP_GUARD, useClass: WalletAuthGuard },
+        { provide: walletConfig.KEY, useValue: { apiKey: legacyApiKey } },
         { provide: exchangeApiConfig.KEY, useValue: settings },
         { provide: ExchangeCustomersService, useValue: service },
       ],
@@ -576,19 +576,17 @@ test(
         headers: { authorization: `Bearer ${legacyApiKey}` },
       });
       assert.equal(legacyAllowed.status, 200);
-      assert.deepEqual(await legacyAllowed.json(), { tenant: 'legacy' });
+      assert.deepEqual(await legacyAllowed.json(), { authenticated: true, hasTenant: false });
       const exchangeOnLegacy = await fetch(`${baseUrl}/legacy-auth-test`, {
         headers: { authorization: `Bearer ${settings.apiKey}` },
       });
       assert.equal(exchangeOnLegacy.status, 401);
+      const customer = await service!.create(`${externalPrefix}-http`);
       for (const authorization of [undefined, `Bearer ${'legacy'.repeat(8)}`]) {
-        const response = await fetch(`${baseUrl}/v1/customers`, {
-          method: 'POST',
+        const response = await fetch(`${baseUrl}/internal/customers/${customer.customerId}`, {
           headers: {
-            'content-type': 'application/json',
             ...(authorization ? { authorization } : {}),
           },
-          body: JSON.stringify({ externalId: `${externalPrefix}-http` }),
         });
         assert.equal(response.status, 401);
       }
@@ -596,26 +594,32 @@ test(
         authorization: `Bearer ${settings.apiKey}`,
         'content-type': 'application/json',
       };
-      const created = await fetch(`${baseUrl}/v1/customers`, {
+      const removedRegistration = await fetch(`${baseUrl}/internal/customers`, {
         method: 'POST',
         headers,
         body: JSON.stringify({ externalId: `${externalPrefix}-http` }),
       });
-      assert.equal(created.status, 201);
-      const customer = (await created.json()) as { customerId: string };
-      const rejected = await fetch(`${baseUrl}/v1/customers`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          externalId: `${externalPrefix}-bad`,
-          customerId: randomUUID(),
-          domainId: 'attacker',
-        }),
-      });
+      assert.equal(removedRegistration.status, 404);
+      const rejected = await fetch(
+        `${baseUrl}/internal/customers/${customer.customerId}/deposit-addresses`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            chain: asset.chain,
+            network: asset.network,
+            customerId: randomUUID(),
+            domainId: 'attacker',
+          }),
+        },
+      );
       assert.equal(rejected.status, 400);
-      const balances = await fetch(`${baseUrl}/v1/customers/${customer.customerId}/balances`, {
-        headers,
-      });
+      const balances = await fetch(
+        `${baseUrl}/internal/customers/${customer.customerId}/balances`,
+        {
+          headers,
+        },
+      );
       assert.equal(balances.status, 202);
       assert.deepEqual(await balances.json(), {
         customerId: customer.customerId,
@@ -628,17 +632,17 @@ test(
         }),
       );
       assert.equal(
-        (await fetch(`${baseUrl}/v1/customers/${customer.customerId}/balances`, { headers }))
+        (await fetch(`${baseUrl}/internal/customers/${customer.customerId}/balances`, { headers }))
           .status,
         200,
       );
       const override = await fetch(
-        `${baseUrl}/v1/customers/${customer.customerId}/balances?domainId=attacker`,
+        `${baseUrl}/internal/customers/${customer.customerId}/balances?domainId=attacker`,
         { headers },
       );
       assert.equal(override.status, 400);
       const history = await fetch(
-        `${baseUrl}/v1/customers/${customer.customerId}/deposits?limit=101`,
+        `${baseUrl}/internal/customers/${customer.customerId}/deposits?limit=101`,
         { headers },
       );
       assert.equal(history.status, 400);
@@ -840,13 +844,13 @@ test('Ledger HTTP response validation preserves scoped asset units and rejects s
   }
 });
 
-test('exchange API configuration is opt-in and rejects reuse of queue, Ledger, or legacy tenant keys', () => {
+test('exchange API configuration is opt-in and rejects reuse of queue, Ledger, or wallet backend keys', () => {
   const names = [
     'EXCHANGE_API_KEY',
     'EXCHANGE_DOMAIN_ID',
     'QUEUE_AUTH_KEY',
     'LEDGER_API_KEY',
-    'WALLET_API_KEYS',
+    'WALLET_API_KEY',
   ] as const;
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   try {
@@ -856,7 +860,7 @@ test('exchange API configuration is opt-in and rejects reuse of queue, Ledger, o
     process.env.EXCHANGE_DOMAIN_ID = settings.domainId;
     process.env.QUEUE_AUTH_KEY = 'q'.repeat(64);
     process.env.LEDGER_API_KEY = 'l'.repeat(64);
-    process.env.WALLET_API_KEYS = JSON.stringify({ legacy: 't'.repeat(64) });
+    process.env.WALLET_API_KEY = 't'.repeat(64);
     for (const value of ['q'.repeat(64), 'l'.repeat(64), 't'.repeat(64)]) {
       process.env.EXCHANGE_API_KEY = value;
       assert.throws(() => exchangeApiConfig(), /distinct exchange backend API credential/);

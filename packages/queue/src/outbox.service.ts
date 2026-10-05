@@ -1,4 +1,11 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
 import { randomUUID } from 'node:crypto';
@@ -85,6 +92,7 @@ export class OutboxRelay implements OnModuleInit, OnModuleDestroy {
     @InjectQueue(QUEUES.activity) private readonly activity: Queue,
     @InjectQueue(QUEUES.ledger) private readonly ledger: Queue,
     @Inject(queueConfig.KEY) private readonly config: Pick<QueueConfig, 'outboxIntervalMs'>,
+    @Optional() @InjectQueue(QUEUES.sweep) private readonly sweep?: Queue,
   ) {}
 
   onModuleInit() {
@@ -122,6 +130,7 @@ export class OutboxRelay implements OnModuleInit, OnModuleDestroy {
           [QUEUES.broadcast]: this.broadcast,
           [QUEUES.activity]: this.activity,
           [QUEUES.ledger]: this.ledger,
+          [QUEUES.sweep]: this.sweep,
         }[row.queue];
         if (!queue) throw new Error('Unknown outbox queue');
         const payload = messageSchema.parse(row.payload);

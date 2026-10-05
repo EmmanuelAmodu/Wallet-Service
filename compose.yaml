@@ -59,6 +59,36 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  sweep-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sweep
+      POSTGRES_PASSWORD: sweep_local_only
+      POSTGRES_DB: sweep
+    ports:
+      - '127.0.0.1:5436:5432'
+    volumes:
+      - sweep-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U sweep -d sweep']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  user-postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: users
+      POSTGRES_PASSWORD: users_local_only
+      POSTGRES_DB: users
+    ports:
+      - '127.0.0.1:5437:5432'
+    volumes:
+      - user-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U users -d users']
+      interval: 5s
+      timeout: 3s
+      retries: 10
   redis:
     image: redis:7.4-alpine
     command:
@@ -99,4 +129,6 @@ volumes:
   broadcast-postgres-data:
   ledger-postgres-data:
   activity-postgres-data:
+  sweep-postgres-data:
+  user-postgres-data:
   redis-data:

@@ -14,7 +14,6 @@ import {
   ApiTags,
   type SchemaObject,
 } from '@nestjs/swagger';
-import { Tenant } from '../auth/tenant.decorator.js';
 import { ZodValidationPipe } from '../../../../packages/shared/src/http/zod-validation.pipe.js';
 import {
   bitcoinChains,
@@ -91,8 +90,8 @@ const transactionBody: SchemaObject = {
 };
 
 @ApiTags('Transactions')
-@ApiBearerAuth('tenantBearer')
-@Controller('v1')
+@ApiBearerAuth('walletBearer')
+@Controller('internal')
 export class TransactionsController {
   constructor(private readonly service: TransactionsService) {}
 
@@ -110,21 +109,20 @@ export class TransactionsController {
   @ApiConflictResponse({ description: 'Wallet is not ready or another transfer is pending.' })
   @Post('wallets/:id/transactions')
   create(
-    @Tenant() tenant: string,
     @Param('id', ParseUUIDPipe) id: string,
     @IdempotencyKey(new ZodValidationPipe(idempotencyKeySchema)) key: string,
     @Body(new ZodValidationPipe(createTransactionSchema)) body: CreateTransactionDto,
   ) {
-    return this.service.createTransaction(tenant, id, key, body);
+    return this.service.createTransaction(id, key, body);
   }
 
   @ApiOperation({ summary: 'Get transaction preparation, signing, and broadcast status' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ description: 'Transaction state and signed transaction data, when available.' })
-  @ApiNotFoundResponse({ description: 'Transaction not found for this tenant.' })
+  @ApiNotFoundResponse({ description: 'Transaction not found in the exchange.' })
   @Get('transactions/:id')
-  findOne(@Tenant() tenant: string, @Param('id', ParseUUIDPipe) id: string) {
-    return this.service.getTransaction(tenant, id);
+  findOne(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.getTransaction(id);
   }
 
   @HttpCode(202)
@@ -133,8 +131,8 @@ export class TransactionsController {
   @ApiAcceptedResponse({ description: 'Broadcast request accepted.' })
   @ApiConflictResponse({ description: 'Transaction is not signed or is in an incompatible state.' })
   @Post('transactions/:id/broadcast')
-  broadcast(@Tenant() tenant: string, @Param('id', ParseUUIDPipe) id: string) {
-    return this.service.requestBroadcast(tenant, id);
+  broadcast(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.requestBroadcast(id);
   }
 
   @HttpCode(202)
@@ -145,7 +143,7 @@ export class TransactionsController {
   @ApiAcceptedResponse({ description: 'A new bounded confirmation-monitoring run was accepted.' })
   @ApiConflictResponse({ description: 'Only signed transactions in attention can be refreshed.' })
   @Post('transactions/:id/refresh')
-  refresh(@Tenant() tenant: string, @Param('id', ParseUUIDPipe) id: string) {
-    return this.service.requestRefresh(tenant, id);
+  refresh(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.requestRefresh(id);
   }
 }

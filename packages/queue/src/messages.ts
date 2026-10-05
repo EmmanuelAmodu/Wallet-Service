@@ -15,6 +15,7 @@ export const QUEUES = {
   broadcast: 'broadcast-actions',
   activity: 'activity-actions',
   ledger: 'ledger-actions',
+  sweep: 'sweep-actions',
 } as const;
 export const broadcastSnapshotSchema = z
   .object({
@@ -120,7 +121,6 @@ const legacyMessageSchema = z.discriminatedUnion('type', [
     .object({
       type: z.literal('ledger.wallet.registered'),
       walletId: z.uuid(),
-      tenantId: z.string().min(1),
       chain: chainSchema,
       network: z.string().min(1),
       address: z.string().min(1),

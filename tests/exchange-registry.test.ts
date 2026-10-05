@@ -95,10 +95,10 @@ test(
     const deliveries = await wallet!.outbox.findMany({
       where: { dedupe_key: { contains: request.eventId } },
     });
-    assert.equal(deliveries.length, 2);
+    assert.equal(deliveries.length, 3);
     assert.deepEqual(
       new Set(deliveries.map((row) => row.queue)),
-      new Set([QUEUES.ledger, QUEUES.activity]),
+      new Set([QUEUES.ledger, QUEUES.activity, QUEUES.sweep]),
     );
     assert.notEqual(deliveries[0].id, deliveries[1].id);
     await activityService!.register(request);

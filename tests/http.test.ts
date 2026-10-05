@@ -74,7 +74,7 @@ test(
       'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about',
       { mode: 0o600 },
     );
-    const tenant = randomUUID(),
+    const externalId = `http-test-${randomUUID()}`,
       apiKey = 'a'.repeat(64),
       queueKey = 'b'.repeat(64),
       prefix = `test-${randomUUID()}`,
@@ -150,7 +150,7 @@ test(
       SOLANA_GENESIS_HASH: 'devnet',
       WALLET_PORT: String(walletPort),
       WALLET_HOST: '127.0.0.1',
-      WALLET_API_KEYS: JSON.stringify({ [tenant]: apiKey }),
+      WALLET_API_KEY: apiKey,
       ETH_RPC_URL: `http://127.0.0.1:${(rpc.address() as AddressInfo).port}`,
       ALLOW_BROADCAST: 'true',
       OUTBOX_INTERVAL_MS: '50',
@@ -206,14 +206,14 @@ test(
       await eventually(
         async () => {
           try {
-            return (await fetch(base + '/v1/wallets/' + randomUUID())).status;
+            return (await fetch(base + '/internal/wallets/' + randomUUID())).status;
           } catch {
             return 0;
           }
         },
         (s) => s === 401,
       );
-      const created = await request('/v1/wallets', { chain: 'ethereum', externalId: 'alice' });
+      const created = await request('/internal/wallets', { chain: 'ethereum', externalId });
       assert.equal(created.status, 202);
       const wallet = (await created.json()) as { id: string; status: string; address: string };
       assert.equal(wallet.status, 'deriving');
@@ -232,7 +232,7 @@ test(
       );
       assert.match(ready.address!, /^0x[0-9a-fA-F]{40}$/);
       const invalid = await request(
-        `/v1/wallets/${wallet.id}/transactions`,
+        `/internal/wallets/${wallet.id}/transactions`,
         { chain: 'ethereum', amount: 'invalid' },
         { 'idempotency-key': 'invalid' },
       );
@@ -244,7 +244,7 @@ test(
         maxFeePerGas: '2',
         maxPriorityFeePerGas: '1',
       };
-      const response = await request(`/v1/wallets/${wallet.id}/transactions`, intent, {
+      const response = await request(`/internal/wallets/${wallet.id}/transactions`, intent, {
         'idempotency-key': 'payment-1',
       });
       assert.equal(response.status, 202);
@@ -255,11 +255,11 @@ test(
       );
       const bytes = (signed.signed as { raw: string }).raw;
       assert.equal(EthTransaction.from(bytes).from, ready.address);
-      const duplicate = await request(`/v1/wallets/${wallet.id}/transactions`, intent, {
+      const duplicate = await request(`/internal/wallets/${wallet.id}/transactions`, intent, {
         'idempotency-key': 'payment-1',
       });
       assert.equal(((await duplicate.json()) as { id: string }).id, tx.id);
-      const queued = await request(`/v1/transactions/${tx.id}/broadcast`, {});
+      const queued = await request(`/internal/transactions/${tx.id}/broadcast`, {});
       assert.equal(queued.status, 202);
       assert.equal(raws.length, 0);
       // Redis holds the command while the broadcast service is offline.
@@ -334,8 +334,8 @@ test(
         await queue.obliterate({ force: true });
         await queue.close();
       }
-      const wallets = await db.wallet.findMany({ where: { tenant_id: tenant } }),
-        txs = await db.transaction.findMany({ where: { tenant_id: tenant } });
+      const wallets = await db.wallet.findMany({ where: { external_id: externalId } }),
+        txs = await db.transaction.findMany({ where: { wallet: { external_id: externalId } } });
       const ids = [...wallets, ...txs].map((x) => x.id);
       const outbox = await db.outbox.findMany({
         where: { OR: ids.map((id) => ({ dedupe_key: { contains: id } })) },
@@ -347,8 +347,8 @@ test(
       });
       await broadcastDb.transaction.deleteMany({ where: { id: { in: txs.map((t) => t.id) } } });
       await broadcastDb.$disconnect();
-      await db.transaction.deleteMany({ where: { tenant_id: tenant } });
-      await db.wallet.deleteMany({ where: { tenant_id: tenant } });
+      await db.transaction.deleteMany({ where: { wallet: { external_id: externalId } } });
+      await db.wallet.deleteMany({ where: { external_id: externalId } });
       await db.$disconnect();
       await rm(dir, { recursive: true });
     }

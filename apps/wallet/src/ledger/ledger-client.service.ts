@@ -76,15 +76,8 @@ export class LedgerClient {
     const baseUrl = this.wallet.ledgerUrl.replace(/\/$/, '');
     const authorization = `Bearer ${this.wallet.ledgerApiKey}`;
     try {
-      const registered = await fetch(`${baseUrl}/internal/wallets`, {
-        method: 'POST',
-        headers: { authorization, 'content-type': 'application/json' },
-        body: JSON.stringify(registration),
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!registered.ok) throw new Error('Ledger wallet registration failed');
+      // Wallet registration is delivered by the transactional outbox; reads never mutate Ledger.
       const url = new URL(`/internal/wallets/${registration.walletId}/balances`, baseUrl);
-      url.searchParams.set('tenantId', registration.tenantId);
       const response = await fetch(url, {
         headers: { authorization },
         signal: AbortSignal.timeout(10000),

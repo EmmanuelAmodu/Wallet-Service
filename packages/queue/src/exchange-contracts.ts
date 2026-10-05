@@ -78,6 +78,15 @@ function event<
     .strict();
 }
 
+const userRegistered = event('user.registered.v1', z.object({ userId: z.uuid() }).strict(), {
+  customerId: z.uuid(),
+}).refine(
+  (value) => value.customerId === value.data.userId && value.aggregateId === value.data.userId,
+  {
+    message: 'User registration identity mismatch',
+  },
+);
+
 const customerRegistryRequested = event(
   'customer.registry.requested.v1',
   z.object({ externalId: z.string().min(1).max(128) }).strict(),
@@ -509,6 +518,7 @@ const custodyLossReverted = event(
 );
 
 export const exchangeEventSchema = z.discriminatedUnion('type', [
+  userRegistered,
   customerRegistryRequested,
   customerRegistryAcknowledged,
   registryRequested,

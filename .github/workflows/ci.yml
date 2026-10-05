@@ -50,12 +50,34 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U activity -d activity_test"
           --health-interval 5s --health-timeout 3s --health-retries 10
+      sweep-postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: sweep
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: sweep_test
+        ports: ['5436:5432']
+        options: >-
+          --health-cmd "pg_isready -U sweep -d sweep_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      user-postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: users
+          POSTGRES_PASSWORD: test-only
+          POSTGRES_DB: users_test
+        ports: ['5437:5432']
+        options: >-
+          --health-cmd "pg_isready -U users -d users_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       TEST_BROADCAST_DATABASE_URL: postgresql://broadcast:test-only@localhost:5433/broadcast_test
       TEST_REDIS_URL: redis://localhost:6379
       TEST_DATABASE_URL: postgresql://wallet:test-only@localhost:5432/wallet_test
       TEST_LEDGER_DATABASE_URL: postgresql://ledger:test-only@localhost:5434/ledger_test
       TEST_ACTIVITY_DATABASE_URL: postgresql://activity:test-only@localhost:5435/activity_test
+      TEST_SWEEP_DATABASE_URL: postgresql://sweep:test-only@localhost:5436/sweep_test
+      TEST_USER_DATABASE_URL: postgresql://users:test-only@localhost:5437/users_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

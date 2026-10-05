@@ -6,7 +6,6 @@ export const tokenIdentifierSchema = z.string().regex(/^token:[^:]+:.+$/);
 export const ledgerWalletRegistrationSchema = z
   .object({
     walletId: z.uuid(),
-    tenantId: z.string().min(1),
     chain: chainSchema,
     network: z.string().min(1),
     address: z.string().min(1),

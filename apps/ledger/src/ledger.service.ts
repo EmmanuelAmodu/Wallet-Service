@@ -78,14 +78,12 @@ export class LedgerService {
       where: { wallet_id: wallet.walletId },
       create: {
         wallet_id: wallet.walletId,
-        tenant_id: wallet.tenantId,
         chain: wallet.chain,
         network: wallet.network,
         address: wallet.address,
         address_key: addressKey(wallet.chain, wallet.address),
       },
       update: {
-        tenant_id: wallet.tenantId,
         chain: wallet.chain,
         network: wallet.network,
         address: wallet.address,
@@ -94,9 +92,9 @@ export class LedgerService {
     });
   }
 
-  async balances(walletId: string, tenantId: string) {
+  async balances(walletId: string) {
     const wallet = await this.db.ledgerWallet.findFirst({
-      where: { wallet_id: walletId, tenant_id: tenantId },
+      where: { wallet_id: walletId },
     });
     if (!wallet) throw new NotFoundException('Ledger wallet not found');
     const latestEntries = await this.db.ledgerEntry.findMany({

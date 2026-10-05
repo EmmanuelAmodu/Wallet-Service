@@ -3,13 +3,17 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 
 export function setupOpenApi(app: INestApplication) {
   const config = new DocumentBuilder()
-    .setTitle('Wallet as a Service API')
-    .setDescription('Tenant-authenticated asynchronous wallet and transaction endpoints.')
+    .setTitle('Exchange Wallet API')
+    .setDescription('Authenticated customer wallet, deposit, and balance endpoints.')
     .setVersion('1.0.0')
     .addBearerAuth(
-      { type: 'http', scheme: 'bearer', bearerFormat: 'Tenant API key' },
-      'tenantBearer',
+      { type: 'http', scheme: 'bearer', bearerFormat: 'JWT issued by User service' },
+      'customerBearer',
     )
     .build();
-  SwaggerModule.setup('docs', app, SwaggerModule.createDocument(app, config));
+  const document = SwaggerModule.createDocument(app, config);
+  document.paths = Object.fromEntries(
+    Object.entries(document.paths).filter(([path]) => path.startsWith('/v1/')),
+  );
+  SwaggerModule.setup('docs', app, document);
 }

@@ -9,12 +9,11 @@ export const exchangeApiConfig = registerAs('exchangeApi', () => {
     ? z.string().min(1).max(128).parse(process.env.EXCHANGE_DOMAIN_ID)
     : undefined;
   if (apiKey) {
-    const legacy = process.env.WALLET_API_KEYS
-      ? Object.values(
-          z.record(z.string(), z.string()).parse(JSON.parse(process.env.WALLET_API_KEYS)),
-        )
-      : [];
-    if ([process.env.QUEUE_AUTH_KEY, process.env.LEDGER_API_KEY, ...legacy].includes(apiKey))
+    if (
+      [process.env.QUEUE_AUTH_KEY, process.env.LEDGER_API_KEY, process.env.WALLET_API_KEY].includes(
+        apiKey,
+      )
+    )
       throw new Error('Use a distinct exchange backend API credential');
   }
   return { apiKey, domainId };

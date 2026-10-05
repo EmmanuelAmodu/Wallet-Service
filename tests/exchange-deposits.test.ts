@@ -124,7 +124,10 @@ test(
     assert.equal(await db!.journalBatch.count({ where: { domain_id: f.domainId } }), 1);
     assert.equal(
       await db!.outbox.count({
-        where: { dedupe_key: { startsWith: `deposit:${f.depositId}:credited:` } },
+        where: {
+          queue: 'wallet-actions',
+          dedupe_key: { startsWith: `deposit:${f.depositId}:credited:` },
+        },
       }),
       1,
     );
@@ -209,7 +212,9 @@ test(
     );
     assert.equal(await db!.ledgerIncident.count({ where: { domain_id: f.domainId } }), 1);
     assert.equal(
-      await db!.outbox.count({ where: { dedupe_key: { startsWith: `deposit:${f.depositId}:` } } }),
+      await db!.outbox.count({
+        where: { queue: 'wallet-actions', dedupe_key: { startsWith: `deposit:${f.depositId}:` } },
+      }),
       4,
     );
     await service!.handle(f.event('deposit.finalized.v1', 3));

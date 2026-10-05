@@ -153,6 +153,7 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
     if (!ticket) return;
     const signal = exchangeDiscoverySchema.parse(ticket.signal);
     let verified: VerifiedExchangeTransaction;
+    let priorInclusionOrphaned = false;
     try {
       verified = await this.verifier.verify(signal);
       if (
@@ -163,17 +164,17 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
         throw new ActionRejectedError('Verified transaction identity mismatch');
       if (
         verified.state === 'pending' &&
-        !verified.blockHash &&
-        ticket.block_hash &&
-        ticket.block_height
+        ticket.finalized_block_hash &&
+        ticket.finalized_block_height &&
+        verified.blockHash !== ticket.finalized_block_hash
       ) {
         const canonicalBlock = await this.verifier.isCanonicalBlock(
           signal.chain,
           signal.network,
-          ticket.block_height,
-          ticket.block_hash,
+          ticket.finalized_block_height,
+          ticket.finalized_block_hash,
         );
-        if (canonicalBlock === false) verified = { ...verified, state: 'reverted' };
+        priorInclusionOrphaned = canonicalBlock === false;
       }
     } catch (error) {
       await this.db.exchangeDiscovery.updateMany({
@@ -284,6 +285,17 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
         }
         for (const domainId of [...new Set(rows.map((row) => row.domain_id))].sort())
           await lock(tx, `activity-domain:${domainId}`);
+        if (priorInclusionOrphaned) {
+          // Compensation and the replacement observation commit together. A pending replacement
+          // never inherits a credit or custody loss belonging to a disproven finalized inclusion.
+          for (const transfer of prior)
+            await this.revertTransfer(
+              tx,
+              transfer,
+              'Prior finalized inclusion is no longer canonical',
+            );
+          await this.revertLosses(tx, signal);
+        }
         if (verified.state === 'reverted' || verified.state === 'failed') {
           for (const transfer of prior)
             await this.revertTransfer(
@@ -371,7 +383,7 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
             await this.applyTransfer(tx, destination, signal, verified, transfer);
           }
           // A changed canonical receipt can remove an old transfer even if the transaction remains included.
-          if (verified.transfersComplete)
+          if (verified.state === 'finalized' && verified.transfersComplete)
             for (const old of prior) {
               if (!verifiedKeys.has(`${old.wallet_id}:${old.transfer_key}`))
                 await this.revertTransfer(
@@ -412,6 +424,16 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
             ...(verified.blockHash
               ? { block_hash: verified.blockHash, block_height: verified.blockHeight }
               : {}),
+            ...((verified.state === 'finalized' || verified.state === 'failed') &&
+            verified.blockHash &&
+            verified.blockHeight
+              ? {
+                  finalized_block_hash: verified.blockHash,
+                  finalized_block_height: verified.blockHeight,
+                }
+              : verified.state === 'reverted' || priorInclusionOrphaned
+                ? { finalized_block_hash: null, finalized_block_height: null }
+                : {}),
             next_check_at: new Date(
               Date.now() +
                 (verified.state === 'pending' ? this.config.pollMs : this.config.reconciliationMs),
@@ -472,6 +494,10 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
       transferKey,
     ]);
     const old = await tx.exchangeTransfer.findUnique({ where: { id } });
+    const state = verified.state === 'finalized' ? 'finalized' : 'pending';
+    // Below-finality or incomplete-history observations cannot alter an accepted credit.
+    // check() compensates a positively orphaned inclusion before reaching this method.
+    if (old?.state === 'finalized' && state === 'pending') return;
     if (
       old &&
       (old.wallet_id !== wallet.wallet_id ||
@@ -495,11 +521,8 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
       );
       return;
     }
-    const state = verified.state === 'finalized' ? 'finalized' : 'pending';
     if (old?.state === state && (state !== 'finalized' || old.block_hash === verified.blockHash))
       return;
-    // A nonincluded RPC result has no transfer rows. A finalized->pending transition reverses first.
-    if (old?.state === 'finalized' && state === 'pending') return;
     const latest = await tx.exchangeTransfer.findUnique({ where: { id } });
     const revision = (latest?.revision ?? 0) + 1;
     await tx.exchangeTransfer.upsert({
@@ -555,6 +578,8 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
     transfer: ExchangeTransfer,
     reason: string,
   ) {
+    // Earlier compensation in this transaction may already have advanced this row.
+    transfer = await tx.exchangeTransfer.findUniqueOrThrow({ where: { id: transfer.id } });
     if (transfer.state === 'reverted') return;
     const revision = transfer.revision + 1;
     await tx.exchangeTransfer.update({

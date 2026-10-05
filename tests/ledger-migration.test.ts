@@ -17,9 +17,13 @@ test(
         FROM _prisma_migrations
         WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
       `;
-      assert.equal(migrations.length, 3);
+      assert.equal(migrations.length, 5);
       assert(migrations.some((migration) => /fresh_baseline/.test(migration.migration_name)));
       assert(migrations.some((migration) => /exchange_accounting/.test(migration.migration_name)));
+      assert(migrations.some((migration) => /single_owner/.test(migration.migration_name)));
+      assert(
+        migrations.some((migration) => /settlement_reversal_fence/.test(migration.migration_name)),
+      );
 
       const tables = await db.$queryRaw<
         {
@@ -45,6 +49,11 @@ test(
         AND column_name IN ('balance', 'next_sequence', 'balance_after')
       `;
       assert.equal(balanceColumns.length, 0);
+      const tenantColumns = await db.$queryRaw<{ column_name: string }[]>`
+        SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND column_name IN ('tenant_id', 'tenantId')
+      `;
+      assert.equal(tenantColumns.length, 0);
 
       const hashIndex = await db.$queryRaw<{ indexname: string }[]>`
         SELECT indexname

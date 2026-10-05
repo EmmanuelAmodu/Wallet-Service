@@ -88,7 +88,6 @@ export class WalletWorkflowService {
             {
               type: 'ledger.wallet.registered',
               walletId: wallet.id,
-              tenantId: wallet.tenant_id,
               chain: chainSchema.parse(wallet.chain),
               network: wallet.network,
               address: message.address,

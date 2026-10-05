@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { after, test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { Global, Module } from '@nestjs/common';
@@ -13,13 +13,17 @@ import { ExchangeRegistryService } from '../apps/ledger/src/exchange/registry.se
 import { LedgerExchangeModule } from '../apps/ledger/src/exchange/exchange.module.js';
 import { LedgerPrismaService } from '../apps/ledger/src/prisma/prisma.service.js';
 import { ledgerConfig } from '../apps/ledger/src/config/ledger.config.js';
+import { SweepPrismaService } from '../apps/sweep/src/prisma/prisma.service.js';
+import { SweepService } from '../apps/sweep/src/sweep/sweep.service.js';
 import {
   CanonicalAsset,
   ExchangeEvent,
   exchangeEventSchema,
 } from '../packages/queue/src/exchange-contracts.js';
 import { queueConfig } from '../packages/queue/src/queue.config.js';
+import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
 import { SafeErrorsFilter } from '../packages/shared/src/http/safe-errors.filter.js';
+import { migrate } from '../scripts/migrate.js';
 
 const databaseUrl = process.env.TEST_LEDGER_DATABASE_URL;
 const db = databaseUrl ? new LedgerPrismaService({ databaseUrl }) : undefined;
@@ -29,13 +33,33 @@ const registry = db ? new ExchangeRegistryService(db) : undefined;
 const deposits = db ? new DepositsService(db, journal, config) : undefined;
 const reservations = db ? new ReservationsService(db, journal, config) : undefined;
 const settlements = db ? new SettlementsService(db, journal, reservations!) : undefined;
+const sweepDatabaseUrl = process.env.TEST_SWEEP_DATABASE_URL;
+const sweepDb = sweepDatabaseUrl
+  ? new SweepPrismaService({ databaseUrl: sweepDatabaseUrl })
+  : undefined;
+const domains = new Set<string>();
 const native: CanonicalAsset = {
   chain: 'ethereum',
   network: '11155111',
   assetId: 'token:ethereum:native',
 };
 const token: CanonicalAsset = { ...native, assetId: 'token:ethereum:erc20:0x' + 'ab'.repeat(20) };
+before(async () => {
+  if (databaseUrl) await migrate(databaseUrl, 'ledger');
+  if (sweepDatabaseUrl) await migrate(sweepDatabaseUrl, 'sweep');
+});
 after(async () => {
+  for (const domainId of domains) {
+    await db?.outbox.deleteMany({ where: { payload: { path: ['domainId'], equals: domainId } } });
+    const where = { domain_id: domainId };
+    await sweepDb?.sweepWork.deleteMany({ where });
+    await sweepDb?.sweepDeposit.deleteMany({ where });
+    await sweepDb?.sweepWalletRegistration.deleteMany({ where });
+    await sweepDb?.sweepCustomer.deleteMany({ where });
+    await sweepDb?.sweepDomainGate.deleteMany({ where });
+    await sweepDb?.inbox.deleteMany({ where });
+  }
+  await sweepDb?.$disconnect();
   await db?.$disconnect();
 });
 
@@ -55,6 +79,7 @@ function base(domainId: string, revision = 1) {
 
 async function fixture() {
   const domainId = `settlement-${randomUUID()}`;
+  domains.add(domainId);
   const customerId = randomUUID(),
     hotId = randomUUID(),
     walletId = randomUUID(),
@@ -146,7 +171,11 @@ async function fixture() {
     await settlements!.handle(settlement(event, 'confirmed', fees));
     return event;
   };
-  const reserve = async (amount = '200', fee?: { asset: CanonicalAsset; amount: string }) => {
+  const reserve = async (
+    amount = '200',
+    fee?: { asset: CanonicalAsset; amount: string },
+    recordExecution = true,
+  ) => {
     const grouped = new Map<string, { asset: CanonicalAsset; amount: string }>();
     for (const value of [{ asset: native, amount }, ...(fee ? [fee] : [])]) {
       const key = value.asset.assetId;
@@ -189,7 +218,7 @@ async function fixture() {
         amount: { asset: native, amount },
       },
     });
-    await settlements!.handle(execution);
+    if (recordExecution) await settlements!.handle(execution);
     return { event, execution, reservation: row };
   };
   return {
@@ -204,6 +233,18 @@ async function fixture() {
     reserve,
     spec,
   };
+}
+
+function reversal(execution: ExchangeEvent, revision = 2, priorSettlementRevision = 1) {
+  return exchangeEventSchema.parse({
+    ...base(execution.domainId, revision),
+    type: 'settlement.reverted.v1',
+    operationId: execution.operationId,
+    attemptId: execution.attemptId,
+    requestDigest: execution.requestDigest,
+    ...(execution.customerId ? { customerId: execution.customerId } : {}),
+    data: { priorSettlementRevision, reason: 'canonical block disappeared' },
+  });
 }
 
 function settlement(
@@ -352,6 +393,256 @@ test(
     await settlements!.handle(final);
     assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
     assert.equal(await f.balance('custody_hot', f.hotId), 697n);
+  },
+);
+
+test(
+  'reversal before settlement durably fences stale accounting and allows only a newer matching re-inclusion',
+  { skip: !db },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    await f.execute('sweep', '900');
+    const { execution, reservation } = await f.reserve('200');
+    const orphaned = settlement(execution, 'confirmed', '3');
+    const reverted = reversal(execution);
+    await settlements!.handle(reverted);
+    await settlements!.handle(reverted);
+    await settlements!.handle({ ...reverted, eventId: randomUUID() });
+    await settlements!.handle(orphaned);
+    await settlements!.handle({ ...orphaned, eventId: randomUUID() });
+    assert.equal(await f.balance('customer_reserved', f.customerId), 200n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 900n);
+    assert.equal(await f.balance('fee_expense', f.domainId), 0n);
+    assert.equal(
+      await db!.journalBatch.count({ where: { operation_id: execution.operationId } }),
+      1,
+      'Only the original withdrawal reservation has posted',
+    );
+    assert.equal(
+      (await db!.exchangeOperation.findUniqueOrThrow({ where: { id: execution.operationId! } }))
+        .state,
+      'reverted',
+    );
+    assert.equal(
+      await db!.settlementReversal.count({ where: { operation_id: execution.operationId } }),
+      1,
+    );
+    await assert.rejects(
+      settlements!.handle({
+        ...orphaned,
+        eventId: randomUUID(),
+        data: { ...orphaned.data, actualFees: [{ asset: native, amount: '4' }] },
+      }),
+      /conflicting content/,
+    );
+    await assert.rejects(
+      settlements!.handle({
+        ...reverted,
+        eventId: randomUUID(),
+        data: { ...reverted.data, reason: 'changed reversal evidence' },
+      } as ExchangeEvent),
+      /conflicting content/,
+    );
+    await assert.rejects(
+      settlements!.handle({ ...reverted, eventId: randomUUID(), attemptId: randomUUID() }),
+      /identity is immutable/,
+    );
+    await assert.rejects(
+      settlements!.handle({
+        ...orphaned,
+        eventId: randomUUID(),
+        revision: 3,
+        data: { ...orphaned.data, transactionHash: '0x' + 'ad'.repeat(32) },
+      }),
+      /different transaction/,
+    );
+    const reincluded = {
+      ...orphaned,
+      eventId: randomUUID(),
+      revision: 3,
+      data: { ...orphaned.data, actualFees: [{ asset: native, amount: '4' }] },
+    };
+    await settlements!.handle(reincluded);
+    await settlements!.handle(reincluded);
+    await settlements!.handle({ ...reverted, eventId: randomUUID() });
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 696n);
+    assert.equal(await f.balance('fee_expense', f.domainId), 4n);
+    assert.equal(
+      (await db!.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } })).state,
+      'settled',
+    );
+  },
+);
+
+test(
+  'reversal before execution intent survives restart and prevents a delayed cancellation from releasing its hold',
+  { skip: !db },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    await f.execute('sweep', '900');
+    const { event, execution, reservation } = await f.reserve('200', undefined, false);
+    const reverted = reversal(execution);
+    await settlements!.handle(reverted);
+    assert.equal(await db!.exchangeOperation.count({ where: { id: execution.operationId } }), 0);
+    assert.equal(await db!.exchangeInbox.count({ where: { event_id: reverted.eventId } }), 1);
+    await reservations!.handle(
+      exchangeEventSchema.parse({
+        ...base(f.domainId, 2),
+        type: 'reservation.release.requested.v1',
+        operationId: event.operationId,
+        requestDigest: event.requestDigest,
+        customerId: f.customerId,
+        data: { reservationId: reservation.id, reason: 'execution intent is delayed' },
+      }),
+    );
+    assert.equal(await f.balance('customer_reserved', f.customerId), 200n);
+    assert.equal(
+      (await db!.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } })).state,
+      'held',
+    );
+    const restarted = new SettlementsService(db!, journal, reservations!);
+    await assert.rejects(
+      restarted.handle({ ...execution, eventId: randomUUID(), requestDigest: 'ab'.repeat(32) }),
+      /identity is immutable/,
+    );
+    await restarted.handle(execution);
+    await restarted.handle(reverted);
+    await restarted.handle(settlement(execution, 'confirmed', '3'));
+    assert.equal(await f.balance('customer_reserved', f.customerId), 200n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 900n);
+    await restarted.handle(settlement(execution, 'confirmed', '3', 3));
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 697n);
+  },
+);
+
+test(
+  'reversal fence, compensation and both incident deliveries roll back together on a crash and recover once',
+  { skip: !db },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    await f.execute('sweep', '900');
+    const { execution } = await f.reserve('200');
+    await settlements!.handle(settlement(execution, 'confirmed', '3'));
+    const reverted = reversal(execution);
+    const originalPost = journal.post.bind(journal);
+    journal.post = async (tx, request) => {
+      const batch = await originalPost(tx, request);
+      if (request.kind === 'settlement_reversal') throw new Error('crash after compensation');
+      return batch;
+    };
+    try {
+      await assert.rejects(settlements!.handle(reverted), /crash after compensation/);
+    } finally {
+      journal.post = originalPost;
+    }
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 697n);
+    assert.equal(
+      await db!.settlementReversal.count({ where: { operation_id: execution.operationId } }),
+      0,
+    );
+    assert.equal(await db!.exchangeInbox.count({ where: { event_id: reverted.eventId } }), 0);
+    await settlements!.handle(reverted);
+    await settlements!.handle(reverted);
+    assert.equal(await f.balance('customer_reserved', f.customerId), 200n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 900n);
+    assert.equal(
+      await db!.journalBatch.count({
+        where: { operation_id: execution.operationId, kind: 'settlement_reversal' },
+      }),
+      1,
+    );
+  },
+);
+
+test(
+  'settlement fee, custody-shortfall and reorg incidents independently pause Sweep before registry with identical durable deliveries',
+  { skip: !db || !sweepDb },
+  async () => {
+    for (const cause of ['fee', 'shortfall', 'reorg'] as const) {
+      const f = await fixture();
+      await f.credit('100000000000000000');
+      if (cause !== 'shortfall') await f.execute('sweep', '90000000000000000');
+      const { execution } = await f.reserve('200');
+      const paid = settlement(execution, 'confirmed', cause === 'fee' ? '5000000000000001' : '3');
+      await settlements!.handle(paid);
+      if (cause === 'reorg') await settlements!.handle(reversal(execution));
+      await settlements!.handle(paid);
+      const incident = await db!.ledgerIncident.findFirstOrThrow({
+        where: { domain_id: f.domainId, operation_id: execution.operationId },
+      });
+      const deliveries = await db!.outbox.findMany({
+        where: { payload: { path: ['data', 'incidentId'], equals: incident.id } },
+      });
+      assert.equal(deliveries.length, 2);
+      assert.deepEqual(
+        new Set(deliveries.map((row) => row.queue)),
+        new Set([QUEUES.wallet, QUEUES.sweep]),
+      );
+      assert.deepEqual(deliveries[0].payload, deliveries[1].payload);
+      const event = exchangeEventSchema.parse(deliveries[0].payload);
+      assert.equal(event.customerId, f.customerId);
+      const sweep = new SweepService(sweepDb!, new MessageAuth('s'.repeat(64), config.resetEpoch), {
+        domainId: f.domainId,
+      });
+      await sweep.handle(event);
+      await sweep.handle(event);
+      assert.equal(
+        (await sweepDb!.sweepCustomer.findUniqueOrThrow({ where: { customer_id: f.customerId } }))
+          .paused,
+        true,
+      );
+      const hot = await db!.exchangeWallet.findUniqueOrThrow({ where: { wallet_id: f.hotId } });
+      const source = await db!.exchangeWallet.findUniqueOrThrow({
+        where: { wallet_id: f.walletId },
+      });
+      await sweep.handle(
+        exchangeEventSchema.parse({
+          ...base(f.domainId),
+          type: 'custody-wallet.registry.requested.v1',
+          data: {
+            walletId: hot.wallet_id,
+            chain: hot.chain,
+            network: hot.network,
+            address: hot.address,
+            role: 'hot',
+            account: 0,
+            registryRevision: 1,
+          },
+        }),
+      );
+      await sweep.handle(
+        exchangeEventSchema.parse({
+          ...base(f.domainId),
+          type: 'customer-wallet.registry.requested.v1',
+          customerId: f.customerId,
+          data: {
+            walletId: source.wallet_id,
+            hotWalletId: f.hotId,
+            chain: source.chain,
+            network: source.network,
+            address: source.address,
+            account: 10,
+            registryRevision: 1,
+          },
+        }),
+      );
+      const credit = await db!.outbox.findFirstOrThrow({
+        where: {
+          queue: QUEUES.sweep,
+          payload: { path: ['domainId'], equals: f.domainId },
+          AND: { payload: { path: ['type'], equals: 'deposit.credited.v1' } },
+        },
+      });
+      await sweep.handle(exchangeEventSchema.parse(credit.payload));
+      const work = await sweepDb!.sweepWork.findFirstOrThrow({ where: { domain_id: f.domainId } });
+      assert.equal(work.state, 'paused_review');
+    }
   },
 );
 

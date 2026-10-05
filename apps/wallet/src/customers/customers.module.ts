@@ -7,16 +7,20 @@ import { ExchangeCustomersController } from './customers.controller.js';
 import { ExchangeCustomersService } from './customers.service.js';
 import { ExchangeBackendGuard } from './exchange-backend.guard.js';
 import { MessagingModule } from '../../../../packages/queue/src/messaging.module.js';
+import { customerAuthConfig } from '../config/customer-auth.config.js';
+import { CustomerAuthGuard } from '../auth/customer-auth.guard.js';
+import { CustomerApiController } from './customer-api.controller.js';
 
 @Module({
   imports: [
     ConfigModule.forFeature(exchangeApiConfig),
+    ConfigModule.forFeature(customerAuthConfig),
     MessagingModule,
     WalletPrismaModule,
     LedgerClientModule,
   ],
-  controllers: [ExchangeCustomersController],
-  providers: [ExchangeCustomersService, ExchangeBackendGuard],
+  controllers: [ExchangeCustomersController, CustomerApiController],
+  providers: [ExchangeCustomersService, ExchangeBackendGuard, CustomerAuthGuard],
   exports: [ExchangeCustomersService, ExchangeBackendGuard],
 })
 export class CustomersModule {}

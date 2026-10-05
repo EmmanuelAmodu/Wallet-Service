@@ -252,6 +252,17 @@ export class ReservationsService {
       return;
     }
     const operation = await tx.exchangeOperation.findUnique({ where: { id: event.operationId } });
+    const reversal = await tx.settlementReversal.findFirst({
+      where: { operation_id: event.operationId },
+    });
+    if (
+      reversal &&
+      (reversal.domain_id !== event.domainId ||
+        reversal.request_digest !== event.requestDigest ||
+        reversal.reset_epoch !== event.resetEpoch ||
+        (reversal.customer_id && reversal.customer_id !== event.customerId))
+    )
+      throw new ActionRejectedError('Reservation reversal identity is invalid');
     if (
       operation &&
       (operation.domain_id !== event.domainId ||
@@ -260,7 +271,7 @@ export class ReservationsService {
         operation.reset_epoch !== event.resetEpoch)
     )
       throw new ActionRejectedError('Reservation execution identity is invalid');
-    if (!['held', 'frozen'].includes(reservation.state) || operation) {
+    if (!['held', 'frozen'].includes(reservation.state) || operation || reversal) {
       await publishExchangeEvent(
         tx,
         event,

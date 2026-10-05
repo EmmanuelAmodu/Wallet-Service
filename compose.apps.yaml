@@ -1,0 +1,140 @@
+# Development overlay: LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) docker compose -f compose.yaml -f compose.apps.yaml up
+# Only User and Wallet publish application HTTP ports. Keep /internal paths off public ingress.
+x-application: &application
+  build:
+    context: .
+    target: runtime
+  image: wallet-exchange-local
+  user: '${LOCAL_UID:-1000}:${LOCAL_GID:-1000}'
+  restart: unless-stopped
+
+x-queue: &queue
+  REDIS_URL: redis://redis:6379
+  RESET_EPOCH: ${RESET_EPOCH}
+  RESET_IN_PROGRESS: ${RESET_IN_PROGRESS:-}
+  QUEUE_PREFIX: ${QUEUE_PREFIX:-waas}
+  QUEUE_AUTH_KEY: ${QUEUE_AUTH_KEY}
+
+x-chain: &chain
+  ETH_CHAIN_ID: ${ETH_CHAIN_ID:-11155111}
+  ETH_RPC_URL: ${ETH_RPC_URL:-}
+  SOLANA_GENESIS_HASH: ${SOLANA_GENESIS_HASH:-EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG}
+  SOLANA_RPC_URL: ${SOLANA_RPC_URL:-}
+  BTC_RPC_URL: ${BTC_RPC_URL:-}
+  BTC_RPC_USER: ${BTC_RPC_USER:-}
+  BTC_RPC_PASSWORD: ${BTC_RPC_PASSWORD:-}
+  CHAIN_NETWORKS: ${CHAIN_NETWORKS:-{}}
+
+services:
+  user:
+    <<: *application
+    command: ['node', 'dist/apps/user/src/main.js']
+    environment:
+      <<: *queue
+      USER_DATABASE_URL: postgresql://users:users_local_only@user-postgres:5432/users
+      EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
+      USER_HOST: 0.0.0.0
+      AUTH_TOKEN_PRIVATE_KEY_FILE: /run/secrets/auth-private
+      AUTH_TOKEN_ISSUER: ${AUTH_TOKEN_ISSUER:-exchange-user}
+      AUTH_TOKEN_AUDIENCE: ${AUTH_TOKEN_AUDIENCE:-exchange-wallet}
+      AUTH_ACCESS_TOKEN_TTL_SECONDS: ${AUTH_ACCESS_TOKEN_TTL_SECONDS:-900}
+    secrets: [auth-private]
+    ports: ['${PUBLIC_BIND_ADDRESS:-127.0.0.1}:3001:3001']
+    depends_on:
+      user-postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  wallet:
+    <<: *application
+    command: ['node', 'dist/apps/wallet/src/main.js']
+    environment:
+      <<: [*queue, *chain]
+      WALLET_DATABASE_URL: postgresql://wallet:wallet_local_only@postgres:5432/wallet
+      WALLET_HOST: 0.0.0.0
+      WALLET_API_KEY: ${WALLET_API_KEY}
+      EXCHANGE_API_KEY: ${EXCHANGE_API_KEY}
+      EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
+      SIGNER_SEED_ID: ${SIGNER_SEED_ID:-local-v1}
+      LEDGER_URL: http://ledger:3010
+      LEDGER_API_KEY: ${LEDGER_API_KEY}
+      AUTH_TOKEN_PUBLIC_KEY_FILE: /run/secrets/auth-public
+      AUTH_TOKEN_ISSUER: ${AUTH_TOKEN_ISSUER:-exchange-user}
+      AUTH_TOKEN_AUDIENCE: ${AUTH_TOKEN_AUDIENCE:-exchange-wallet}
+    secrets: [auth-public]
+    ports: ['${PUBLIC_BIND_ADDRESS:-127.0.0.1}:3000:3000']
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  ledger:
+    <<: *application
+    command: ['node', 'dist/apps/ledger/src/main.js']
+    environment:
+      <<: *queue
+      LEDGER_DATABASE_URL: postgresql://ledger:ledger_local_only@ledger-postgres:5432/ledger
+      LEDGER_API_KEY: ${LEDGER_API_KEY}
+      LEDGER_HOST: 0.0.0.0
+    expose: ['3010']
+    depends_on:
+      ledger-postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  signer:
+    <<: *application
+    command: ['node', 'dist/apps/signer/src/main.js']
+    environment:
+      <<: [*queue, *chain]
+      SIGNER_SEED_ID: ${SIGNER_SEED_ID:-local-v1}
+      SIGNER_SEED_FILE: /run/secrets/custody-seed
+    secrets: [custody-seed]
+    depends_on:
+      redis: { condition: service_healthy }
+  broadcast:
+    <<: *application
+    command: ['node', 'dist/apps/broadcast/src/main.js']
+    environment:
+      <<: [*queue, *chain]
+      BROADCAST_DATABASE_URL: postgresql://broadcast:broadcast_local_only@broadcast-postgres:5432/broadcast
+      ALLOW_BROADCAST: ${ALLOW_BROADCAST:-false}
+    depends_on:
+      broadcast-postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  sweep:
+    <<: *application
+    command: ['node', 'dist/apps/sweep/src/main.js']
+    environment:
+      <<: *queue
+      SWEEP_DATABASE_URL: postgresql://sweep:sweep_local_only@sweep-postgres:5432/sweep
+      EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
+    depends_on:
+      sweep-postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  activity-listener:
+    <<: *application
+    command: ['node', 'dist/apps/activity-listener/src/main.js']
+    environment:
+      <<: [*queue, *chain]
+      ACTIVITY_DATABASE_URL: postgresql://activity:activity_local_only@activity-postgres:5432/activity
+      PUBSUB_PROJECT_ID: ${PUBSUB_PROJECT_ID:-wallet-local}
+      PUBSUB_TOPIC: ${PUBSUB_TOPIC}
+      PUBSUB_SUBSCRIPTION: ${PUBSUB_SUBSCRIPTION}
+      PUBSUB_API_ENDPOINT: pubsub:8086
+      EXCHANGE_PROVIDER_NAME: ${EXCHANGE_PROVIDER_NAME:-quicknode}
+      EXCHANGE_PROVIDER_URL: ${EXCHANGE_PROVIDER_URL:-}
+      EXCHANGE_PROVIDER_API_KEY: ${EXCHANGE_PROVIDER_API_KEY:-}
+      EXCHANGE_PROVIDER_CERTIFICATIONS: ${EXCHANGE_PROVIDER_CERTIFICATIONS:-[]}
+      EXCHANGE_EVM_TRACE_MODE: ${EXCHANGE_EVM_TRACE_MODE:-top-level}
+      EXCHANGE_BITCOIN_PROVIDER_URL: ${EXCHANGE_BITCOIN_PROVIDER_URL:-}
+      EXCHANGE_BITCOIN_PROVIDER_API_KEY: ${EXCHANGE_BITCOIN_PROVIDER_API_KEY:-}
+      EXCHANGE_BITCOIN_PROVIDER_CERTIFICATIONS: ${EXCHANGE_BITCOIN_PROVIDER_CERTIFICATIONS:-[]}
+      EXCHANGE_BTC_RPC_URL: ${EXCHANGE_BTC_RPC_URL:-}
+      EXCHANGE_BTC_RPC_USER: ${EXCHANGE_BTC_RPC_USER:-}
+      EXCHANGE_BTC_RPC_PASSWORD: ${EXCHANGE_BTC_RPC_PASSWORD:-}
+    depends_on:
+      activity-postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+secrets:
+  auth-private:
+    file: ${AUTH_TOKEN_PRIVATE_KEY_FILE:-./secrets/user-token-private.pem}
+  auth-public:
+    file: ${AUTH_TOKEN_PUBLIC_KEY_FILE:-./secrets/user-token-public.pem}
+  custody-seed:
+    file: ${SIGNER_SEED_FILE:-./secrets/local.mnemonic}

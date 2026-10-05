@@ -24,6 +24,8 @@ const databaseTargets = [
   },
   { name: 'ledger', envName: 'LEDGER_DATABASE_URL', config: 'prisma.ledger.config.ts' },
   { name: 'activity', envName: 'ACTIVITY_DATABASE_URL', config: 'prisma.activity.config.ts' },
+  { name: 'sweep', envName: 'SWEEP_DATABASE_URL', config: 'prisma.sweep.config.ts' },
+  { name: 'user', envName: 'USER_DATABASE_URL', config: 'prisma.user.config.ts' },
 ] as const;
 
 function isLoopback(hostname: string) {

@@ -36,23 +36,33 @@ export default tseslint.config(
       ],
     },
   },
-  ...['wallet', 'broadcast', 'signer', 'activity-listener', 'ledger'].map((application) => ({
-    files: [`apps/${application}/src/**/*.ts`],
-    rules: {
-      'no-restricted-imports': [
-        'error',
-        {
-          patterns: ['wallet', 'broadcast', 'signer']
-            .filter((other) => other !== application)
-            .map((other) => ({
-              group: [`**/${other}/src/**`],
-              message:
-                'Applications communicate through queue contracts; do not import another application.',
-            })),
-        },
-      ],
-    },
-  })),
+  ...['wallet', 'broadcast', 'signer', 'activity-listener', 'ledger', 'user', 'sweep'].map(
+    (application) => ({
+      files: [`apps/${application}/src/**/*.ts`],
+      rules: {
+        'no-restricted-imports': [
+          'error',
+          {
+            patterns: [
+              'wallet',
+              'broadcast',
+              'signer',
+              'activity-listener',
+              'ledger',
+              'user',
+              'sweep',
+            ]
+              .filter((other) => other !== application)
+              .map((other) => ({
+                group: [`**/${other}/src/**`],
+                message:
+                  'Applications communicate through queue contracts; do not import another application.',
+              })),
+          },
+        ],
+      },
+    }),
+  ),
   {
     files: ['apps/*/src/**/*.ts'],
     ignores: ['apps/*/src/config/**'],

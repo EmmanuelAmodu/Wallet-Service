@@ -19,12 +19,17 @@ const db = enabled
   ? new LedgerPrismaService({ databaseUrl: process.env.TEST_LEDGER_DATABASE_URL! })
   : undefined;
 const walletIds = [randomUUID(), randomUUID()];
-const tenantId = `ledger-test-${randomUUID()}`;
+const ownedWalletIds = new Set<string>(walletIds);
 const walletAddresses = [randomBytes(20).toString('hex'), randomBytes(20).toString('hex')].map(
   (address) => `0x${address}`,
 );
 const identifiers = Array.from({ length: 10 }, () => `transaction:ethereum:${randomUUID()}`);
 let service: LedgerService;
+
+async function registerWallet(registration: Parameters<LedgerService['registerWallet']>[0]) {
+  ownedWalletIds.add(registration.walletId);
+  return service.registerWallet(registration);
+}
 
 async function waitForLedgerActivity(
   identifier: string,
@@ -69,9 +74,8 @@ test(
   async () => {
     const asset = `token:ethereum:zz-integration-${randomUUID()}`;
     const before = BigInt(
-      (await service.balances(walletIds[0], tenantId)).balances.find(
-        (balance) => balance.asset === asset,
-      )?.confirmed ?? '0',
+      (await service.balances(walletIds[0])).balances.find((balance) => balance.asset === asset)
+        ?.confirmed ?? '0',
     );
     const prefix = `ledger-flow-${randomUUID()}`;
     const options = { connection: connection(process.env.TEST_REDIS_URL!), prefix };
@@ -130,16 +134,15 @@ test(
     );
     try {
       await worker.waitUntilReady();
-      await service.registerWallet({
+      await registerWallet({
         walletId: smartChainWalletId,
-        tenantId,
         chain: 'smartChain',
         network: '56',
         address: smartChainAddress,
       });
       await listener.receive(source, 'pubsub-ledger-integration');
       let record = await waitForLedgerActivity(ledgerIdentifier, 'observed', 0n);
-      let balances = await service.balances(walletIds[0], tenantId);
+      let balances = await service.balances(walletIds[0]);
       assert.equal(
         BigInt(balances.balances.find((balance) => balance.asset === asset)!.provisional),
         before - 1_000_000_000_000_000_000_001n,
@@ -153,7 +156,7 @@ test(
       await listener.resumeFinality(source, 120, '0xflow-block');
       record = await waitForLedgerActivity(ledgerIdentifier, 'observed', initialSequence);
       const lateSequence = record.observation_sequence;
-      balances = await service.balances(walletIds[0], tenantId);
+      balances = await service.balances(walletIds[0]);
       assert.equal(
         BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
         before,
@@ -167,7 +170,7 @@ test(
 
       await listener.resumeFinality(source, 121, '0xflow-block');
       record = await waitForLedgerActivity(ledgerIdentifier, 'reverted', lateSequence);
-      balances = await service.balances(walletIds[0], tenantId);
+      balances = await service.balances(walletIds[0]);
       assert.equal(
         BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
         before,
@@ -180,7 +183,7 @@ test(
       const revertedSequence = record.observation_sequence;
       await listener.resumeFinality(source, 122, '0xflow-block');
       await waitForLedgerActivity(ledgerIdentifier, 'finalized', revertedSequence);
-      balances = await service.balances(walletIds[0], tenantId);
+      balances = await service.balances(walletIds[0]);
       assert.equal(
         BigInt(balances.balances.find((balance) => balance.asset === asset)!.confirmed),
         before - 1_000_000_000_000_000_000_001n,
@@ -231,7 +234,7 @@ test(
       };
       await listener.receive(smartChainActivity, 'pubsub-smartchain-alias');
       await waitForLedgerActivity(canonicalId, 'finalized', firstAliasUpdate.observation_sequence);
-      const smartChainBalances = await service.balances(smartChainWalletId, tenantId);
+      const smartChainBalances = await service.balances(smartChainWalletId);
       assert.equal(smartChainBalances.balances[0].confirmed, '100');
       assert.equal(
         await db!.ledgerActivity.count({
@@ -285,13 +288,12 @@ before(async () => {
     where: { activity: { chain: 'smartChain', network: '56' } },
   });
   await db.ledgerActivity.deleteMany({ where: { chain: 'smartChain', network: '56' } });
-  await db.ledgerWallet.deleteMany({ where: { tenant_id: { startsWith: 'ledger-test-' } } });
+  await db.ledgerWallet.deleteMany({ where: { wallet_id: { in: [...ownedWalletIds] } } });
   service = new LedgerService(db);
   await Promise.all(
     walletIds.map((walletId, index) =>
-      service.registerWallet({
+      registerWallet({
         walletId,
-        tenantId,
         chain: 'ethereum',
         network: '11155111',
         address: walletAddresses[index],
@@ -326,7 +328,7 @@ after(async () => {
     where: { activity: { chain: 'smartChain', network: '56' } },
   });
   await db.ledgerActivity.deleteMany({ where: { chain: 'smartChain', network: '56' } });
-  await db.ledgerWallet.deleteMany({ where: { tenant_id: tenantId } });
+  await db.ledgerWallet.deleteMany({ where: { wallet_id: { in: [...ownedWalletIds] } } });
   await db.$disconnect();
 });
 
@@ -385,7 +387,7 @@ test(
     assert.equal(debits.toString(), credits.toString());
     assert.equal(debits.toString(), '100');
     assert(openingJournal.every((entry) => entry.balance_after !== null));
-    let balances = await service.balances(walletIds[0], tenantId);
+    let balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].confirmed, '0');
     assert.equal(balances.balances[0].provisional, '-100');
 
@@ -395,7 +397,7 @@ test(
       observationSequence: '1',
       canonicalReconciliation: true,
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].confirmed, '-100');
     assert.equal(balances.balances[0].provisional, '0');
     entries = await db!.ledgerEntry.count({ where: { activity_identifier: identifiers[0] } });
@@ -443,14 +445,14 @@ test(
       blockHash: undefined,
       blockHeight: undefined,
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].confirmed, '-100');
     assert.equal(balances.balances[0].provisional, '0');
 
     const second = activity(1, 'observed', '0xblock-b');
     await service.applyActivity(second);
     await service.applyActivity({ ...second, state: 'attention', observationSequence: '1' });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].provisional, '-100');
     await service.applyActivity({ ...second, observationSequence: '2' });
     await service.applyActivity({
@@ -459,12 +461,12 @@ test(
       observationSequence: '3',
       canonicalReconciliation: true,
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].confirmed, '-200');
     assert.equal(balances.balances[0].provisional, '0');
 
     await service.applyActivity(activity(3, 'attention', '0xblock-e'));
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].confirmed, '-200');
     assert.equal(balances.balances[0].provisional, '-100');
 
@@ -476,7 +478,7 @@ test(
       observationSequence: '1',
       canonicalReconciliation: true,
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].provisional, '-200');
     await service.applyActivity({
       ...third,
@@ -486,7 +488,7 @@ test(
       observationSequence: '2',
       canonicalReconciliation: true,
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(balances.balances[0].provisional, '-100');
 
     const feeActivity = activity(4, 'observed', '0xblock-fee');
@@ -507,7 +509,7 @@ test(
     assert.equal(clearingEntry?.side, 'debit');
     assert.equal(clearingEntry?.amount.toString(), '5');
 
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     const beforeLargePostings = BigInt(balances.balances[0].provisional);
     const large = activity(5, 'observed', '0xblock-large');
     large.changes[0].amount = '-1000000000000000000000';
@@ -517,7 +519,7 @@ test(
     unit.changes[0].amount = '-1';
     unit.changes[1].amount = '1';
     await service.applyActivity(unit);
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(
       BigInt(balances.balances[0].provisional),
       beforeLargePostings - 1_000_000_000_000_000_000_000n - 1n,
@@ -526,7 +528,7 @@ test(
     const confirmedBeforeFinality = BigInt(balances.balances[0].confirmed);
     const finalized = activity(7, 'finalized', '0xcanonical-a', '5');
     await service.applyActivity(finalized);
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     const confirmedAfterFinality = BigInt(balances.balances[0].confirmed);
     assert.equal(confirmedAfterFinality, confirmedBeforeFinality - 100n);
 
@@ -536,7 +538,7 @@ test(
       blockHash: '0xstale-block',
       observationSequence: '4',
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(BigInt(balances.balances[0].confirmed), confirmedAfterFinality);
     assert.equal(
       BigInt(balances.balances[0].provisional),
@@ -551,7 +553,7 @@ test(
       observationSequence: '6',
       canonicalReconciliation: true,
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(BigInt(balances.balances[0].confirmed), confirmedBeforeFinality);
     assert.equal(
       (await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier: identifiers[7] } }))
@@ -563,7 +565,7 @@ test(
       state: 'finalized',
       observationSequence: '7',
     });
-    balances = await service.balances(walletIds[0], tenantId);
+    balances = await service.balances(walletIds[0]);
     assert.equal(BigInt(balances.balances[0].confirmed), confirmedAfterFinality);
     assert.equal(
       BigInt(balances.balances[0].provisional),
@@ -596,9 +598,8 @@ test(
     const walletId = randomUUID();
     const address = `ltc1${randomBytes(16).toString('hex')}`;
     const identifier = `transaction:litecoin:${randomUUID()}`;
-    await service.registerWallet({
+    await registerWallet({
       walletId,
-      tenantId,
       chain: 'litecoin',
       network: 'mainnet',
       address,
@@ -621,7 +622,7 @@ test(
       ],
     });
 
-    const balances = await service.balances(walletId, tenantId);
+    const balances = await service.balances(walletId);
     assert.equal(balances.chain, 'litecoin');
     assert.equal(balances.balances[0].provisional, '2500');
   },
@@ -634,9 +635,8 @@ test(
     const walletId = randomUUID();
     const address = `0x${randomBytes(20).toString('hex')}`;
     const identifier = `transaction:ethereum:${randomUUID()}`;
-    await service.registerWallet({
+    await registerWallet({
       walletId,
-      tenantId,
       chain: 'ethereum',
       network: '11155111',
       address,
@@ -661,14 +661,14 @@ test(
 
     await service.applyActivity(legacyEvent);
     await service.applyActivity({ ...legacyEvent, state: 'finalized' });
-    const balances = await service.balances(walletId, tenantId);
+    const balances = await service.balances(walletId);
     assert.equal(balances.balances[0].confirmed, '100');
     assert.equal(balances.balances[0].provisional, '0');
     const persisted = await db!.ledgerActivity.findUniqueOrThrow({ where: { identifier } });
     assert.equal(persisted.observation_sequence, 0n);
 
     await service.applyActivity({ ...legacyEvent, blockHash: '0xolder-block' });
-    const unchanged = await service.balances(walletId, tenantId);
+    const unchanged = await service.balances(walletId);
     assert.equal(unchanged.balances[0].confirmed, '100');
     assert.equal(unchanged.balances[0].provisional, '0');
     const sequenced = {
@@ -687,7 +687,7 @@ test(
     assert.equal(protectedActivity.observation_sequence, 100n);
     assert.equal(protectedActivity.block_hash, '0xcanonical-new');
     assert.equal(protectedActivity.state, 'observed');
-    const protectedBalances = await service.balances(walletId, tenantId);
+    const protectedBalances = await service.balances(walletId);
     assert.equal(protectedBalances.balances[0].confirmed, '0');
     assert.equal(protectedBalances.balances[0].provisional, '100');
   },
@@ -699,9 +699,8 @@ test(
   async () => {
     const walletId = randomUUID();
     const address = `0x${randomBytes(20).toString('hex')}`;
-    await service.registerWallet({
+    await registerWallet({
       walletId,
-      tenantId,
       chain: 'ethereum',
       network: '11155111',
       address,
@@ -738,7 +737,7 @@ test(
       canonicalReconciliation: true,
     });
 
-    const balances = await service.balances(walletId, tenantId);
+    const balances = await service.balances(walletId);
     assert.equal(balances.balances[0].confirmed, '100');
     assert.equal(balances.balances[0].provisional, '0');
     assert.equal(

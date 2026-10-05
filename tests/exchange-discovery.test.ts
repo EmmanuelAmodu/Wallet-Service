@@ -186,14 +186,19 @@ async function fixture(
     ],
     fee: { asset, amount: '2', payer: external },
   };
-  let canonical: boolean | null = null,
+  let canonical: boolean | null | Error = null,
     calls = 0;
+  const canonicalChecks: { height: string; hash: string }[] = [];
   const verifier = {
     verify: async () => {
       calls++;
       return observation;
     },
-    isCanonicalBlock: async () => canonical,
+    isCanonicalBlock: async (_chain: string, _network: string, height: string, hash: string) => {
+      canonicalChecks.push({ height, hash });
+      if (canonical instanceof Error) throw canonical;
+      return canonical;
+    },
   } as unknown as ExchangeVerifier;
   const service = new ActivityExchangeService(activity!, verifier, auth, registry!, {
     pollMs: 100,
@@ -271,9 +276,10 @@ async function fixture(
     set: (value: VerifiedExchangeTransaction) => {
       observation = value;
     },
-    canonical: (value: boolean | null) => {
+    canonical: (value: boolean | null | Error) => {
       canonical = value;
     },
+    canonicalChecks: () => canonicalChecks,
     calls: () => calls,
   };
 }
@@ -363,6 +369,170 @@ test(
     await f.service.receive({ ...f.signal, discoveryId: randomUUID() });
     await f.deliver();
     assert.equal(await f.balance('customer_available'), 100n);
+  },
+);
+test(
+  'orphaned finalized A compensates before pending B and B credits only after finality across recovery',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture();
+    const finalizedA = f.observation();
+    await f.service.receive(f.signal);
+    await f.deliver();
+    const blockB = randomHash();
+    f.canonical(false);
+    f.set({ ...finalizedA, state: 'pending', blockHash: blockB, blockHeight: '20' });
+    await f.service.receive({ ...f.signal, discoveryId: randomUUID() });
+    await f.deliver();
+    assert.deepEqual(f.canonicalChecks(), [{ height: '10', hash: finalizedA.blockHash }]);
+    assert.equal(await f.balance('customer_available'), 0n);
+    assert.equal(await f.balance('custody_deposit'), 0n);
+    let discovery = await activity!.exchangeDiscovery.findFirstOrThrow({
+      where: { transaction_hash: f.signal.transactionHash },
+    });
+    assert.equal(discovery.block_hash, blockB);
+    assert.equal(discovery.finalized_block_hash, null);
+    assert.equal(discovery.state, 'pending');
+    assert.equal(
+      (await activity!.exchangeTransfer.findFirstOrThrow({ where: { domain_id: f.domainId } }))
+        .state,
+      'pending',
+    );
+    // Disappearing B and repeated recovery cannot restore A's compensated credit.
+    f.set({
+      ...finalizedA,
+      state: 'pending',
+      blockHash: undefined,
+      blockHeight: undefined,
+      transfers: [],
+      transfersComplete: false,
+    });
+    for (let pass = 0; pass < 2; pass++) {
+      await f.service.check(discovery.id);
+      await f.deliver();
+      assert.equal(await f.balance('customer_available'), 0n);
+    }
+    f.set({ ...finalizedA, blockHash: blockB, blockHeight: '20' });
+    await f.service.check(discovery.id);
+    await f.deliver();
+    await f.service.check(discovery.id);
+    await f.deliver();
+    assert.equal(await f.balance('customer_available'), 100n);
+    assert.equal(await f.balance('custody_deposit'), 100n);
+    assert.equal(await ledger!.journalBatch.count({ where: { domain_id: f.domainId } }), 3);
+    discovery = await activity!.exchangeDiscovery.findUniqueOrThrow({
+      where: { id: discovery.id },
+    });
+    assert.equal(discovery.finalized_block_hash, blockB);
+    assert.equal(discovery.finalized_block_height, '20');
+  },
+);
+
+test(
+  'unknown prior inclusion retains A independently of pending B, RPC outages and later A restoration',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture();
+    const finalizedA = f.observation();
+    await f.service.receive(f.signal);
+    await f.deliver();
+    const blockB = randomHash();
+    f.set({ ...finalizedA, state: 'pending', blockHash: blockB, blockHeight: '20', transfers: [] });
+    await f.service.receive({ ...f.signal, discoveryId: randomUUID() });
+    await f.deliver();
+    const discovery = await activity!.exchangeDiscovery.findFirstOrThrow({
+      where: { transaction_hash: f.signal.transactionHash },
+    });
+    assert.equal(discovery.block_hash, blockB);
+    assert.equal(discovery.finalized_block_hash, finalizedA.blockHash);
+    assert.equal(discovery.finalized_block_height, '10');
+    assert.equal(await f.balance('customer_available'), 100n);
+    f.canonical(new Error('prior block RPC unavailable'));
+    await assert.rejects(f.service.check(discovery.id), /prior block RPC unavailable/);
+    assert.equal(await f.balance('customer_available'), 100n);
+    f.canonical(null);
+    f.set({
+      ...finalizedA,
+      state: 'pending',
+      blockHash: undefined,
+      blockHeight: undefined,
+      transfers: [],
+      transfersComplete: true,
+    });
+    await f.service.check(discovery.id);
+    await f.deliver();
+    assert.equal(await f.balance('customer_available'), 100n);
+    assert.equal(f.canonicalChecks().length, 3);
+    assert.ok(
+      f
+        .canonicalChecks()
+        .every((check) => check.hash === finalizedA.blockHash && check.height === '10'),
+    );
+    f.set(finalizedA);
+    await f.service.check(discovery.id);
+    await f.deliver();
+    assert.equal(await f.balance('customer_available'), 100n);
+    assert.equal(await ledger!.journalBatch.count({ where: { domain_id: f.domainId } }), 1);
+  },
+);
+
+test(
+  'pending replacement compensates a proven orphan custody loss and later finality records only the new loss',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture();
+    await f.fund();
+    const finalizedA = {
+      ...f.observation(),
+      fee: { asset, amount: '2', payer: f.address },
+      transfers: [{ ...f.observation().transfers[0], from: f.address, to: f.external }],
+    };
+    f.set(finalizedA);
+    await f.service.receive(f.signal);
+    await f.deliver();
+    assert.equal(await f.balance('custody_deposit'), 898n);
+    const blockB = randomHash();
+    f.canonical(false);
+    const pendingB = {
+      ...finalizedA,
+      state: 'pending' as const,
+      blockHash: blockB,
+      blockHeight: '20',
+      transfers: [{ ...finalizedA.transfers[0], amount: '40' }],
+    };
+    f.set(pendingB);
+    await f.service.receive({ ...f.signal, discoveryId: randomUUID() });
+    await f.deliver();
+    assert.equal(await f.balance('custody_deposit'), 1000n);
+    assert.equal(await f.balance('customer_frozen'), 1000n);
+    await f.service.receive({ ...f.signal, discoveryId: randomUUID() });
+    await f.deliver();
+    assert.equal(await f.balance('custody_deposit'), 1000n);
+    f.set({ ...pendingB, state: 'finalized' });
+    await f.service.receive({ ...f.signal, discoveryId: randomUUID() });
+    await f.deliver();
+    assert.equal(await f.balance('custody_deposit'), 958n);
+    assert.equal(await f.balance('customer_frozen'), 1000n);
+    assert.equal(
+      await activity!.exchangeCustodyIncident.count({
+        where: {
+          domain_id: f.domainId,
+          category: 'unexpected_customer_outflow',
+          state: 'reverted',
+        },
+      }),
+      1,
+    );
+    assert.equal(
+      await activity!.exchangeCustodyIncident.count({
+        where: {
+          domain_id: f.domainId,
+          category: 'unexpected_customer_outflow',
+          state: 'open',
+        },
+      }),
+      1,
+    );
   },
 );
 test(

@@ -18,7 +18,11 @@ import { AccountSpec, accountNormalSides } from '../accounts/accounts.service.js
 import { JournalPosting, JournalService } from '../journal/journal.service.js';
 import { LedgerPrismaService } from '../prisma/prisma.service.js';
 import { ReservationsService } from '../reservations/reservations.service.js';
-import { consumeExchangeEvent, exchangeDigest } from '../exchange/exchange-inbox.js';
+import {
+  consumeExchangeEvent,
+  exchangeDigest,
+  publishExchangeEvent,
+} from '../exchange/exchange-inbox.js';
 import { resultIdentity } from '../exchange/events.js';
 
 type ExecuteEvent = Extract<
@@ -115,6 +119,7 @@ export class SettlementsService {
   }
 
   private async recordExecution(tx: Prisma.TransactionClient, event: ExecuteEvent) {
+    const reversals = await this.reversals(tx, event);
     const existing = await tx.exchangeOperation.findUnique({ where: { id: event.operationId } });
     if (existing) {
       const original = exchangeEventSchema.parse(existing.payload) as ExecuteEvent;
@@ -208,6 +213,8 @@ export class SettlementsService {
           'Funding must move management custody to registered customer custody',
         );
     }
+    if (reversals.some((row) => row.customer_id && row.customer_id !== customerId))
+      throw new ActionRejectedError('Reversed execution customer identity is immutable');
     await tx.exchangeOperation.create({
       data: {
         id: event.operationId,
@@ -224,10 +231,34 @@ export class SettlementsService {
         payload: event as Prisma.InputJsonValue,
         attempt_id: event.attemptId,
         attempt_revision: 0,
-        state: 'preparing',
+        state: reversals.length ? 'reverted' : 'preparing',
+        settlement_revision: reversals.reduce(
+          (revision, row) => Math.max(revision, row.revision),
+          0,
+        ),
         reset_epoch: event.resetEpoch,
       },
     });
+  }
+
+  private async reversals(
+    tx: Prisma.TransactionClient,
+    event: ExchangeEvent & { operationId: string; attemptId: string; requestDigest: string },
+  ) {
+    const rows = await tx.settlementReversal.findMany({
+      where: { operation_id: event.operationId },
+    });
+    for (const row of rows) {
+      if (
+        row.domain_id !== event.domainId ||
+        row.reset_epoch !== event.resetEpoch ||
+        row.attempt_id !== event.attemptId ||
+        row.request_digest !== event.requestDigest ||
+        (row.customer_id && event.customerId && row.customer_id !== event.customerId)
+      )
+        throw new ActionRejectedError('Reversed execution attempt identity is immutable');
+    }
+    return rows;
   }
 
   private async operation(
@@ -240,7 +271,8 @@ export class SettlementsService {
       operation.domain_id !== event.domainId ||
       operation.reset_epoch !== event.resetEpoch ||
       operation.attempt_id !== event.attemptId ||
-      operation.request_digest !== event.requestDigest
+      operation.request_digest !== event.requestDigest ||
+      (event.customerId && operation.customer_id !== event.customerId)
     )
       throw new ActionRejectedError('Execution attempt identity mismatch');
     return operation;
@@ -285,7 +317,7 @@ export class SettlementsService {
 
   private async settle(tx: Prisma.TransactionClient, event: SettlementEvent) {
     const operation = await this.operation(tx, event);
-    if (event.revision < operation.settlement_revision) return;
+    const reversals = await this.reversals(tx, event);
     const execution = exchangeEventSchema.parse(operation.payload) as ExecuteEvent;
     const source = await this.wallet(
       tx,
@@ -303,6 +335,39 @@ export class SettlementsService {
       outcome: event.data.outcome,
       actualFees: event.data.actualFees,
     });
+    if (operation.settlement_identity && operation.settlement_identity !== identity)
+      throw new ActionRejectedError('An immutable attempt cannot settle a different transaction');
+    const duplicate = await tx.exchangeOperation.findUnique({
+      where: { settlement_identity: identity },
+    });
+    if (duplicate && duplicate.id !== operation.id)
+      throw new ActionRejectedError('Transaction already belongs to another operation');
+    for (const reversal of reversals.filter(
+      (row) => row.prior_settlement_revision === event.revision,
+    )) {
+      if (reversal.prior_settlement_digest && reversal.prior_settlement_digest !== digest)
+        throw new ActionRejectedError('Reversed settlement revision has conflicting content');
+      if (!reversal.prior_settlement_digest)
+        await tx.settlementReversal.update({
+          where: {
+            operation_id_revision: { operation_id: operation.id, revision: reversal.revision },
+          },
+          data: {
+            prior_settlement_digest: digest,
+            prior_settlement_payload: event as Prisma.InputJsonValue,
+          },
+        });
+    }
+    if (event.revision < operation.settlement_revision) {
+      // Bind a late orphaned settlement to its immutable transaction without posting it.
+      // This also prevents a later re-inclusion from changing the transaction identity.
+      if (!operation.settlement_identity)
+        await tx.exchangeOperation.update({
+          where: { id: operation.id },
+          data: { settlement_identity: identity },
+        });
+      return;
+    }
     if (operation.settlement_batch_id && operation.state !== 'reverted') {
       if (operation.settlement_identity !== identity || operation.settlement_digest !== digest)
         throw new ActionRejectedError(
@@ -312,13 +377,6 @@ export class SettlementsService {
     }
     if (event.revision <= operation.settlement_revision)
       throw new ActionRejectedError('Canonical settlement requires a new revision after reversal');
-    if (operation.settlement_identity && operation.settlement_identity !== identity)
-      throw new ActionRejectedError('An immutable attempt cannot settle a different transaction');
-    const duplicate = await tx.exchangeOperation.findUnique({
-      where: { settlement_identity: identity },
-    });
-    if (duplicate && duplicate.id !== operation.id)
-      throw new ActionRejectedError('Transaction already belongs to another operation');
     if (event.data.outcome === 'failed' && !event.data.actualFees.length)
       throw new ActionRejectedError(
         'A failed on-chain settlement requires evidence of paid network fees',
@@ -478,18 +536,59 @@ export class SettlementsService {
   }
 
   private async revert(tx: Prisma.TransactionClient, event: RevertEvent) {
-    const operation = await this.operation(tx, event);
-    if (event.revision < operation.settlement_revision) return;
-    if (operation.state === 'reverted') {
-      if (event.revision <= operation.settlement_revision) return;
-      throw new ActionRejectedError('Settlement is already reversed');
+    if (event.revision <= event.data.priorSettlementRevision)
+      throw new ActionRejectedError('Reversal revision must follow its referenced settlement');
+    const reversals = await this.reversals(tx, event);
+    const duplicate = reversals.find((row) => row.revision === event.revision);
+    if (duplicate) {
+      if (duplicate.data_digest !== exchangeDigest(event.data))
+        throw new ActionRejectedError('Reversal revision has conflicting content');
+      return;
     }
+    const existing = await tx.exchangeOperation.findUnique({ where: { id: event.operationId } });
+    const operation = existing ? await this.operation(tx, event) : undefined;
     if (
-      !operation.settlement_batch_id ||
-      event.data.priorSettlementRevision !== operation.settlement_revision ||
-      event.revision <= operation.settlement_revision
+      operation &&
+      event.revision >= operation.settlement_revision &&
+      ((event.revision === operation.settlement_revision && operation.state !== 'reverted') ||
+        (operation.state !== 'reverted' &&
+          operation.settlement_batch_id &&
+          event.data.priorSettlementRevision < operation.settlement_revision))
     )
       throw new ActionRejectedError('Reversal must identify the current settled revision');
+    await tx.settlementReversal.create({
+      data: {
+        operation_id: event.operationId,
+        revision: event.revision,
+        domain_id: event.domainId,
+        reset_epoch: event.resetEpoch,
+        attempt_id: event.attemptId,
+        request_digest: event.requestDigest,
+        customer_id: operation?.customer_id ?? event.customerId,
+        prior_settlement_revision: event.data.priorSettlementRevision,
+        data_digest: exchangeDigest(event.data),
+        payload: event as Prisma.InputJsonValue,
+        ...(operation?.settlement_revision === event.data.priorSettlementRevision &&
+        operation.settlement_digest
+          ? {
+              prior_settlement_digest: operation.settlement_digest,
+              prior_settlement_payload: operation.settlement_payload as Prisma.InputJsonValue,
+            }
+          : {}),
+      },
+    });
+    if (operation && event.revision <= operation.settlement_revision) return;
+    if (!operation || !operation.settlement_batch_id || operation.state === 'reverted') {
+      if (operation)
+        await tx.exchangeOperation.update({
+          where: { id: operation.id },
+          data: { state: 'reverted', settlement_revision: event.revision },
+        });
+      // No settlement was posted, so there is no batch to compensate or reversed result
+      // to publish. The durable fence and incident retain the obligation/resources.
+      await this.incident(tx, event, event.data.reason);
+      return;
+    }
     const original = await tx.ledgerEntry.findMany({
       where: { batch_id: operation.settlement_batch_id },
       include: { account: true },
@@ -637,21 +736,27 @@ export class SettlementsService {
 
   private async incident(tx: Prisma.TransactionClient, event: ExchangeEvent, reason: string) {
     const id = randomUUID();
+    const operation = event.operationId
+      ? await tx.exchangeOperation.findUnique({ where: { id: event.operationId } })
+      : undefined;
+    const customerId = operation?.customer_id ?? event.customerId;
+    const customer = customerId
+      ? await tx.exchangeCustomer.findUnique({ where: { customer_id: customerId } })
+      : undefined;
     await tx.ledgerIncident.create({
       data: {
         id,
         domain_id: event.domainId,
         operation_id: event.operationId,
-        customer_id: event.customerId,
+        customer_id: customer?.domain_id === event.domainId ? customer.customer_id : undefined,
         reason,
         state: 'open',
       },
     });
-    await enqueue(
+    await publishExchangeEvent(
       tx,
-      QUEUES.wallet,
+      { ...event, ...(customerId ? { customerId } : {}) },
       {
-        ...resultIdentity(event),
         type: 'custody.incident.opened.v1',
         data: {
           incidentId: id,

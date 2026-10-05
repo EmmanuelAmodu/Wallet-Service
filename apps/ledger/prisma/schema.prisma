@@ -96,7 +96,6 @@ enum ExchangeOperationKind {
 
 model LedgerWallet {
   wallet_id   String        @id @db.Uuid
-  tenant_id   String
   chain       String
   network     String
   address     String
@@ -341,6 +340,28 @@ model ExchangeOperation {
 
   @@index([domain_id, customer_id, state])
   @@map("exchange_operations")
+}
+
+// Reversal evidence must survive delivery before the execution intent exists.
+// There is deliberately no operation/customer FK: those registries may arrive later.
+model SettlementReversal {
+  operation_id              String   @db.Uuid
+  revision                  Int
+  domain_id                 String
+  reset_epoch               String
+  attempt_id                String   @db.Uuid
+  request_digest            String
+  customer_id               String?  @db.Uuid
+  prior_settlement_revision Int
+  data_digest               String
+  payload                   Json
+  prior_settlement_digest   String?
+  prior_settlement_payload  Json?
+  created_at                DateTime @default(now()) @db.Timestamptz
+
+  @@id([operation_id, revision])
+  @@index([domain_id, operation_id])
+  @@map("settlement_reversals")
 }
 
 model LedgerIncident {

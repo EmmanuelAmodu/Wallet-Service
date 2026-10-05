@@ -521,15 +521,32 @@ export class ActivityRegistryService {
           orderBy: { updated_at: 'asc' },
         })
       : [];
-    const rows = await this.db.exchangeWalletRegistration.findMany({
+    const pendingNetworks = await this.db.exchangeWalletRegistration.findMany({
       where: {
         reset_epoch: this.auth.resetEpoch,
         role: 'customer_deposit',
         status: { notIn: ['ready', 'removed'] },
       },
-      orderBy: { updated_at: 'asc' },
-      take: limit,
+      distinct: ['chain', 'network'],
+      select: { chain: true, network: true },
     });
+    const eligible = pendingNetworks.filter((row) =>
+      this.provider?.certified(row.chain, row.network),
+    );
+    // Disabled networks remain durable without consuming an enabled network's retry batch.
+    // Query capabilities before applying the limit so old disabled rows cannot starve recovery.
+    const rows = eligible.length
+      ? await this.db.exchangeWalletRegistration.findMany({
+          where: {
+            reset_epoch: this.auth.resetEpoch,
+            role: 'customer_deposit',
+            status: { notIn: ['ready', 'removed'] },
+            OR: eligible,
+          },
+          orderBy: [{ updated_at: 'asc' }, { wallet_id: 'asc' }],
+          take: limit,
+        })
+      : [];
     const results = [];
     for (const row of [...affected, ...rows]) {
       try {
@@ -580,24 +597,29 @@ export class ActivityRegistryService {
   }
 
   private async cleanUpWatches(limit: number) {
-    const leases = await this.db.exchangeProviderWatchLease.findMany({
+    const provider = this.provider;
+    if (!provider) return;
+    const pendingNetworks = await this.db.exchangeProviderWatchLease.findMany({
       where: { reset_epoch: this.auth.resetEpoch, state: 'cleanup' },
-      orderBy: { updated_at: 'asc' },
+      distinct: ['provider', 'chain', 'network'],
+      select: { provider: true, chain: true, network: true },
+    });
+    const eligible = pendingNetworks.filter((row) => {
+      const selectedProvider = provider.providerFor?.(row.chain, row.network) ?? provider.name;
+      return row.provider === selectedProvider && provider.certified(row.chain, row.network);
+    });
+    if (!eligible.length) return;
+    const leases = await this.db.exchangeProviderWatchLease.findMany({
+      where: { reset_epoch: this.auth.resetEpoch, state: 'cleanup', OR: eligible },
+      orderBy: [{ updated_at: 'asc' }, { generation: 'asc' }],
       take: limit,
     });
     for (const lease of leases) {
-      const selectedProvider =
-        this.provider?.providerFor?.(lease.chain, lease.network) ?? this.provider?.name;
-      if (
-        lease.provider !== selectedProvider ||
-        !this.provider?.certified(lease.chain, lease.network)
-      )
-        continue;
       try {
         const request = lease.install_request as unknown as ProviderInstallRequest;
         const installed = lease.acknowledgment
           ? providerInstallAcknowledgmentSchema.parse(lease.acknowledgment)
-          : providerInstallAcknowledgmentSchema.parse(await this.provider.install(request));
+          : providerInstallAcknowledgmentSchema.parse(await provider.install(request));
         this.match(request, installed);
         // Recover even an install that succeeded remotely but lost its acknowledgment.
         await this.db.exchangeProviderWatchLease.update({
@@ -608,7 +630,7 @@ export class ActivityRegistryService {
           },
         });
         const removed = providerRemoveAcknowledgmentSchema.parse(
-          await this.provider.remove({
+          await provider.remove({
             ...this.identity(installed),
             watchId: installed.watchId,
           }),

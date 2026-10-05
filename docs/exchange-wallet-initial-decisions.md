@@ -1,16 +1,18 @@
 # Exchange wallet initial implementation decisions
 
-Date: 4 October 2026  
-Scope: initial development implementation; application changes pending  
+Updated: 5 October 2026
+
+Scope: development policy; User and Sweep service boundaries supersede the original Wallet-only orchestration proposal
+
 Related: [TODO checklist](exchange-wallet-todo.md), [implementation plan](exchange-wallet-implementation-plan.md)
 
 Question 1 reflects the user's confirmed single-exchange requirement. Questions 2–7 record recommended implementation defaults so development can proceed. These settings belong in versioned configuration and tests; production gets a separately configured profile.
 
 ## 1. Custody and customer identity
 
-Use one exchange per deployment. Remove the tenant model and `tenant_id`/`tenantId` from the exchange schemas, customer ownership, public/internal DTOs, queue contracts, authentication context, and tests as the new model is implemented.
+Use one exchange per deployment. Runtime tenancy has been removed from schemas, DTOs, queue contracts, authentication context, and ownership scopes. Historical migration SQL remains immutable; additive Wallet/Ledger migrations drop the old columns.
 
-- Customer identity: internal UUID plus globally unique `external_id` supplied by the exchange backend.
+- User service owns email/password registration in its own database. Wallet customer UUID and external ID equal the User UUID, provisioned by a secret-free registration event. Direct backend customer creation is removed. Login/session/email-verification features remain future work.
 - Authenticate the exchange backend; its API credentials do not create separate tenants. Keep customer ownership validation and separate internal/admin permissions.
 - Scope request idempotency by customer and operation type; include the immutable request digest.
 - Retain a technical custody domain/generation for seed/network configuration and rotation. It does not represent a tenant.
@@ -40,7 +42,7 @@ Use one network per chain per deployment. The same seed can derive different cha
 
 ### Development profile recorded for P0-01
 
-- Custody is single-exchange. The technical custody domain is a configuration/rotation boundary, not a tenant; its persisted identifier and generation belong to the P1-01 custody-domain model and are not yet runtime settings.
+- Custody is single-exchange. `EXCHANGE_DOMAIN_ID` is the runtime technical configuration/rotation boundary; its complete custody generation/seed model remains P1 work. It does not represent an additional owner.
 - The configured local seed identifier is `local-v1`; the seed material remains in the local secret file and is not copied into service databases or this document.
 - Ethereum is configured for Sepolia (`11155111`). Solana is configured for Devnet (`EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG`). RPC URLs are currently unset in the local environment, so no live provider identity check has been performed.
 - Bitcoin's intended development network is regtest, but the current application default is mainnet and no Bitcoin RPC is configured. Do not enable Bitcoin transfers until P1-05 implements and tests regtest derivation, address handling, signing, and RPC identity verification.

@@ -79,7 +79,7 @@ export class ExchangeMessagingService {
           canonical((current.request as unknown as RegistryRequest).data) !== canonical(event.data)
         )
           throw new ActionRejectedError('Registry revision reused with different content');
-        await enqueueFanOut(db, event, [QUEUES.ledger, QUEUES.activity]);
+        await enqueueFanOut(db, event, [QUEUES.ledger, QUEUES.activity, QUEUES.sweep]);
         return;
       }
       const row = {
@@ -108,7 +108,7 @@ export class ExchangeMessagingService {
         create: { wallet_id: data.walletId, ...row },
         update: row,
       });
-      await enqueueFanOut(db, event, [QUEUES.ledger, QUEUES.activity]);
+      await enqueueFanOut(db, event, [QUEUES.ledger, QUEUES.activity, QUEUES.sweep]);
     };
     if (transaction) await apply(transaction);
     else await this.db.$transaction(apply);
@@ -171,7 +171,10 @@ export class ExchangeMessagingService {
           throw new ActionRejectedError('Event identity reused with different content');
         return;
       }
-      if (event.type === 'customer-wallet.registry.acknowledged.v1') {
+      if (event.type === 'user.registered.v1') {
+        if (!this.customers) throw new Error('Customer registration projection unavailable');
+        await this.customers.registerUser(event, db);
+      } else if (event.type === 'customer-wallet.registry.acknowledged.v1') {
         const data = event.data;
         await lock(db, `exchange-registry:${data.walletId}`);
         const registry = await db.exchangeWalletRegistry.findUnique({

@@ -1,8 +1,8 @@
 # Exchange wallet infrastructure implementation plan
 
-Date: 4 October 2026  
-Repository reviewed: `08f07c3`  
-Status: implementation proposal; this document does not change application behavior.
+Updated: 5 October 2026
+
+Status: design reference with implemented registration/scheduling foundations; execution and rollout gates remain tracked in the checklist.
 
 Track implementation in the [phased TODO checklist](exchange-wallet-todo.md). This document remains the design reference.
 
@@ -25,43 +25,45 @@ Transform the current wallet-as-a-service monorepo into exchange custody infrast
 ### Explicit interpretations and proposed defaults
 
 1. **Index means the existing `Wallet.account` derivation account.** `walletCoreMetadata()` replaces the hardened account component of the Wallet Core path. It does not change the final receiving-address index. Preserve this convention rather than silently introducing another derivation scheme.
-2. **A hot wallet belongs to the exchange, not to an individual customer.** Use one exchange per deployment and remove tenant ownership. Identify customers by internal UUID and globally unique `external_id`. Retain a technical custody domain/generation for seed/network configuration, with a hot wallet per enabled chain/network.
+2. **A hot wallet belongs to the exchange.** There is one owner per deployment and no tenancy. User service owns email/password registration/login and token issuance; its user UUID is Wallet's customer UUID and external ID. Email/password hashes remain exclusively in User's database. Retain a technical custody domain/generation for seed/network configuration, with a hot wallet per enabled chain/network.
 3. **Network isolation must respect key identity.** The existing unique key `(seed_id, chain, account)` means one seed cannot create separate rows at account 0 for the same chain on multiple networks. Use a distinct custody seed/domain for those networks initially. Do not bypass the constraint and treat the same key as two unrelated wallets.
 4. **Credit at deposit finality; sweep afterward.** Under `exchange-financial-v1`, a finalized deposit becomes available before its sweep finishes. A withdrawal may queue while a sweep supplies liquidity, but signing/submission waits until hot0 has atomically reserved payout principal in the withdrawal asset and worst-case native execution fee in the network's fee asset. Customer deposits, management balances, and in-transit custody are not hot liquidity. Production changes require a new reviewed policy version.
 5. **All assets means all explicitly supported assets.** Native coins are the first delivery milestone, followed by allowlisted ERC-20 and SPL tokens. Unknown tokens, NFTs, unusual token extensions, and unsweepable dust enter a visible exception state. The project must not advertise support for an asset that it can record but cannot sweep and withdraw.
 6. **Fees cannot be swept as assets.** Sweep the maximum economically transferable amount, retain only required fee/rent reserves where necessary, and rescan for residuals. Start with exchange-paid network costs and zero customer withdrawal fee in development, within the documented budgets. Persist the fee quote accepted by the customer even when it is zero.
-7. **The five current applications remain.** Add exchange orchestration as NestJS feature modules in `apps/wallet` initially. Keep Signer stateless, Broadcast responsible for signed-byte submission/retries, ActivityListener responsible for deposit-address observations, and Ledger responsible for financial state. A separate Treasury application can be extracted later if operational load justifies its own database.
+7. **User and Sweep are separate applications.** The seven applications are User, Wallet, Sweep, Signer, Broadcast, ActivityListener, and Ledger; every stateful application owns its database. User owns identity/login/token issuance, Wallet owns JWT-authenticated customer APIs, custody, and withdrawal coordination, Sweep owns sweep/funding lifecycle, ActivityListener owns verified observations/audit, Ledger owns financial state, Signer owns keys, and Broadcast owns submission retries. Sweep starts from Ledger's committed credit events, not pending listener discovery. Its scheduling foundation is implemented; execution remains Phase 4.
 
 ## 2. Current implementation and required changes
 
-| Current component | Existing behavior | Exchange change |
-| --- | --- | --- |
-| `apps/wallet/src/wallets/wallets.service.ts` | Allocates accounts using the global `wallets_account_seq`; creates customer-associated addresses | Bootstrap management wallets explicitly; allocate customer accounts from 10; persist roles and custody domains |
-| Wallet baseline migration | `wallets_account_seq` restarts at 0 | Update the development baseline so customer allocation starts at 10; bootstrap hot0 explicitly after reset |
-| `packages/chain/src/coin-metadata.ts` | Uses Wallet Core metadata and substitutes the hardened account component | Keep derivation compatible; add fixtures for account 0, reserved accounts, and account 10 on each enabled chain |
-| `apps/wallet/src/transactions/transactions.service.ts` | Accepts a caller-selected wallet and transfer parameters; permits one pending transaction per wallet | Replace the customer flow with logical withdrawals; schedule operational transactions from the hot wallet or an approved sweep source |
-| `apps/wallet/src/messaging/wallet-workflow.service.ts` | Prepares transactions and records signer results; broadcast is requested separately | Automatically enqueue broadcast for authorized sweep/withdrawal operations after signing |
-| `apps/signer/src/signing/signing.core.ts` | Derives keys and signs native transactions after validating address/path/network | Enforce operation purpose, source role, and destination policy; add explicit token and sweep signing adapters |
-| `apps/broadcast/src/broadcast/broadcast.service.ts` | Stores immutable signed snapshots; reconciles hashes, retries, and monitors confirmations | Preserve this behavior; propagate operation/attempt identifiers and actual settled fee/result information |
-| `apps/activity-listener/src/activity-workflow.service.ts` | Publishes transaction-level balance changes and tracks finality/reorgs | Classify individual deposit transfers, recognized sweeps, funding, and unexpected outflows against a trusted address registry |
-| `apps/ledger/src/ledger.service.ts` | Journals address custody balances against clearing accounts | Add customer liabilities, withdrawal reservations, deposit credit identity, internal custody transfers, and business events |
-| `apps/wallet/src/ledger/ledger-client.service.ts` | Reads address balances; registers wallets on balance reads | Return customer exchange balances; use explicit durable registration and reservation workflows |
-| `packages/queue/src/messages.ts` | Authenticated BullMQ envelopes and action/result contracts | Add versioned deposit/sweep/withdrawal contracts and durable consumer deduplication |
+| Current component                                         | Existing behavior                                                                                                   | Exchange change                                                                                                                                              |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `apps/user/src/users` and `auth`                          | Email/password registration/login, bounded salted scrypt, identity-only outbox, and short-lived RS256 access tokens | Extend later with refresh/session revocation/email verification/recovery; User owns the private token key and never forwards credentials to custody services |
+| `apps/sweep/src/sweep`                                    | Durable registry/credited-deposit projection and coalesced work; execution blocked                                  | Add resource reads/reservations, policy, funding, attempts, signing/submission saga, settlement correlation, and repair in Phase 4                           |
+| `apps/wallet/src/wallets/wallets.service.ts`              | Allocates accounts using the global `wallets_account_seq`; creates customer-associated addresses                    | Bootstrap management wallets explicitly; allocate customer accounts from 10; persist roles and custody domains                                               |
+| Wallet baseline migration                                 | `wallets_account_seq` restarts at 0                                                                                 | Update the development baseline so customer allocation starts at 10; bootstrap hot0 explicitly after reset                                                   |
+| `packages/chain/src/coin-metadata.ts`                     | Uses Wallet Core metadata and substitutes the hardened account component                                            | Keep derivation compatible; add fixtures for account 0, reserved accounts, and account 10 on each enabled chain                                              |
+| `apps/wallet/src/transactions/transactions.service.ts`    | Accepts a caller-selected wallet and transfer parameters; permits one pending transaction per wallet                | Replace the customer flow with logical withdrawals; schedule operational transactions from the hot wallet or an approved sweep source                        |
+| `apps/wallet/src/messaging/wallet-workflow.service.ts`    | Prepares transactions and records signer results; broadcast is requested separately                                 | Automatically enqueue broadcast for authorized sweep/withdrawal operations after signing                                                                     |
+| `apps/signer/src/signing/signing.core.ts`                 | Derives keys and signs native transactions after validating address/path/network                                    | Enforce operation purpose, source role, and destination policy; add explicit token and sweep signing adapters                                                |
+| `apps/broadcast/src/broadcast/broadcast.service.ts`       | Stores immutable signed snapshots; reconciles hashes, retries, and monitors confirmations                           | Preserve this behavior; propagate operation/attempt identifiers and actual settled fee/result information                                                    |
+| `apps/activity-listener/src/activity-workflow.service.ts` | Publishes transaction-level balance changes and tracks finality/reorgs                                              | Classify individual deposit transfers, recognized sweeps, funding, and unexpected outflows against a trusted address registry                                |
+| `apps/ledger/src/ledger.service.ts`                       | Journals address custody balances against clearing accounts                                                         | Add customer liabilities, withdrawal reservations, deposit credit identity, internal custody transfers, and business events                                  |
+| `apps/wallet/src/ledger/ledger-client.service.ts`         | Authenticated read-only Ledger balance queries; registration comes from queues                                      | Preserve HTTP reads only, with durable registration and reservation workflows over queues                                                                    |
+| `packages/queue/src/messages.ts`                          | Authenticated BullMQ envelopes and action/result contracts                                                          | Add versioned deposit/sweep/withdrawal contracts and durable consumer deduplication                                                                          |
 
-Use the development reset workflow described in `README.md` to recreate the Wallet, Broadcast, and Ledger databases with the exchange schemas. Reset their associated queues and listener state together so old work cannot run against newly created records. There is no requirement to preserve current development wallets, transactions, or balances.
+Use the development reset workflow described in `README.md` to recreate all six owned databases (User, Wallet, Sweep, Broadcast, Ledger, ActivityListener) with the exchange schemas. Reset associated queues and provider state together so old work cannot run against new records. Existing development records do not require migration to a new owner. Additive tenant-removal migrations preserve immutable historical SQL and reject conflicting global identities rather than merging them.
 
 ## 3. Wallet roles, ownership, and derivation allocation
 
 ### Proposed Wallet database models
 
-| Model | Essential fields and constraints |
-| --- | --- |
-| `CustodyDomain` | Technical exchange custody generation, seed identifier, enabled chain/network configuration, operational status; private seed material remains outside PostgreSQL |
-| `Wallet` extensions | `custody_domain_id`, `role`, optional `customer_id`, `active`, and configuration revision; roles: `hot`, `management`, `customer_deposit` |
-| `ManagementWalletPurpose` | Reserved account, purpose, permitted actions, funding limits; internal administration only |
-| `AddressSubscription` | Wallet/address identity, chain/network, subscription status, start block/slot, backfill cursor, provider acknowledgment; SPL token-account addresses mapped to their customer owner |
-| `AssetConfiguration` | Versioned `(chain, network, asset_id)` identity, standard, decimals and display metadata, exact contract or token-program-plus-mint identity, certified lifecycle capabilities, finality/fee/threshold policy, and policy version. Symbols are display-only; decimals are verified against pinned configuration. |
-| `Customer` or customer mapping | Stable internal UUID plus globally unique `external_id` supplied by the authenticated exchange backend; no tenant model |
+| Model                          | Essential fields and constraints                                                                                                                                                                                                                                                                                 |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `CustodyDomain`                | Technical exchange custody generation, seed identifier, enabled chain/network configuration, operational status; private seed material remains outside PostgreSQL                                                                                                                                                |
+| `Wallet` extensions            | `custody_domain_id`, `role`, optional `customer_id`, `active`, and configuration revision; roles: `hot`, `management`, `customer_deposit`                                                                                                                                                                        |
+| `ManagementWalletPurpose`      | Reserved account, purpose, permitted actions, funding limits; internal administration only                                                                                                                                                                                                                       |
+| `AddressSubscription`          | Wallet/address identity, chain/network, subscription status, start block/slot, backfill cursor, provider acknowledgment; SPL token-account addresses mapped to their customer owner                                                                                                                              |
+| `AssetConfiguration`           | Versioned `(chain, network, asset_id)` identity, standard, decimals and display metadata, exact contract or token-program-plus-mint identity, certified lifecycle capabilities, finality/fee/threshold policy, and policy version. Symbols are display-only; decimals are verified against pinned configuration. |
+| `Customer` or customer mapping | Stable UUID and globally unique `external_id` equal to User's UUID, provisioned through `user.registered.v1`; no tenant model                                                                                                                                                                                    |
 
 Maintain canonical address normalization per chain and immutable seed/account/path ownership once an address is published.
 
@@ -85,7 +87,7 @@ If multiple seed-isolated domains or same-chain networks are enabled later, add 
 ### Development reset and bootstrap
 
 1. Stop application workers and the development provider publisher; remove old provider watches.
-2. Review and apply the guarded `npm run reset:development` script after the Phase 1 schemas are ready. It reads durable `.env` directly despite stale shell exports and acquires an exclusive `.env.reset.lock` bound to an owner token. Hold that lock through destructive work and final reset-marker clearing, which also verifies the durable epoch and marker. Services reject conflicting runtime epochs. The script recreates Wallet, Broadcast, Ledger, and ActivityListener local databases from baselines, retires only the previous project BullMQ prefix and Pub/Sub subscription, and rotates the persistent epoch/topic/subscription names. Interrupted work resumes from the same durable epoch/namespaces; stale-lock recovery is explicit.
+2. Review and apply the guarded `npm run reset:development` script after the Phase 1 schemas are ready. It reads durable `.env` directly despite stale shell exports and acquires an exclusive `.env.reset.lock` bound to an owner token. Hold that lock through destructive work and final reset-marker clearing, which also verifies the durable epoch and marker. Services reject conflicting runtime epochs. The script recreates all six owned local databases, retires only the previous project BullMQ prefix and Pub/Sub subscription, and rotates the persistent epoch/topic/subscription names. Interrupted work resumes from the same durable epoch/namespaces; stale-lock recovery is explicit.
 3. Update the external provider publisher to the new topic/epoch and require top-level `resetEpoch` on every discovery payload; the reset script cannot configure that separately deployed service. Install fresh watches and verify subscription acknowledgment/backfill before readiness.
 4. Configure the development custody seed, networks, assets, and signer policy. A record reset does not clear blockchain state; use fresh local chain state or a fresh development seed when an empty on-chain starting point is required.
 5. Bootstrap the hot wallet at account 0, then any explicitly configured management wallets in 1–9. Begin customer allocation at exactly 10.
@@ -100,25 +102,32 @@ Add these feature modules under `apps/wallet/src`:
 - `custody/`: domain/role registry, hot-wallet bootstrap, management policy, registry events.
 - `customers/`: customer mapping and deposit-address lookup.
 - `deposits/`: deposit status projection and customer-facing deposit history.
-- `sweeps/`: sweep eligibility, resource reservations, gas-funding dependency, durable scheduling and state transitions.
 - `withdrawals/`: customer intent, idempotency, reservation saga, execution queue, and settlement projection.
-- `treasury/`: hot liquidity, management funding, physical custody reconciliation, and operational exceptions.
+- `treasury/`: hot liquidity and custody administration. Sweep coordinates management fee funding; Ledger journals its custody/fee effect.
 
-Reuse the existing `transactions/` preparation and execution code behind an internal interface. One logical withdrawal or sweep may have several execution attempts; an attempt is not another customer payment.
+Reuse existing `transactions/` preparation and execution behind versioned queue commands. Sweep must not import Wallet application internals. One logical withdrawal or sweep may have several execution attempts; an attempt is not another customer payment.
+
+### User application
+
+Own identity, email/password registration/login, password verification, token issuance, and its private Prisma database. Atomically publish `user.registered.v1` with only `userId`; Wallet owns financial identity provisioning and requests Ledger registration. User exposes no custody API or wallet provisioning state. Login issues short-lived RS256 tokens; Wallet verifies the public key locally and derives the customer from the subject. Keep the private token key exclusively in User, and separate it from the custody seed. Refresh/session revocation, email verification, password recovery, and MFA remain later work. See [authentication contract](user-authentication.md).
+
+### Sweep application
+
+Own registry/deposit projections, coalesced source/asset work, logical sweep/funding operations and attempts, policy/economics, scheduling/recovery, and settlement projection. Consume Ledger credit/reversal/deficit/incident results through independent outbox deliveries. Missing registries retain blocked work; reversal-first delivery and sticky review gates cannot authorize a sweep. Credited units are accounting hints, not on-chain balances. Phase 4 must reread resources and acquire authoritative execution reservations through the Wallet execution boundary before signing. Keep the current worker blocked until those safeguards are implemented.
 
 ### Ledger application
 
-Add `accounts/`, `deposits/`, `reservations/`, and `settlements/` modules as the feature boundary grows. Ledger exclusively owns customer balances and atomic holds. Add its own transactional outbox and wire `OutboxRelay` using the Ledger database; it currently has no outgoing business-event persistence.
+Add `accounts/`, `deposits/`, `reservations/`, and `settlements/` modules as the feature boundary grows. Ledger exclusively owns customer balances and atomic holds. Its transactional outbox and `OutboxRelay` persist independent Wallet/Sweep accounting and incident deliveries alongside journals. Durable settlement reversal fences retain uncertain holds even before execution intent arrives.
 
 ### ActivityListener application
 
-Add an address-registry consumer and normalized transfer classifier. A local durable registry can use a small application-owned PostgreSQL database if full replay of Redis state is not operationally acceptable. For the first delivery, a rebuildable Redis projection is sufficient only if processing pauses during rebuild and replay/backfill closes the gap. Never make a missing registry entry mean an ignored deposit.
+The implemented application owns a durable PostgreSQL registry, watch/backfill generations, verified transfer classifier, and RPC/reorg recovery. It watches customer deposit addresses and reports both incoming transfers and unexpected outflows; it never schedules or executes sweeps. Retain this audit coverage so outflows/reorgs cannot bypass custody reconciliation. Missing registry or incomplete coverage pauses processing and retains replay.
 
 ### Signer and Broadcast
 
 Keep the Signer outside financial database access. Give it a trusted policy configuration/authorization verifier. Keep Broadcast's database and responsibility unchanged in principle: persisted signed bytes, chain submission, retries, confirmation, and result events.
 
-No application reads another application's database. Commands and events use BullMQ; read-only customer balance queries can continue using the existing authenticated internal Ledger HTTP interface.
+Only User and Wallet expose public application HTTP endpoints. Existing Wallet operational routes live under `/internal` with service credentials and must be excluded from public ingress. Signer, Broadcast, ActivityListener, and Sweep are queue/Pub/Sub application contexts with no HTTP server; Ledger provides authenticated private reads plus operator event/reconciliation compatibility routes. No application reads another application's database. Normal inter-service commands, registrations, and financial writes use HMAC-authenticated BullMQ and durable outbox/inbox delivery; Ledger operator compatibility HTTP actions remain private. Read-only balance queries use authenticated internal Ledger HTTP without registration side effects. The [development Compose overlay](../compose.apps.yaml) publishes only User/Wallet and scopes database credentials and key mounts to their owners.
 
 ## 5. Accounting model
 
@@ -128,13 +137,13 @@ Use the P0-03 canonical `(chain, network, asset_id)` tuple and integer base-unit
 
 An asset can create customer credit only after its adapter certifies exact observation/finality, deposit credit, sweep, and withdrawal. Unsupported or ambiguous provider assets retain evidence in a custody exception; they are never auto-credited or swept. The current listener's free-form token identifiers are discovery input, not authorization. Initial token scope is conventional ERC-20 and classic SPL Token Program assets; fee-on-transfer/rebasing/frozen/delegated semantics and Token-2022 extensions require separate certification.
 
-| Account group | Normal side | Purpose |
-| --- | --- | --- |
-| Custody: customer deposit, hot, management, in transit | Debit | Where exchange-controlled assets physically reside |
-| Customer: pending, available, reserved, frozen | Credit | Amounts owed to a customer and whether they can be withdrawn |
-| Network-fee expense | Debit | Fees borne by the exchange |
-| Withdrawal-fee revenue | Credit | Customer fees explicitly agreed at request time |
-| Equity, deficit and reconciliation accounts | Explicit by account type | Exchange funding and explainable differences |
+| Account group                                          | Normal side              | Purpose                                                      |
+| ------------------------------------------------------ | ------------------------ | ------------------------------------------------------------ |
+| Custody: customer deposit, hot, management, in transit | Debit                    | Where exchange-controlled assets physically reside           |
+| Customer: pending, available, reserved, frozen         | Credit                   | Amounts owed to a customer and whether they can be withdrawn |
+| Network-fee expense                                    | Debit                    | Fees borne by the exchange                                   |
+| Withdrawal-fee revenue                                 | Credit                   | Customer fees explicitly agreed at request time              |
+| Equity, deficit and reconciliation accounts            | Explicit by account type | Exchange funding and explainable differences                 |
 
 Use transaction-level custody deltas to prevent temporary double recognition of both spent deposit funds and hot receipts. In-transit balances are reconciled; they are not available hot liquidity.
 
@@ -193,7 +202,7 @@ The provider listener remains scoped to deposit addresses. Broadcast monitors kn
 
 ### Models and state
 
-Wallet database: `SweepOperation`, `SweepAttempt`, optional `SweepDepositLink`, `GasFundingOperation`, and durable execution-resource reservations. Persist source wallet, asset, target hot-wallet generation, requested resource set, selected inputs/nonce, fees, transaction ID, and generation.
+Sweep database: `SweepOperation`, `SweepAttempt`, optional `SweepDepositLink`, `GasFundingOperation`, and local scheduling/resource-claim saga state. Persist source wallet, asset, target hot-wallet generation, requested resource set, selected inputs/nonce, fees, transaction ID, and generation. Wallet's authoritative source execution fence must serialize every operational transaction using that wallet; Sweep requests it through the queue and cannot treat a local scheduling row as an execution reservation.
 
 Suggested sweep-operation states:
 
@@ -213,13 +222,13 @@ Signing, submission, confirmation, and definitive failure belong to the independ
 
 ### Chain adapters
 
-| Asset family | Required implementation |
-| --- | --- |
-| EVM native | Add sweep-max preparation: reserve worst-case gas, estimate/cap fees, transfer the safe remainder, record actual cost, and evaluate leftover ETH/native dust afterward |
-| ERC-20 | Add typed transfer preparation/signing; verify contract and decoded recipient; fund capped native gas from management account 1 where needed; sweep tokens before draining remaining native funds |
+| Asset family               | Required implementation                                                                                                                                                                                                                                                                 |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| EVM native                 | Add sweep-max preparation: reserve worst-case gas, estimate/cap fees, transfer the safe remainder, record actual cost, and evaluate leftover ETH/native dust afterward                                                                                                                  |
+| ERC-20                     | Add typed transfer preparation/signing; verify contract and decoded recipient; fund capped native gas from management account 1 where needed; sweep tokens before draining remaining native funds                                                                                       |
 | Bitcoin/native UTXO chains | Discover address-owned UTXOs using a watch-only node/indexer; validate ownership, maturity and finality; reserve outpoints; create explicit sweep-all plans with hot-only asset outputs and no customer change; defer uneconomical inputs and split large sets without violating limits |
-| Solana native | Estimate fees, prepare transfer-to-hot with explicit available balance, retain required reserves or validate full drain behavior; preserve expiry and prior-inclusion state |
-| SPL tokens | Discover customer-owned token accounts; use typed transfers to hot-owned accounts for the same mint; support separate fee payer and multiple authorized signers; handle account creation/rent and account closure only under an explicit policy |
+| Solana native              | Estimate fees, prepare transfer-to-hot with explicit available balance, retain required reserves or validate full drain behavior; preserve expiry and prior-inclusion state                                                                                                             |
+| SPL tokens                 | Discover customer-owned token accounts; use typed transfers to hot-owned accounts for the same mint; support separate fee payer and multiple authorized signers; handle account creation/rent and account closure only under an explicit policy                                         |
 
 The existing Bitcoin signer sets the change address to its source; add a dedicated sweep plan rather than repurposing this behavior. Its current signing input is limited to one source key, so multi-customer Bitcoin sweep aggregation is a later adapter extension, not an assumed existing capability.
 
@@ -231,18 +240,20 @@ Fee-on-transfer, rebasing, frozen, delegated, or Token-2022 extension assets req
 
 ### Public API
 
-- `POST /v1/customers/:customerId/deposit-addresses`: idempotent address assignment for an enabled chain/network.
-- `GET /v1/customers/:customerId/balances`: pending, available, reserved, and frozen exchange balances.
-- `GET /v1/customers/:customerId/deposits`: deposit status, credit identity, and history.
-- `POST /v1/withdrawals`: customer ID, canonical asset/network, destination, amount, accepted fee quote, and `Idempotency-Key`.
-- `GET /v1/withdrawals/:id`: logical payment status and permitted attempt details.
-- Internal/admin endpoints: bootstrap, management funding, sweep retry, reconciliation, and incident resolution.
+- `POST /v1/users/register` and `POST /v1/users/login` on User: identity registration and token issuance.
+- `GET /v1/me` on Wallet: identity provisioning status.
+- `POST /v1/me/deposit-addresses`: idempotent address assignment for an enabled chain/network.
+- `GET /v1/me/balances`: pending, available, reserved, and frozen exchange balances.
+- `GET /v1/me/deposits`: deposit status, credit identity, and history.
+- Planned Phase 5 `POST /v1/me/withdrawals`: canonical asset/network, destination, amount, accepted fee quote, and `Idempotency-Key`; customer identity comes from the verified JWT.
+- Planned Phase 5 `GET /v1/me/withdrawals/:id`: owner-scoped logical payment status and permitted attempt details.
+- Internal/admin paths under `/internal`: bootstrap, management funding, sweep retry, reconciliation, and incident resolution; use service credentials and prefer queued actions.
 
 Initially reject destinations registered as exchange-owned hot, management, or customer deposit addresses. A future internal-transfer API can atomically debit the sender liability and credit the recipient without an on-chain withdrawal or another deposit credit. Revalidate ownership against the registry at execution and in signer policy to cover registry changes after request acceptance.
 
-Use the authenticated exchange backend as the caller, with explicit customer ownership validation and no tenant context. Extend authorization before offering direct customer access. Do not expose internal management creation, generic signing, or private source controls through these endpoints.
+Wallet public routes require the User JWT, derive the customer UUID from its verified subject, and do not accept customer overrides. Internal backend callers use distinct service credentials on `/internal` routes. Do not expose internal management creation, generic signing, or source wallet/path/nonce/UTXO controls through customer APIs.
 
-Remove or restrict `POST /v1/wallets/:id/transactions` for customer deposit wallets. A customer withdrawal cannot use a deposit wallet as a liquidity fallback.
+The compatibility transaction route moved to service-authenticated `POST /internal/wallets/:id/transactions`; Phase 1/4 must also enforce custody-role and purpose authorization there. A customer withdrawal cannot use a deposit wallet as a liquidity fallback.
 
 ### Withdrawal persistence and state
 
@@ -281,19 +292,19 @@ A replacement shares the existing logical operation and customer hold. Fee bumps
 
 Continue the current NestJS BullMQ integration, authenticated envelopes, outbox/inbox pattern, and service-owned databases. Introduce versioned business contracts such as:
 
-| Producer | Contract | Consumer |
-| --- | --- | --- |
-| Wallet | `customer-wallet.registry.requested.v1` with wallet/domain/chain/network and registry revision | ActivityListener and Ledger, as separate deliveries |
-| ActivityListener / Ledger | `customer-wallet.registry.acknowledged.v1` with consumer, revision, status, and start/backfill cursor | Wallet readiness projection |
-| ActivityListener | `deposit.observed.v1`, `deposit.finalized.v1`, `deposit.reverted.v1` with canonical transfer identity | Ledger |
-| Ledger | `deposit.credited.v1`, `deposit.reversed.v1`, `deposit.deficit-recorded.v1` | Wallet projection, sweep scheduler, operations |
-| Wallet | `withdrawal.reserve.requested.v1` | Ledger |
-| Ledger | `withdrawal.reserved.v1`, `withdrawal.reserve.rejected.v1` | Wallet withdrawals |
-| Wallet / execution scheduler | `sweep.execute.requested.v1`, `withdrawal.execute.requested.v1`, `funding.execute.requested.v1` | Authorized Wallet execution workers |
-| Wallet / Signer / Broadcast | `execution.attempt.updated.v1` with the validated attempt transition; each carries operation and attempt identity | Owning Wallet operation projection and Ledger settlement boundary |
-| Wallet | `settlement.requested.v1`, `reservation.release.requested.v1` | Ledger |
-| Ledger | `settlement.committed.v1`, `reservation.released.v1`, `reservation.release.rejected.v1` | Wallet operation projection |
-| Any authorized producer | `custody.incident.opened.v1`, `custody.incident.updated.v1`, `custody.incident.resolved.v1` | Durable operations projection |
+| Producer                              | Contract                                                                                                          | Consumer                                                                 |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Wallet                                | `customer-wallet.registry.requested.v1` with wallet/domain/chain/network and registry revision                    | ActivityListener and Ledger, as separate deliveries                      |
+| ActivityListener / Ledger             | `customer-wallet.registry.acknowledged.v1` with consumer, revision, status, and start/backfill cursor             | Wallet readiness projection                                              |
+| ActivityListener                      | `deposit.observed.v1`, `deposit.finalized.v1`, `deposit.reverted.v1` with canonical transfer identity             | Ledger                                                                   |
+| Ledger                                | `deposit.credited.v1`, `deposit.reversed.v1`, `deposit.deficit-recorded.v1`                                       | Wallet projection, sweep scheduler, operations                           |
+| Wallet                                | `withdrawal.reserve.requested.v1`                                                                                 | Ledger                                                                   |
+| Ledger                                | `withdrawal.reserved.v1`, `withdrawal.reserve.rejected.v1`                                                        | Wallet withdrawals                                                       |
+| Sweep / Wallet withdrawal coordinator | `sweep.execute.requested.v1`, `withdrawal.execute.requested.v1`, `funding.execute.requested.v1`                   | Authorized Wallet execution workers; ActivityListener purpose projection |
+| Wallet / Signer / Broadcast           | `execution.attempt.updated.v1` with the validated attempt transition; each carries operation and attempt identity | Owning Wallet operation projection and Ledger settlement boundary        |
+| Wallet                                | `settlement.requested.v1`, `reservation.release.requested.v1`                                                     | Ledger                                                                   |
+| Ledger                                | `settlement.committed.v1`, `reservation.released.v1`, `reservation.release.rejected.v1`                           | Wallet operation projection                                              |
+| Any authorized producer               | `custody.incident.opened.v1`, `custody.incident.updated.v1`, `custody.incident.resolved.v1`                       | Durable operations projection                                            |
 
 ### Business envelope and delivery invariants
 
@@ -309,15 +320,15 @@ Registry acknowledgment is per consumer and revision. Wallet exposes an address 
 
 ### Aggregate state machines
 
-| Aggregate | Allowed forward transitions and terminal/exception states |
-| --- | --- |
-| Wallet registry | `requested -> installing -> acknowledged -> ready`; failed install, missing consumer acknowledgment, or a coverage gap becomes `blocked`; a new revision requires fresh acknowledgments. |
-| Deposit | `observed -> finalized \| failed \| reverted \| attention`; canonical reconciliation may move a previously finalized deposit to `reverted`, which creates a compensating posting rather than deleting history. Ledger credit state is `uncredited -> credited -> reversed`; if already spent, record a linked deficit and freeze withdrawals instead of making available balance negative. |
-| Withdrawal reservation | `requested -> reserved \| rejected`; `reserved -> consumed` on settlement or `reserved -> released` after proven nonpayment and a safe release. Unknown signed/submitted outcomes retain the hold; rejected release does not release funds. |
-| Withdrawal operation | `requested -> reserving -> reserved -> queued_liquidity \| queued_execution -> executing -> settled`; definitive pre-execution validation may become `rejected`; safe pre-sign cancellation becomes `cancelled`; ambiguous execution becomes `attention`; post-settlement reorg becomes `reconciliation_required` and uses linked compensation. |
-| Sweep operation | `eligible -> waiting_funds \| waiting_gas \| deferred_dust -> queued -> executing -> settled`; safe cancellation becomes `cancelled`; an in-flight newer generation is separate work; ambiguous outcomes become `attention`; canonical reorg enters reconciliation. |
-| Execution attempt | `created -> preparing -> signing -> signed -> queued -> submitted -> confirmed`; `failed` is allowed only for definitive failure; an unresolved outcome becomes `attention`; an unsubmitted expired attempt may be abandoned. Replacement attempts link to the prior attempt and cannot begin until reconciliation prevents both from paying. |
-| Custody incident | `open -> acknowledged -> investigating -> resolved`; reopening creates a new revision. Freeze/hold actions remain until explicit authorized resolution; closing an incident does not erase its audit trail. |
+| Aggregate              | Allowed forward transitions and terminal/exception states                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Wallet registry        | `requested -> installing -> acknowledged -> ready`; failed install, missing consumer acknowledgment, or a coverage gap becomes `blocked`; a new revision requires fresh acknowledgments.                                                                                                                                                                                                   |
+| Deposit                | `observed -> finalized \| failed \| reverted \| attention`; canonical reconciliation may move a previously finalized deposit to `reverted`, which creates a compensating posting rather than deleting history. Ledger credit state is `uncredited -> credited -> reversed`; if already spent, record a linked deficit and freeze withdrawals instead of making available balance negative. |
+| Withdrawal reservation | `requested -> reserved \| rejected`; `reserved -> consumed` on settlement or `reserved -> released` after proven nonpayment and a safe release. Unknown signed/submitted outcomes retain the hold; rejected release does not release funds.                                                                                                                                                |
+| Withdrawal operation   | `requested -> reserving -> reserved -> queued_liquidity \| queued_execution -> executing -> settled`; definitive pre-execution validation may become `rejected`; safe pre-sign cancellation becomes `cancelled`; ambiguous execution becomes `attention`; post-settlement reorg becomes `reconciliation_required` and uses linked compensation.                                            |
+| Sweep operation        | `eligible -> waiting_funds \| waiting_gas \| deferred_dust -> queued -> executing -> settled`; safe cancellation becomes `cancelled`; an in-flight newer generation is separate work; ambiguous outcomes become `attention`; canonical reorg enters reconciliation.                                                                                                                        |
+| Execution attempt      | `created -> preparing -> signing -> signed -> queued -> submitted -> confirmed`; `failed` is allowed only for definitive failure; an unresolved outcome becomes `attention`; an unsubmitted expired attempt may be abandoned. Replacement attempts link to the prior attempt and cannot begin until reconciliation prevents both from paying.                                              |
+| Custody incident       | `open -> acknowledged -> investigating -> resolved`; reopening creates a new revision. Freeze/hold actions remain until explicit authorized resolution; closing an incident does not erase its audit trail.                                                                                                                                                                                |
 
 Settlement consumes a specific confirmed attempt and records actual fee, canonical transaction/transfer identity, operation revision, and policy version exactly once. A reservation release is a separate explicit result; it is never inferred from timeout, missing RPC data, a cancelled queue job, or exhausted retries. Signed or possibly submitted withdrawal attempts cannot be cancelled/released until reconciliation proves nonpayment. Reorg handling uses compensating settlement and incident events linked to the original operation, journal batch, and attempt; it never creates a second principal debit or silently reduces another customer's liability.
 

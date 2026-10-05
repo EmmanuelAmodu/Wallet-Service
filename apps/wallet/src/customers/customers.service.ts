@@ -5,7 +5,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { ExchangeDepositAddressAssignment, Prisma } from '@prisma/client';
+import { ExchangeCustomer, ExchangeDepositAddressAssignment, Prisma } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
 import { lock } from '../../../../packages/database/src/locks.js';
 import {
@@ -55,6 +55,8 @@ export class ExchangeCustomersService {
   }
 
   async create(externalId: string) {
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(externalId))
+      throw new ConflictException('User UUID registration must originate in User service');
     const domainId = this.domain();
     return this.db.$transaction(async (db) => {
       await lock(db, `exchange-customer-external:${digest(externalId)}`);
@@ -72,28 +74,72 @@ export class ExchangeCustomersService {
           reset_epoch: this.auth.resetEpoch,
         },
       });
-      // Reconstruct the same immutable command on replay so a missing delivery can recover.
-      const registration = exchangeEventSchema.parse({
-        eventId: customer.customer_id,
-        schemaVersion: 1,
-        resetEpoch: customer.reset_epoch,
-        occurredAt: customer.created_at.toISOString(),
-        domainId: customer.domain_id,
-        correlationId: customer.customer_id,
-        causationId: null,
-        aggregateId: customer.customer_id,
-        revision: 1,
-        customerId: customer.customer_id,
-        type: 'customer.registry.requested.v1',
-        data: { externalId: customer.external_id },
-      });
-      await enqueueFanOut(db, registration, [QUEUES.ledger]);
+      await this.registerIdentity(db, customer);
       return {
         customerId: customer.customer_id,
         externalId: customer.external_id,
         state: customer.state,
       };
     });
+  }
+
+  async registerUser(
+    event: Extract<ExchangeEvent, { type: 'user.registered.v1' }>,
+    db: Prisma.TransactionClient,
+  ) {
+    if (event.domainId !== this.domain() || event.resetEpoch !== this.auth.resetEpoch)
+      throw new ActionRejectedError('User registration domain or epoch mismatch');
+    const userId = event.data.userId;
+    await lock(db, `exchange-customer-external:${digest(userId)}`);
+    await lock(db, `exchange-customer:${userId}`);
+    const external = await db.exchangeCustomer.findUnique({ where: { external_id: userId } });
+    const existing = await db.exchangeCustomer.findUnique({ where: { customer_id: userId } });
+    for (const customer of [external, existing])
+      if (
+        customer &&
+        (customer.customer_id !== userId ||
+          customer.external_id !== userId ||
+          customer.domain_id !== event.domainId ||
+          customer.reset_epoch !== event.resetEpoch)
+      )
+        throw new ActionRejectedError('User identity conflicts with existing customer ownership');
+    const customer =
+      existing ??
+      (await db.exchangeCustomer.create({
+        data: {
+          customer_id: userId,
+          external_id: userId,
+          domain_id: event.domainId,
+          reset_epoch: event.resetEpoch,
+        },
+      }));
+    await this.registerIdentity(db, customer);
+  }
+
+  private async registerIdentity(db: Prisma.TransactionClient, customer: ExchangeCustomer) {
+    const eventHash = digest([
+      'customer.registry.requested.v1',
+      customer.customer_id,
+      customer.domain_id,
+      customer.reset_epoch,
+    ]);
+    const eventId = `${eventHash.slice(0, 8)}-${eventHash.slice(8, 12)}-8${eventHash.slice(13, 16)}-a${eventHash.slice(17, 20)}-${eventHash.slice(20, 32)}`;
+    // Reconstruct the same immutable command on replay so a missing delivery can recover.
+    const registration = exchangeEventSchema.parse({
+      eventId,
+      schemaVersion: 1,
+      resetEpoch: customer.reset_epoch,
+      occurredAt: customer.created_at.toISOString(),
+      domainId: customer.domain_id,
+      correlationId: customer.customer_id,
+      causationId: customer.external_id === customer.customer_id ? customer.customer_id : null,
+      aggregateId: customer.customer_id,
+      revision: 1,
+      customerId: customer.customer_id,
+      type: 'customer.registry.requested.v1',
+      data: { externalId: customer.external_id },
+    });
+    await enqueueFanOut(db, registration, [QUEUES.ledger]);
   }
 
   async get(customerId: string) {

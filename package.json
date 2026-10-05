@@ -1,7 +1,7 @@
 {
   "name": "wallet-as-a-service",
   "version": "1.0.0",
-  "description": "NestJS wallet, signer, broadcast, activity-listener, and ledger services using Prisma, PostgreSQL, Pub/Sub, Redis/BullMQ, and Trust Wallet Core",
+  "description": "Single-exchange NestJS user, wallet, sweep, signer, broadcast, activity-listener, and ledger services using Prisma, PostgreSQL and durable queues",
   "scripts": {
     "build": "npm run clean && npm run db:generate && nest build --all && tsc -p tsconfig.tools.json",
     "test": "npm run build && node --test --test-concurrency=1 dist/tests/*.test.js",
@@ -21,7 +21,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write --print-width 100 eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
     "format:check": "prettier --check --print-width 100 eslint.config.mjs \"{apps,packages,scripts,tests}/**/*.ts\"",
-    "db:generate": "prisma generate && prisma generate --config prisma.broadcast.config.ts && prisma generate --config prisma.ledger.config.ts && prisma generate --config prisma.activity.config.ts",
+    "db:generate": "prisma generate && prisma generate --config prisma.broadcast.config.ts && prisma generate --config prisma.ledger.config.ts && prisma generate --config prisma.activity.config.ts && prisma generate --config prisma.user.config.ts && prisma generate --config prisma.sweep.config.ts",
     "dev:broadcast": "npm run db:generate && nest start broadcast --watch",
     "start:broadcast": "node dist/apps/broadcast/src/main.js",
     "queue": "tsx --env-file-if-exists=.env scripts/queue.ts",
@@ -34,7 +34,15 @@
     "build:ledger": "npm run db:generate && nest build ledger",
     "migrate:ledger": "npm run migrate -- ledger",
     "migrate:activity": "npm run migrate -- activity",
-    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "dev:user": "npm run db:generate && nest start user --watch",
+    "start:user": "node dist/apps/user/src/main.js",
+    "build:user": "npm run db:generate && nest build user",
+    "migrate:user": "npm run migrate -- user",
+    "dev:sweep": "npm run db:generate && nest start sweep --watch",
+    "start:sweep": "node dist/apps/sweep/src/main.js",
+    "build:sweep": "npm run db:generate && nest build sweep",
+    "migrate:sweep": "npm run migrate -- sweep"
   },
   "license": "ISC",
   "type": "module",
@@ -51,6 +59,7 @@
     "@trustwallet/wallet-core": "^4.8.4",
     "bullmq": "^6.3.11",
     "ioredis": "^6.0.0",
+    "jose": "^6.2.12",
     "pg": "^8.23.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.2",

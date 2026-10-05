@@ -45,7 +45,7 @@ export async function publishExchangeEvent(
     occurredAt: new Date().toISOString(),
     causationId: source.eventId,
   });
-  return tx.outbox.upsert({
+  const delivery = await tx.outbox.upsert({
     where: { dedupe_key: key },
     update: {},
     create: {
@@ -55,4 +55,27 @@ export async function publishExchangeEvent(
       payload: event as unknown as LedgerPrisma.InputJsonValue,
     },
   });
+  if (
+    [
+      'deposit.credited.v1',
+      'deposit.reversed.v1',
+      'deposit.deficit-recorded.v1',
+      'custody.loss.recorded.v1',
+      'custody.loss.reverted.v1',
+      'custody.incident.opened.v1',
+    ].includes(event.type)
+  ) {
+    // Reuse the persisted payload so replay cannot give the second consumer a different event ID.
+    await tx.outbox.upsert({
+      where: { dedupe_key: `${key}:sweep` },
+      update: {},
+      create: {
+        id: randomUUID(),
+        queue: QUEUES.sweep,
+        dedupe_key: `${key}:sweep`,
+        payload: delivery.payload as LedgerPrisma.InputJsonValue,
+      },
+    });
+  }
+  return delivery;
 }

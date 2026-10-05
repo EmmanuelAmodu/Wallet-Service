@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Queue, Worker } from 'bullmq';
 import { connection } from '../packages/queue/src/messaging.module.js';
-import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
+import { MessageAuth, QUEUES, messageSchema } from '../packages/queue/src/messages.js';
 import { epochQueuePrefix } from '../packages/queue/src/queue.config.js';
 import { exchangeEventSchema } from '../packages/queue/src/exchange-contracts.js';
+import { ledgerWalletRegistrationSchema } from '../packages/shared/src/activity-contracts.js';
 import { reconcileActivity } from '../scripts/queue.js';
 
 test('queue prefix includes the reset epoch', () => {
@@ -302,3 +303,23 @@ test(
     }
   },
 );
+
+test('single owner registration contracts reject tenant identity in HTTP and queue payloads', () => {
+  const registration = {
+    walletId: randomUUID(),
+    chain: 'ethereum',
+    network: '11155111',
+    address: '0x' + '12'.repeat(20),
+  };
+  assert.deepEqual(ledgerWalletRegistrationSchema.parse(registration), registration);
+  assert.throws(() =>
+    ledgerWalletRegistrationSchema.parse({ ...registration, tenantId: 'removed' }),
+  );
+  assert.equal(
+    messageSchema.parse({ type: 'ledger.wallet.registered', ...registration }).type,
+    'ledger.wallet.registered',
+  );
+  assert.throws(() =>
+    messageSchema.parse({ type: 'ledger.wallet.registered', ...registration, tenantId: 'removed' }),
+  );
+});

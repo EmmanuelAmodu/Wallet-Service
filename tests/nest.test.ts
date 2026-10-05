@@ -15,9 +15,13 @@ import { walletConfig, WalletSettings } from '../apps/wallet/src/config/wallet.c
 import { SafeErrorsFilter } from '../packages/shared/src/http/safe-errors.filter.js';
 import { setupOpenApi } from '../apps/wallet/src/openapi.js';
 import { LedgerClient } from '../apps/wallet/src/ledger/ledger-client.service.js';
+import { LedgerController } from '../apps/ledger/src/ledger.controller.js';
+import { LedgerService } from '../apps/ledger/src/ledger.service.js';
+import { LedgerAuthGuard } from '../apps/ledger/src/ledger-auth.guard.js';
+import { ledgerConfig } from '../apps/ledger/src/config/ledger.config.js';
 
 const settings: WalletSettings = {
-  apiKeys: { tenantA: 'a'.repeat(64), tenantB: 'b'.repeat(64) },
+  apiKey: 'a'.repeat(64),
   databaseUrl: 'postgresql://unused:unused@localhost/unused',
   host: '127.0.0.1',
   port: 3000,
@@ -35,7 +39,56 @@ const settings: WalletSettings = {
 })
 class TestSettingsModule {}
 
-test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency headers and safe errors', async () => {
+test('Ledger wallet HTTP routes authenticate reads and reject direct registration writes', async () => {
+  const walletId = randomUUID();
+  const apiKey = 'l'.repeat(64);
+  const reads: string[] = [];
+  let writes = 0;
+  const module = await Test.createTestingModule({
+    controllers: [LedgerController],
+    providers: [
+      LedgerAuthGuard,
+      { provide: ledgerConfig.KEY, useValue: { apiKey } },
+      {
+        provide: LedgerService,
+        useValue: {
+          balances: (id: string) => {
+            reads.push(id);
+            return { walletId: id, balances: [] };
+          },
+          registerWallet: () => {
+            writes++;
+          },
+        },
+      },
+    ],
+  }).compile();
+  const app = module.createNestApplication({ logger: false });
+  await app.listen(0, '127.0.0.1');
+  const base = await app.getUrl();
+  try {
+    const denied = await fetch(`${base}/internal/wallets/${walletId}/balances`);
+    assert.equal(denied.status, 401);
+    assert.deepEqual(reads, []);
+    const allowed = await fetch(`${base}/internal/wallets/${walletId}/balances`, {
+      headers: { authorization: `Bearer ${apiKey}` },
+    });
+    assert.equal(allowed.status, 200);
+    assert.deepEqual(await allowed.json(), { walletId, balances: [] });
+    assert.deepEqual(reads, [walletId]);
+    const directWrite = await fetch(`${base}/internal/wallets`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ walletId }),
+    });
+    assert.equal(directWrite.status, 404);
+    assert.equal(writes, 0);
+  } finally {
+    await app.close();
+  }
+});
+
+test('Nest feature modules enforce single owner backend authentication, DTO pipes, UUIDs, idempotency headers and safe errors', async () => {
   const calls: unknown[][] = [];
   const balanceCalls: unknown[] = [];
   const balanceWalletId = randomUUID();
@@ -51,7 +104,7 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
         calls.push(args);
         return { status: 'deriving' };
       },
-      getWallet: (_tenant: string, id: string) => {
+      getWallet: (id: string) => {
         if (id === balanceWalletId)
           return {
             id,
@@ -87,24 +140,16 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
       headers: { 'content-type': 'application/json', ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-  const authorization = `Bearer ${settings.apiKeys.tenantA}`;
+  const authorization = `Bearer ${settings.apiKey}`;
   try {
     const documentation = await request('/docs-json');
     assert.equal(documentation.status, 200);
     const openApi = await documentation.json();
-    assert.deepEqual(Object.keys(openApi.paths).sort(), [
-      '/v1/transactions/{id}',
-      '/v1/transactions/{id}/broadcast',
-      '/v1/transactions/{id}/refresh',
-      '/v1/wallets',
-      '/v1/wallets/{id}',
-      '/v1/wallets/{id}/balances',
-      '/v1/wallets/{id}/transactions',
-    ]);
-    assert.ok(openApi.components.securitySchemes.tenantBearer);
-    for (const value of ['', settings.apiKeys.tenantA, 'Bearer wrong']) {
+    assert.deepEqual(Object.keys(openApi.paths), []);
+    assert.ok(openApi.components.securitySchemes.customerBearer);
+    for (const value of ['', settings.apiKey, 'Bearer wrong']) {
       const response = await request(
-        '/v1/wallets',
+        '/internal/wallets',
         { chain: 'ethereum', externalId: 'alice' },
         { authorization: value },
       );
@@ -115,30 +160,29 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
       { chain: 'unsupported', externalId: 'alice' },
       { chain: 'ethereum', externalId: 'alice', tenant: 'tenantB' },
     ]) {
-      const response = await request('/v1/wallets', body, { authorization });
+      const response = await request('/internal/wallets', body, { authorization });
       assert.equal(response.status, 400);
     }
     const created = await request(
-      '/v1/wallets',
+      '/internal/wallets',
       { chain: 'ethereum', externalId: 'alice' },
       { authorization },
     );
     assert.equal(created.status, 202);
-    assert.deepEqual(calls[0], ['tenantA', 'ethereum', 'alice']);
-    const balances = await request(`/v1/wallets/${balanceWalletId}/balances`, undefined, {
+    assert.deepEqual(calls[0], ['ethereum', 'alice']);
+    const balances = await request(`/internal/wallets/${balanceWalletId}/balances`, undefined, {
       authorization,
     });
     assert.equal(balances.status, 200);
     assert.deepEqual(balanceCalls[0], {
       walletId: balanceWalletId,
-      tenantId: 'tenantA',
       chain: 'ethereum',
       network: '11155111',
       address: '0x' + '11'.repeat(20),
     });
-    const invalidId = await request('/v1/wallets/not-a-uuid', undefined, { authorization });
+    const invalidId = await request('/internal/wallets/not-a-uuid', undefined, { authorization });
     assert.equal(invalidId.status, 400);
-    const failed = await request(`/v1/wallets/${randomUUID()}`, undefined, { authorization });
+    const failed = await request(`/internal/wallets/${randomUUID()}`, undefined, { authorization });
     assert.equal(failed.status, 500);
     assert.deepEqual(await failed.json(), { message: 'Internal operation failed' });
     const walletId = randomUUID();
@@ -149,16 +193,16 @@ test('Nest feature modules enforce tenant guards, DTO pipes, UUIDs, idempotency 
       maxFeePerGas: '2',
       maxPriorityFeePerGas: '1',
     };
-    const missingKey = await request(`/v1/wallets/${walletId}/transactions`, intent, {
+    const missingKey = await request(`/internal/wallets/${walletId}/transactions`, intent, {
       authorization,
     });
     assert.equal(missingKey.status, 400);
-    const transfer = await request(`/v1/wallets/${walletId}/transactions`, intent, {
-      authorization: `Bearer ${settings.apiKeys.tenantB}`,
+    const transfer = await request(`/internal/wallets/${walletId}/transactions`, intent, {
+      authorization: `Bearer ${settings.apiKey}`,
       'idempotency-key': 'payment-1',
     });
     assert.equal(transfer.status, 202);
-    assert.deepEqual(calls[1], ['tenantB', walletId, 'payment-1', intent]);
+    assert.deepEqual(calls[1], [walletId, 'payment-1', intent]);
   } finally {
     await app.close();
   }

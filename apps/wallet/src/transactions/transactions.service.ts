@@ -36,25 +36,20 @@ export class TransactionsService {
     @Inject(walletConfig.KEY) private readonly config: WalletConfig,
   ) {}
 
-  async createTransaction(
-    tenant: string,
-    walletId: string,
-    idempotencyKey: string,
-    intent: Transfer,
-  ) {
+  async createTransaction(walletId: string, idempotencyKey: string, intent: Transfer) {
     const requestHash = createHash('sha256').update(canonical({ walletId, intent })).digest('hex');
     return this.db.$transaction(async (db) => {
-      await lock(db, canonical(['idempotency', tenant, idempotencyKey]));
+      await lock(db, canonical(['idempotency', walletId, idempotencyKey]));
       const existing = await db.transaction.findFirst({
-        where: { tenant_id: tenant, idempotency_key: idempotencyKey },
+        where: { wallet_id: walletId, idempotency_key: idempotencyKey },
       });
       if (existing) {
         if (existing.request_hash !== requestHash)
           throw new ConflictException('Idempotency key already used for a different request');
         return existing;
       }
-      await db.$queryRaw`SELECT id FROM wallets WHERE id=${walletId}::uuid AND tenant_id=${tenant} FOR UPDATE`;
-      const wallet = await db.wallet.findFirst({ where: { id: walletId, tenant_id: tenant } });
+      await db.$queryRaw`SELECT id FROM wallets WHERE id=${walletId}::uuid FOR UPDATE`;
+      const wallet = await db.wallet.findFirst({ where: { id: walletId } });
       if (!wallet) throw new NotFoundException('Wallet not found');
       if (wallet.status !== 'ready') throw new ConflictException('Wallet address is not ready');
       if (wallet.chain !== intent.chain)
@@ -70,7 +65,6 @@ export class TransactionsService {
       const tx = await db.transaction.create({
         data: {
           id: randomUUID(),
-          tenant_id: tenant,
           wallet_id: walletId,
           idempotency_key: idempotencyKey,
           request_hash: requestHash,
@@ -88,8 +82,8 @@ export class TransactionsService {
     });
   }
 
-  async getTransaction(tenant: string, id: string) {
-    const tx = await this.db.transaction.findFirst({ where: { id, tenant_id: tenant } });
+  async getTransaction(id: string) {
+    const tx = await this.db.transaction.findFirst({ where: { id } });
     if (!tx) throw new NotFoundException('Transaction not found');
     return tx;
   }
@@ -110,11 +104,11 @@ export class TransactionsService {
     });
   }
 
-  async requestBroadcast(tenant: string, id: string) {
+  async requestBroadcast(id: string) {
     return this.db.$transaction(async (db) => {
       await lockTransaction(db, id);
       const tx = await db.transaction.findFirst({
-        where: { id, tenant_id: tenant },
+        where: { id },
         include: { wallet: true },
       });
       if (!tx) throw new NotFoundException('Transaction not found');
@@ -146,11 +140,11 @@ export class TransactionsService {
     });
   }
 
-  async requestRefresh(tenant: string, id: string) {
+  async requestRefresh(id: string) {
     return this.db.$transaction(async (db) => {
       await lockTransaction(db, id);
       const tx = await db.transaction.findFirst({
-        where: { id, tenant_id: tenant },
+        where: { id },
         include: { wallet: true },
       });
       if (!tx) throw new NotFoundException('Transaction not found');

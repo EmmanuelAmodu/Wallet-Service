@@ -1,11 +1,14 @@
 # Exchange wallet implementation TODO
 
-Date: 4 October 2026  
-Status: Phase 3 repository implementation verified; custody bootstrap and live provider rollout gates remain pending
+Updated: 5 October 2026
+
+Status: reviewed financial/recovery defects fixed and tested; User login and public Wallet JWT access implemented; custody/provider/execution rollout gates remain pending
 
 Design reference: [Exchange wallet implementation plan](exchange-wallet-implementation-plan.md)
 
 Initial configuration and worker answers: [implementation decisions](exchange-wallet-initial-decisions.md). The target is one exchange per deployment, with no tenant model.
+
+Current audit: [Phases 1–3 review](exchange-wallet-phases1-3-review.md), 5 October. R1/R2/R6/R7 are fixed with regression coverage and the expanded 231-test suite passes. Phase 1 custody/bootstrap and P3-02 external provider acceptance remain open.
 
 ## How to work through this checklist
 
@@ -15,18 +18,34 @@ Initial configuration and worker answers: [implementation decisions](exchange-wa
 - Complete each phase's gate before enabling the next customer-facing capability. Preparatory work can run in parallel when its prerequisites are ready.
 - Existing development records can be discarded. Use a coordinated reset; no legacy-address or opening-balance migration is required.
 
-| Phase | Deliverable | Prerequisite | Status |
-| --- | --- | --- | --- |
-| 0 | Agreed configuration and contracts | None | Pending |
-| 1 | Custody roles, allocation, and clean bootstrap | 0 | Pending |
-| 2 | Durable messaging and exchange accounting | 1 | Complete (implementation; deployment gated) |
-| 3 | Deposit detection, credit, and customer APIs | 2 | Implemented here; P3-02 external provider certification pending |
-| 4 | Safe execution and native sweeps | 3 | Pending |
-| 5 | Hot-wallet withdrawals | 4 | Pending |
-| 6 | ERC-20 and SPL lifecycle support | 5 | Pending |
-| 7 | Operational recovery and controls | 6 | Pending |
-| 8 | End-to-end acceptance and rollout | 7 | Pending |
-| 9 | Optional throughput and domain expansion | 8 | Backlog |
+| Phase | Deliverable                                    | Prerequisite | Status                                                               |
+| ----- | ---------------------------------------------- | ------------ | -------------------------------------------------------------------- |
+| 0     | Agreed configuration and contracts             | None         | Pending                                                              |
+| 1     | Custody roles, allocation, and clean bootstrap | 0            | Partial; custody bootstrap/issuance absent                           |
+| 2     | Durable messaging and exchange accounting      | 1            | Implemented/tested; Phase 1 rollout prerequisite pending             |
+| 3     | Deposit detection, credit, and customer APIs   | 2            | Local implementation/tested; Phase 1 and P3-02 external gate pending |
+| 4     | Safe execution and native sweeps               | 3            | Pending                                                              |
+| 5     | Hot-wallet withdrawals                         | 4            | Pending                                                              |
+| 6     | ERC-20 and SPL lifecycle support               | 5            | Pending                                                              |
+| 7     | Operational recovery and controls              | 6            | Pending                                                              |
+| 8     | End-to-end acceptance and rollout              | 7            | Pending                                                              |
+| 9     | Optional throughput and domain expansion       | 8            | Backlog                                                              |
+
+## New direction foundations — User and Sweep
+
+These changes implement the 5 October service-boundary decision. They do not complete Phase 1 custody bootstrap or Phase 4 fund execution. Ledger settlement incidents now reach Sweep independently under P2-02/P4-00. Only User and Wallet publish application HTTP ports; workers use authenticated queues and Ledger retains authenticated private HTTP reads.
+
+- [x] **U-01** Add a separate User NestJS application and Prisma/PostgreSQL database. Register email/password with normalized unique email, salted asynchronous scrypt, bounded hashing, safe body/error handling, and registration throttling. Login/access-token issuance is implemented under U-05; sessions/refresh/revocation remain U-06.
+- [x] **U-02** Atomically publish secret-free `user.registered.v1` from User; provision matching Wallet customer UUID/external ID, durable receipt, and Ledger identity command together. Remove direct backend customer registration and reserve User UUID identities. Wait for Ledger acknowledgment before balance/address readiness; replay cannot clear freezes.
+- [x] **U-03** Remove runtime tenant models, DTO/message fields, auth context, key maps, and tenant scopes. Use one `WALLET_API_KEY`, separate exchange/Ledger credentials, globally scoped external wallet identity, and wallet-scoped transaction idempotency. Preserve historical migrations; additive Wallet/Ledger migrations reject conflicting global development identities instead of merging them.
+- [x] **U-04** Register User and Sweep in build/watch/start/migration tooling, Compose, CI, database isolation, and coordinated reset targets. Prepare configuration examples without modifying deployment secrets or resetting application data.
+- [x] **U-05** Add email/password login and short-lived RS256 access tokens. User holds the private token key; Wallet verifies with only the public key, issuer/audience, expiry, UUID subject, and reset epoch. Public `/v1/me` routes derive customer identity from the token; service keys and customer JWTs cannot substitute for each other. Registration responses contain identity fields only. Verify generic login failures, missing-account hashing, independent throttles, provisioning lag, and cross-customer rejection.
+- [ ] **U-06** Extend identity with refresh/session revocation/logout, verified email, password recovery, MFA, and coordinated key rotation. Deploy shared edge/distributed registration/login limits before scaling public authentication across replicas.
+- [x] **U-07** Move Wallet operations to authenticated `/internal` routes, exclude them from public OpenAPI, and remove Ledger registration side effects from HTTP balance reads and remove its direct wallet registration HTTP route. Add a development Compose application overlay publishing only User/Wallet with separate owned database credentials and scoped token/custody secret mounts. Document public-ingress path restrictions and host UID/GID for owner-only secret files.
+
+See [architecture](architecture.md) for current boundaries and [implementation plan](exchange-wallet-implementation-plan.md) for execution ownership.
+
+**Verification (5 October):** 231 tests passed with no failures/skips across six dedicated service databases and Redis, including User → Wallet → Ledger provisioning/login/JWT ownership, reversal-first settlement fencing, pending re-inclusion compensation/uncertainty, certified-network recovery fairness, and identical Wallet/Sweep incident delivery with sticky gates. Build, ESLint, formatting, Compose configuration, and diff checks passed. Migrations applied only to isolated test databases; deployment records and secrets were not modified. The Compose application image/startup was not exercised. Full Sweep/withdrawal execution, session features, custody bootstrap, and live QuickNode certification remain later gates.
 
 ## Phase 0 — Configuration and contracts
 
@@ -42,7 +61,7 @@ Initial configuration and worker answers: [implementation decisions](exchange-wa
 
 ## Phase 1 — Custody roles, allocation, and bootstrap
 
-- [ ] **P1-01** Add Wallet-owned Prisma models for custody domains, globally unique customer external IDs, wallet roles, management purposes, asset configuration, and subscription readiness. Remove tenant fields from the exchange model/contracts/authentication as it is implemented; keep seed material outside PostgreSQL.
+- [ ] **P1-01** Finish Wallet-owned Prisma models for custody domains, wallet roles, management purposes, asset configuration, and subscription readiness. User/customer identity and complete runtime tenant removal are implemented under U-01–U-03; keep seed material outside PostgreSQL.
 - [ ] **P1-02** Add database constraints for hot account 0, management accounts 1–9, customer accounts >=10, and one active hot wallet per domain/chain/network. Preserve seed/chain/account key uniqueness and canonical addresses.
 - [ ] **P1-03** Update the customer allocator and baseline sequence to start at 10, remain noncycling, enforce the account bound, and allocate safely across replicas. Explicit hot/management inserts must not advance it.
 - [ ] **P1-04** Implement `custody/` and `customers/` NestJS modules with idempotent hot bootstrap, explicit management creation, and immutable published seed/account/path ownership.
@@ -56,43 +75,44 @@ Initial configuration and worker answers: [implementation decisions](exchange-wa
 ## Phase 2 — Durable messaging and exchange accounting
 
 - [x] **P2-01** Implement the shared versioned contracts in `packages/queue`, with domain/customer, canonical asset/network, operation/attempt IDs, request digest, correlation/causation IDs, revision, and schema version. `packages/queue/src/exchange-contracts.ts` now provides strict `schemaVersion: 1` runtime schemas for registry, deposit/deficit, reservation/release, execution, settlement, and incident events. Producer/consumer routing and transactional fan-out are implemented in P2-02.
-- [x] **P2-02** Add explicit outbox fan-out to consumer-owned queues. Deliver registry events separately to Ledger and ActivityListener; persist acknowledgments. Retain database inbox deduplication and transition guards beyond queue retention.
+- [x] **P2-02** Add explicit outbox fan-out to consumer-owned queues. Deliver registry events separately to Ledger and ActivityListener; persist acknowledgments. Retain database inbox deduplication and transition guards beyond queue retention. R7 fixed: settlement fee-cap/custody-shortfall/reorg incidents now atomically deliver identical payloads to Wallet and Sweep, including customer identity when omitted by the settlement input.
 - [x] **P2-03** Extend Ledger's Prisma schema with metadata-only `LedgerAccount` identities/types/owners, journal batches independent of on-chain activities, deposits, withdrawal reservations, operation/journal links, inbox records, and its own transactional outbox. Keep balances in append-only entries; wire the Ledger outbox relay.
 - [x] **P2-04** Implement Ledger feature boundaries for accounts, deposits, reservations, and settlements. Preserve immutable balanced journals, sequence locking, predecessor links, and compensating-entry references.
 - [x] **P2-05** Separate physical custody accounts from customer pending/available/reserved/frozen liabilities. Use bounded integer base units and separate balances for each asset/network; exclude in-transit custody from spendable hot liquidity.
 - [x] **P2-06** Implement final-deposit credit exactly once and pending/final/reverted transitions. Atomically publish `deposit.credited` with its journal entry; add deficit/freeze handling when reversing funds already withdrawn.
 - [x] **P2-07** Implement atomic balance-check-and-reserve, idempotent release, and reservation result events. Reserve principal plus the accepted customer fee, using separate holds when fee assets differ.
-- [x] **P2-08** Implement custody-only sweep/funding postings and withdrawal settlement, with actual native network fees, accepted fee revenue, failed-on-chain fees, and versioned settlement reversals. Unknown outcomes retain holds.
+- [x] **P2-08** Implement custody-only sweep/funding postings and withdrawal settlement, actual native network fees, accepted fee revenue, failed-on-chain fees, and versioned settlement reversals. Unknown outcomes retain holds. R1 fixed: independent durable reversal fences accept reversal before execution/settlement, block stale settlement/release, and preserve a hold without creating a fictitious compensating journal. A higher canonical re-inclusion can settle the same attempt once.
 - [x] **P2-09** Add reservation reconciliation for missing operations/events and expose authenticated customer balance reads through Ledger. Keep all applications on their own databases.
-- [x] **P2-10** Verify simultaneous holds cannot overspend; duplicate/reordered events cannot credit or settle twice; funding/sweeps leave customer liabilities unchanged; journal entries balance per asset; crashes after reservation commit recover through the outbox.
+- [x] **P2-10** Verify concurrent holds, duplicate/reordered events, unchanged customer liability for sweeps/funding, per-asset balanced journals, and reservation/outbox crash recovery. Added R1 pre-intent/reversal-first/conflicting-identity/crash regressions and R7 independent identical incident delivery and sticky Sweep review gates.
 
-**Gate:** verified against isolated PostgreSQL databases and Redis: Ledger owns customer balances and holds durably. Financial transitions are idempotent, balanced, and recoverable without cross-application database reads.
+**Gate:** Ledger owns customer balances/holds and journals are balanced without cross-application database reads. R1 reversal ordering and R7 incident fan-out are fixed and tested; Phase 1 deployment readiness remains a prerequisite. Consumer retry exhaustion currently requires retained-job/manual recovery; see the review's additional recovery limitations.
 
-**Verification:** 122 tests passed, with no failures or skips; application/tooling build, ESLint, formatting, and diff checks passed. See [Phase 2 implementation notes](exchange-wallet-phase2.md) for code mapping, APIs, migrations, and verification setup. Phase 1 custody bootstrap and Phase 3 provider readiness still gate customer-facing deployment. Application data was not reset and deployment databases were not migrated.
+**Verification:** initial Phase 2 verification passed 122 tests; the latest whole-repository run passes 231 tests with no failures/skips, including the new R1/R7 regressions. Application/tooling build, ESLint, formatting, and diff checks passed. See [Phase 2 implementation notes](exchange-wallet-phase2.md) for code mapping, APIs, migrations, and verification setup. Phase 1 custody bootstrap and Phase 3 provider readiness still gate customer-facing deployment. Application data was not reset and deployment databases were not migrated.
 
 ## Phase 3 — Deposit listener and customer deposit APIs
 
-- [x] **P3-01** Implement the listener registry projection, revision checks, readiness acknowledgments, and rebuild procedure. Durable fenced watch generations, registry locks, rejected/readiness acknowledgment revisions, and historical cursor recovery pause financial processing during gaps or rebuilds.
+- [x] **P3-01** Implement listener registry projections, revision checks, readiness acknowledgments, rebuilds, fenced watch generations, registry locks, and historical cursor recovery. Gaps/rebuilds pause financial processing. R6 fixed: recovery and stale watch cleanup select certified eligible networks before the batch limit; disabled rows cannot starve eligible work. Certificate removal/restoration is covered.
 - [ ] **P3-02** Implement provider subscription installation/removal, acknowledgment persistence, start block/slot, and backfill cursors. **Client implementation complete here:** QuickNode Ethereum/Solana and separate Bitcoin Core regtest gateway routes, durable install/cleanup leases, paginated backfill from address history, and certificates disabled by default. **Remaining:** implement/deploy the [gateway protocol](exchange-wallet-phase3.md#quicknode-gateway-contract) in the separate provider repository and certify deployed watch lifecycle, historical coverage, raw units, stable discovery/transfer identities, canonical RPC/trace coverage, and current-epoch delivery. Relevant SPL token-account watches remain Phase 6 enablement work under the native-first rollout.
 - [x] **P3-03** Treat provider notifications as discovery signals; verify network and canonical chain data through RPC before publishing normalized financial observations. Strict signals cannot supply amounts, owners, or confirmation counts; canonical RPC reconstruction determines finality and financial data.
 - [x] **P3-04** Replace transaction-level balance-change identity with transfer identity: Bitcoin `txid:vout`, ERC-20 transaction/log index, EVM native transfer/trace identity, and Solana instruction/inner-instruction plus token identity. Native financial posting is enabled only with complete verification; token observations remain visible exceptions until Phase 6.
 - [x] **P3-05** Classify external deposits, internal funding, persisted authorized sweeps, and unexpected outflows. Trusted registry and operation attempts distinguish external receipts from funding, hot receipts, change, and refunds without requiring an unrelated external counterparty to be registered.
-- [x] **P3-06** Publish observed/finalized/reverted deposit events and maintain Wallet's deposit/history projection from Ledger results. Normalize addresses and assets consistently across services. Discovery and accounting revisions remain separate; uncertainty retains prior credit, and proven reorgs compensate it.
+- [x] **P3-06** Publish observed/finalized/reverted deposit events and maintain Wallet history from Ledger results with consistent normalization and separate discovery/accounting revisions. R2 fixed: retain finalized inclusion independently of replacement pending observations; compensate proven old inclusion orphaning before replacement finality. RPC uncertainty preserves accepted evidence/credit, and incomplete pending data cannot erase it.
 - [x] **P3-07** Persist unexpected customer-wallet outflow incidents, freeze liabilities, and journal custody loss against exchange reconciliation. Reorgs and later known sweep purpose compensate provisional loss without silently changing liability or unfreezing. Match source, native asset, hot destination, amount, attempt/hash, and fee payer; fee-cap breaches freeze for policy review while settlement accounts for actual cost once. Incomplete native observations freeze proven customer spends without guessing a net loss.
-- [x] **P3-08** Add idempotent customer deposit-address assignment, balance, and deposit-history APIs with separate exchange-backend authentication and customer ownership validation. Customer identity registers with Ledger through a durable command/acknowledgment; balance reads return HTTP 202 until acknowledged. Assignment waits for Phase 1's trusted customer wallet and all custody/Ledger/listener coverage prerequisites.
-- [x] **P3-09** Verify replay, multiple outputs/logs/instructions, alias/case normalization, out-of-order finality, registry lag, resubscription/backfill, lost installation acknowledgments, and reorgs with deterministic RPC/provider fixtures and isolated PostgreSQL/Redis tests. Funding, hot sweep receipts, change, and refunds never mint a second customer credit. Deployed provider acceptance evidence remains P3-02.
+- [x] **P3-08** Add idempotent deposit-address assignment, balances, and scoped deposit-history APIs. Public `/v1/me` derives the customer from the User JWT; administrative `/internal/customers` uses a separate service key. User registration provisions customer UUID/Ledger registration asynchronously; direct backend creation is removed. Balances return HTTP 202 until acknowledged. Public assignment accepts only enabled Ethereum/Solana networks and waits for Phase 1 custody and all coverage prerequisites.
+- [x] **P3-09** Verify replay, exact output/log/instruction identities, normalization, out-of-order finality, registry lag, backfill, lost acknowledgments, and reorgs with deterministic fixtures and isolated PostgreSQL/Redis. Funding, hot receipts, change, and refunds cannot mint another credit. Added R2 different-block pending/no-inclusion/incomplete/uncertain re-inclusion and R6 mixed-network recovery/cleanup/certification regressions. Live provider acceptance remains P3-02.
 
-**Gate:** repository verification covers exact-once native credit, recoverable registry/subscription gaps, and address readiness. The rollout gate remains **open** until Phase 1 custody allocation/bootstrap and P3-02's external provider implementation/certification pass. No application records were reset or deployment databases migrated. See [Phase 3 implementation notes](exchange-wallet-phase3.md) for APIs, additive migrations, configuration, and external gateway responsibilities.
+**Gate:** existing verification covers many native credit, registry, and readiness cases. R2 re-inclusion and R6 recovery fairness are fixed and tested. The rollout gate also remains **open** until Phase 1 custody allocation/bootstrap and P3-02's external provider implementation/certification pass. No application records were reset or deployment databases migrated. See [Phase 3 implementation notes](exchange-wallet-phase3.md) for APIs, additive migrations, configuration, and external gateway responsibilities.
 
-**Verification:** 190 tests passed, with no failures or skips, using dedicated Wallet/Broadcast/Ledger/ActivityListener PostgreSQL databases and Redis plus deterministic RPC/provider fixtures. Application/tooling build, ESLint, Prettier, and diff checks passed. Live QuickNode gateway tests were not run; they remain part of P3-02 certification.
+**Verification:** initial Phase 3 verification passed 190 tests; the latest whole-repository run passes 231 tests with no failures/skips using six dedicated service PostgreSQL databases and Redis plus deterministic RPC/provider fixtures. Application/tooling build, ESLint, Prettier, and diff checks passed. Live QuickNode gateway tests were not run; they remain part of P3-02 certification.
 
 ## Phase 4 — Safe execution and native sweeps
 
-- [ ] **P4-01** Add durable sweep, attempt, funding, and resource-reservation models and `sweeps/`/`treasury/` modules. Persist operation revisions, hot generation, deferral reasons, retry time, and immutable attempt/replacement lineage.
+- [x] **P4-00** Establish separate `apps/sweep` with its own database, queue, durable inbox/outbox, trusted registry projection, credited-deposit coalescing, reversal tombstones, and sticky customer/domain review gates. No signing/submission command is emitted; registry-ready work remains `blocked_execution_not_implemented`. R7 fixed: Ledger settlement incidents have independent identical Sweep delivery with sticky gate regression coverage. Full execution remains P4-01–P4-12.
+- [ ] **P4-01** Add logical sweep, attempt, funding, and scheduling/resource-claim saga models in Sweep. Persist operation revisions, hot generation, deferral reasons, retry time, and immutable attempt/replacement lineage. Acquire Wallet's authoritative source execution fence through queues rather than importing its application or reading its database.
 - [ ] **P4-02** Implement source execution reservations before preparation/signing. Retain `one_pending_per_wallet`; signed, submitted, and uncertain attempts keep their slot until reconciliation proves it can be released.
 - [ ] **P4-03** Implement trusted Signer policy authorization independent of queue HMAC. Verify source derivation/role, configured purpose, asset/network, destination, fee/output bounds, authorization expiry/policy revision, and request digest; bind results to the attempt and derive keys only in memory.
 - [ ] **P4-04** Extend prepare/sign/broadcast contracts and Broadcast persistence with operation/attempt references and settled fee/result information. Validate signer-result digest/revision/state, then automatically enqueue broadcast through Wallet's outbox while preserving immutable signed snapshots and same-byte retries.
-- [ ] **P4-05** Build sweep scheduling from `deposit.credited`: coalesce eligible work, re-read canonical resources, reserve inputs, and defer insufficient funds/gas or uneconomical dust. Arrivals during an active attempt become later work.
+- [ ] **P4-05** Complete Sweep scheduling from `deposit.credited`: durable coalescing is implemented under P4-00; now re-read canonical resources, reserve inputs, apply sweep-consumption generations, and defer insufficient funds/gas or uneconomical dust. Credited planning units are not spendable chain balances. Arrivals during an active attempt become later work.
 - [ ] **P4-06** Implement EVM native sweep-max with gas estimation/caps, worst-case fee allowance, hot-only payout, and residual re-evaluation.
 - [ ] **P4-07** Implement watch-only/indexer Bitcoin UTXO discovery, ownership/maturity/finality checks, durable outpoint reservations, and sweep-all signing with hot-only asset outputs. Split large input sets and defer uneconomical dust; do not return change to the customer source.
 - [ ] **P4-08** Implement Solana native sweeps with fee/rent policy, available-balance validation, expiry handling, and retained prior-inclusion evidence across RPC outages.
@@ -106,7 +126,7 @@ Initial configuration and worker answers: [implementation decisions](exchange-wa
 ## Phase 5 — Hot-wallet withdrawals
 
 - [ ] **P5-01** Add logical withdrawal models and `withdrawals/` module, including customer/domain, destination, principal, accepted fee quote, scoped idempotency key/digest, Ledger hold, hot generation, status/reason, and linked attempts.
-- [ ] **P5-02** Add withdrawal request/status APIs with exchange-backend authentication, customer ownership validation, and canonical amount/destination checks. Reject exchange-owned deposit/hot/management destinations and conflicting customer-scoped idempotency payloads.
+- [ ] **P5-02** Add JWT-authenticated withdrawal request/status APIs under `/v1/me/withdrawals`, deriving customer identity from the verified subject. Keep administration under service-authenticated `/internal`. Validate canonical amounts/destinations, reject exchange-owned addresses, and reject conflicting customer-scoped idempotency payloads.
 - [ ] **P5-03** Restrict the existing customer-wallet transaction route and internal management/signing interfaces. Customer requests must not choose a source wallet, path, nonce, UTXOs, or deposit-wallet fallback.
 - [ ] **P5-04** Implement the reservation saga through durable commands/results. Persist intent before requesting a hold; recover lost result delivery and rejected or orphaned reservations.
 - [ ] **P5-05** Implement hot liquidity checks and durable scheduling. Queue many logical withdrawals while executing one active hot transaction; report insufficient liquidity separately from insufficient customer balance.

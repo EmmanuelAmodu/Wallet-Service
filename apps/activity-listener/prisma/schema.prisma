@@ -82,22 +82,25 @@ model Outbox {
 
 // RPC-verified discovery and transfer identities remain durable beyond queue retention.
 model ExchangeDiscovery {
-  id               String   @id
-  reset_epoch      String
-  chain            String
-  network          String
-  transaction_hash String
-  payload_hash     String
-  signal           Json
-  state            String   @default("pending")
-  check_revision   Int      @default(0)
-  lease_until      DateTime? @db.Timestamptz
-  block_hash       String?
-  block_height     String?
-  next_check_at    DateTime @default(now()) @db.Timestamptz
-  last_error       String?
-  created_at       DateTime @default(now()) @db.Timestamptz
-  updated_at       DateTime @default(now()) @updatedAt @db.Timestamptz
+  id                     String    @id
+  reset_epoch            String
+  chain                  String
+  network                String
+  transaction_hash       String
+  payload_hash           String
+  signal                 Json
+  state                  String    @default("pending")
+  check_revision         Int       @default(0)
+  lease_until            DateTime? @db.Timestamptz
+  block_hash             String?
+  block_height           String?
+  // Retain the last financially accepted inclusion while newer observations remain pending.
+  finalized_block_hash   String?
+  finalized_block_height String?
+  next_check_at          DateTime  @default(now()) @db.Timestamptz
+  last_error             String?
+  created_at             DateTime  @default(now()) @db.Timestamptz
+  updated_at             DateTime  @default(now()) @updatedAt @db.Timestamptz
 
   @@index([reset_epoch, next_check_at])
   @@map("exchange_discoveries")

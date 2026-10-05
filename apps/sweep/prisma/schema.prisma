@@ -1,0 +1,118 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../../node_modules/.prisma/sweep-client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model SweepWalletRegistration {
+  wallet_id         String   @id @db.Uuid
+  domain_id         String
+  reset_epoch       String
+  chain             String
+  network           String
+  address           String
+  address_key       String
+  role              String
+  account           Int
+  customer_id       String?  @db.Uuid
+  hot_wallet_id     String?  @db.Uuid
+  registry_revision Int
+  created_at        DateTime @default(now()) @db.Timestamptz
+  updated_at        DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, reset_epoch, chain, network, address_key])
+  @@index([domain_id, reset_epoch, customer_id])
+  @@map("sweep_wallet_registry")
+}
+
+model SweepCustomer {
+  customer_id  String   @id @db.Uuid
+  domain_id    String
+  reset_epoch  String
+  paused       Boolean  @default(false)
+  pause_reason String?
+  created_at   DateTime @default(now()) @db.Timestamptz
+  updated_at   DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@map("sweep_customers")
+}
+
+// Ledger result projection: credited units are a scheduling hint, never spendable chain balance.
+model SweepDeposit {
+  deposit_id      String   @id @db.Uuid
+  domain_id       String
+  reset_epoch     String
+  customer_id     String   @db.Uuid
+  wallet_id       String?  @db.Uuid
+  chain           String
+  network         String
+  asset_id        String
+  amount          String
+  state           String
+  revision        Int
+  revision_digest String
+  created_at      DateTime @default(now()) @db.Timestamptz
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@index([domain_id, reset_epoch, wallet_id, chain, network, asset_id, state])
+  @@map("sweep_deposits")
+}
+
+model SweepWork {
+  id                     String   @id @default(uuid()) @db.Uuid
+  domain_id              String
+  reset_epoch            String
+  customer_id            String   @db.Uuid
+  source_wallet_id       String   @db.Uuid
+  hot_wallet_id          String?  @db.Uuid
+  chain                  String
+  network                String
+  asset_id               String
+  observed_credit_units  String
+  credited_deposit_count Int
+  state                  String
+  reason                 String
+  revision               Int      @default(1)
+  created_at             DateTime @default(now()) @db.Timestamptz
+  updated_at             DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, reset_epoch, source_wallet_id, chain, network, asset_id])
+  @@index([domain_id, reset_epoch, state])
+  @@map("sweep_work")
+}
+
+model Inbox {
+  id           String   @id
+  domain_id    String
+  reset_epoch  String
+  payload_hash String
+  processed_at DateTime @default(now()) @db.Timestamptz
+
+  @@map("inbox")
+}
+
+model Outbox {
+  id           String    @id @db.Uuid
+  queue        String
+  dedupe_key   String    @unique
+  payload      Json
+  available_at DateTime  @default(now()) @db.Timestamptz
+  published_at DateTime? @db.Timestamptz
+  created_at   DateTime  @default(now()) @db.Timestamptz
+
+  @@index([published_at, available_at])
+  @@map("outbox")
+}
+
+model SweepDomainGate {
+  domain_id   String
+  reset_epoch String
+  reason      String
+  created_at  DateTime @default(now()) @db.Timestamptz
+
+  @@id([domain_id, reset_epoch])
+  @@map("sweep_domain_gates")
+}

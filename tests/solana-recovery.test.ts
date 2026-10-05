@@ -91,7 +91,6 @@ test(
       await Promise.all([activityWorker.waitUntilReady(), ledgerWorker.waitUntilReady()]);
       await ledger.registerWallet({
         walletId,
-        tenantId: 'solana-recovery',
         chain: 'solana',
         network: 'devnet',
         address,
@@ -115,15 +114,12 @@ test(
         { jobId },
       );
       await waitForState('observed');
-      assert.equal(
-        (await ledger.balances(walletId, 'solana-recovery')).balances[0].provisional,
-        '100',
-      );
+      assert.equal((await ledger.balances(walletId)).balances[0].provisional, '100');
       await promoteCheck(1);
       await waitForState('attention');
       await promoteCheck(2);
       await waitForState('reverted');
-      const balance = (await ledger.balances(walletId, 'solana-recovery')).balances[0];
+      const balance = (await ledger.balances(walletId)).balances[0];
       assert.equal(balance.provisional, '0');
       assert.equal(balance.confirmed, '0');
     } finally {

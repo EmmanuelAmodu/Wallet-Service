@@ -92,7 +92,7 @@ test('application configuration is scoped and rejects unsafe settings at startup
     'BROADCAST_DATABASE_URL',
     'LEDGER_DATABASE_URL',
     'LEDGER_API_KEY',
-    'WALLET_API_KEYS',
+    'WALLET_API_KEY',
     'QUEUE_AUTH_KEY',
     'SIGNER_SEED_FILE',
     'SIGNER_SEED_ID',
@@ -149,15 +149,17 @@ test('application configuration is scoped and rejects unsafe settings at startup
   assert.throws(() => broadcastConfig(), /ALLOW_BROADCAST/);
   Object.assign(process.env, {
     WALLET_DATABASE_URL: 'postgresql://localhost/wallet',
-    WALLET_API_KEYS: JSON.stringify({ tenant: 'a'.repeat(64) }),
+    WALLET_API_KEY: 'a'.repeat(64),
     QUEUE_AUTH_KEY: 'a'.repeat(64),
     SIGNER_SEED_ID: 'test',
   });
   assert.throws(() => walletConfig(), /distinct/);
   process.env.QUEUE_AUTH_KEY = 'b'.repeat(64);
-  process.env.WALLET_API_KEYS = JSON.stringify({ tenant: 'a'.repeat(64), other: 'a'.repeat(64) });
-  assert.throws(() => walletConfig(), /unique/);
-  process.env.WALLET_API_KEYS = JSON.stringify({ tenant: 'a'.repeat(64) });
+  process.env.WALLET_API_KEY = 'short';
+  assert.throws(() => walletConfig(), /at least 32/);
+  delete process.env.WALLET_API_KEY;
+  assert.throws(() => walletConfig(), /WALLET_API_KEY/);
+  process.env.WALLET_API_KEY = 'a'.repeat(64);
   process.env.WALLET_PORT = '70000';
   assert.throws(() => walletConfig(), /WALLET_PORT/);
   process.env.WALLET_PORT = '3000';

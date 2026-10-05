@@ -18,13 +18,13 @@ export class WalletsService {
     @Inject(walletConfig.KEY) private readonly config: WalletConfig,
   ) {}
 
-  async createWallet(tenant: string, chain: Chain, externalId: string) {
+  async createWallet(chain: Chain, externalId: string) {
     const network = networkFor(chain, this.config);
     const core = await getWalletCore();
     return this.db.$transaction(async (db) => {
-      await lock(db, canonical(['wallet', tenant, chain, network, externalId]));
+      await lock(db, canonical(['wallet', chain, network, externalId]));
       const existing = await db.wallet.findFirst({
-        where: { tenant_id: tenant, external_id: externalId, chain, network },
+        where: { external_id: externalId, chain, network },
       });
       if (existing) return existing;
       const [sequence] = await db.$queryRaw<
@@ -36,7 +36,6 @@ export class WalletsService {
       const wallet = await db.wallet.create({
         data: {
           id,
-          tenant_id: tenant,
           external_id: externalId,
           chain,
           network,
@@ -60,8 +59,8 @@ export class WalletsService {
     });
   }
 
-  async getWallet(tenant: string, id: string) {
-    const wallet = await this.db.wallet.findFirst({ where: { id, tenant_id: tenant } });
+  async getWallet(id: string) {
+    const wallet = await this.db.wallet.findFirst({ where: { id } });
     if (!wallet) throw new NotFoundException('Wallet not found');
     return wallet;
   }

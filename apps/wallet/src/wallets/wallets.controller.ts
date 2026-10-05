@@ -11,7 +11,6 @@ import {
   ApiParam,
   ApiTags,
 } from '@nestjs/swagger';
-import { Tenant } from '../auth/tenant.decorator.js';
 import { ZodValidationPipe } from '../../../../packages/shared/src/http/zod-validation.pipe.js';
 import { supportedChains } from '../../../../packages/shared/src/contracts.js';
 import type { LedgerWalletRegistration } from '../../../../packages/shared/src/activity-contracts.js';
@@ -20,8 +19,8 @@ import { CreateWalletDto, createWalletSchema } from './dto/create-wallet.dto.js'
 import { WalletsService } from './wallets.service.js';
 
 @ApiTags('Wallets')
-@ApiBearerAuth('tenantBearer')
-@Controller('v1/wallets')
+@ApiBearerAuth('walletBearer')
+@Controller('internal/wallets')
 export class WalletsController {
   constructor(
     private readonly service: WalletsService,
@@ -44,34 +43,30 @@ export class WalletsController {
   @ApiAcceptedResponse({ description: 'Wallet accepted; address derivation is asynchronous.' })
   @ApiBadRequestResponse({ description: 'Unsupported chain or invalid request.' })
   @Post()
-  create(
-    @Tenant() tenant: string,
-    @Body(new ZodValidationPipe(createWalletSchema)) body: CreateWalletDto,
-  ) {
-    return this.service.createWallet(tenant, body.chain, body.externalId);
+  create(@Body(new ZodValidationPipe(createWalletSchema)) body: CreateWalletDto) {
+    return this.service.createWallet(body.chain, body.externalId);
   }
 
   @ApiOperation({ summary: 'Get wallet derivation and readiness status' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ description: 'Wallet status, address, network, and derivation metadata.' })
-  @ApiNotFoundResponse({ description: 'Wallet not found for this tenant.' })
+  @ApiNotFoundResponse({ description: 'Wallet not found in the exchange.' })
   @Get(':id')
-  findOne(@Tenant() tenant: string, @Param('id', ParseUUIDPipe) id: string) {
-    return this.service.getWallet(tenant, id);
+  findOne(@Param('id', ParseUUIDPipe) id: string) {
+    return this.service.getWallet(id);
   }
 
   @ApiOperation({ summary: 'Get confirmed and provisional asset balances for a wallet' })
   @ApiParam({ name: 'id', format: 'uuid' })
   @ApiOkResponse({ description: 'Ledger balances in the asset’s smallest unit.' })
-  @ApiNotFoundResponse({ description: 'Wallet not found for this tenant.' })
+  @ApiNotFoundResponse({ description: 'Wallet not found in the exchange.' })
   @ApiBadGatewayResponse({ description: 'Ledger service is unavailable.' })
   @Get(':id/balances')
-  async balances(@Tenant() tenant: string, @Param('id', ParseUUIDPipe) id: string) {
-    const wallet = await this.service.getWallet(tenant, id);
+  async balances(@Param('id', ParseUUIDPipe) id: string) {
+    const wallet = await this.service.getWallet(id);
     if (!wallet.address) return { walletId: wallet.id, chain: wallet.chain, balances: [] };
     return this.ledger.balances({
       walletId: wallet.id,
-      tenantId: tenant,
       chain: wallet.chain as LedgerWalletRegistration['chain'],
       network: wallet.network,
       address: wallet.address,

@@ -28,7 +28,6 @@ enum WalletTransactionStatus {
 
 model Wallet {
   id           String        @id @db.Uuid
-  tenant_id    String
   external_id  String
   chain        String
   network      String
@@ -41,7 +40,7 @@ model Wallet {
   created_at   DateTime      @default(now()) @db.Timestamptz
   transactions Transaction[]
 
-  @@unique([tenant_id, external_id, chain, network])
+  @@unique([external_id, chain, network])
   @@unique([seed_id, chain, account])
   @@unique([chain, network, address])
   @@map("wallets")
@@ -49,7 +48,6 @@ model Wallet {
 
 model Transaction {
   id                   String                  @id @db.Uuid
-  tenant_id            String
   wallet_id            String                  @db.Uuid
   wallet               Wallet                  @relation(fields: [wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   idempotency_key      String
@@ -66,9 +64,9 @@ model Transaction {
   created_at           DateTime                @default(now()) @db.Timestamptz
   updated_at           DateTime                @default(now()) @updatedAt @db.Timestamptz
 
-  @@unique([tenant_id, idempotency_key])
+  @@unique([wallet_id, idempotency_key])
   @@unique([wallet_id], where: raw("\"status\" IN ('preparing', 'signing', 'signed', 'queued', 'broadcasting', 'submitted', 'attention')"), map: "one_pending_per_wallet")
-  @@index([tenant_id, created_at], map: "transactions_tenant")
+  @@index([created_at], map: "transactions_created_at")
   @@map("transactions")
 }
 

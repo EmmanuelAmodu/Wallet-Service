@@ -170,8 +170,8 @@ function registration(
   return event as Registration;
 }
 
-async function ensureCustody(request: Registration, includeManagement = true) {
-  const service = new ActivityRegistryService(db!, auth);
+async function ensureCustody(request: Registration, includeManagement = true, registryAuth = auth) {
+  const service = new ActivityRegistryService(db!, registryAuth);
   const registry = (role: 'hot' | 'management', walletId: string, account: number) => {
     const event = exchangeEventSchema.parse({
       ...request,
@@ -735,6 +735,119 @@ test(
       (await row(request.data.walletId)).provider_generation,
       rebuilt.provider_generation,
     );
+  },
+);
+
+test(
+  'disabled-network batches cannot starve certified recovery or watch cleanup across certificate changes',
+  { skip: !enabled },
+  async () => {
+    const recoveryAuth = new MessageAuth('a'.repeat(64), `fair-recovery-${randomUUID()}`);
+    const provider = new FixtureProvider();
+    const service = new ActivityRegistryService(db!, recoveryAuth, provider);
+    const pausedService = new ActivityRegistryService(db!, recoveryAuth);
+    const disabled = [];
+    for (let index = 0; index < 3; index++) {
+      const request = registration(
+        { domainId: `${domainId}-fair-recovery`, resetEpoch: recoveryAuth.resetEpoch },
+        { chain: 'bitcoin', network: 'regtest', address: `bcrt1qpaused${index}${randomUUID()}` },
+      );
+      await pausedService.register(request);
+      await db!.exchangeWalletRegistration.update({
+        where: { wallet_id: request.data.walletId },
+        data: { updated_at: new Date(1000 + index) },
+      });
+      disabled.push(request);
+    }
+    const enabledRequest = registration({
+      domainId: `${domainId}-fair-recovery`,
+      resetEpoch: recoveryAuth.resetEpoch,
+    });
+    await ensureCustody(enabledRequest, true, recoveryAuth);
+    let unavailable = true;
+    provider.onInstall = async (request) => {
+      if (unavailable) throw new Error('temporary install outage');
+      return {
+        ...identity(request),
+        status: 'installed',
+        watchId: `watch-${request.generation}`,
+        startCursor: '100',
+      };
+    };
+    await assert.rejects(service.register(enabledRequest), /temporary install outage/);
+    const cleanup = async (
+      request: Registration,
+      selected: 'quicknode' | 'bitcoin-core',
+      date: number,
+    ) => {
+      const generation = randomUUID();
+      const installRequest: ProviderInstallRequest = {
+        protocolVersion: 1,
+        provider: selected,
+        domainId: request.domainId,
+        resetEpoch: recoveryAuth.resetEpoch,
+        walletId: request.data.walletId,
+        registryRevision: 1,
+        generation,
+        chain: request.data.chain,
+        network: request.data.network,
+        address: request.data.address,
+        assetScope: 'native',
+      };
+      await db!.exchangeProviderWatchLease.create({
+        data: {
+          generation,
+          wallet_id: request.data.walletId,
+          domain_id: request.domainId,
+          reset_epoch: recoveryAuth.resetEpoch,
+          provider: selected,
+          chain: request.data.chain,
+          network: request.data.network,
+          install_request: JSON.parse(JSON.stringify(installRequest)),
+          state: 'cleanup',
+          updated_at: new Date(date),
+        },
+      });
+      return generation;
+    };
+    const disabledLeases = [];
+    for (let index = 0; index < disabled.length; index++)
+      disabledLeases.push(await cleanup(disabled[index], 'bitcoin-core', 1000 + index));
+    const enabledLease = await cleanup(enabledRequest, 'quicknode', 5000);
+    unavailable = false;
+    await service.recoverPending(1);
+    assert.equal((await row(enabledRequest.data.walletId)).status, 'ready');
+    assert.equal(
+      (
+        await db!.exchangeProviderWatchLease.findUniqueOrThrow({
+          where: { generation: enabledLease },
+        })
+      ).state,
+      'removed',
+    );
+    for (const request of disabled)
+      assert.equal((await row(request.data.walletId)).status, 'awaiting_provider_coverage');
+    for (const generation of disabledLeases)
+      assert.equal(
+        (
+          await db!.exchangeProviderWatchLease.findUniqueOrThrow({
+            where: { generation },
+          })
+        ).state,
+        'cleanup',
+      );
+    const initial = await row(enabledRequest.data.walletId);
+    provider.enabled = false;
+    await service.recoverPending(1);
+    const revoked = await row(enabledRequest.data.walletId);
+    assert.equal(revoked.status, 'rebuilding');
+    assert.equal(revoked.backfill_complete, false);
+    provider.enabled = true;
+    await service.recoverPending(1);
+    const restored = await row(enabledRequest.data.walletId);
+    assert.equal(restored.status, 'ready');
+    assert.notEqual(restored.provider_generation, initial.provider_generation);
+    assert.equal(provider.installs.at(-1)!.fromCursor, initial.backfill_cursor);
   },
 );
 

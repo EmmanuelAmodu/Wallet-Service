@@ -16,15 +16,6 @@ import { ExchangeBackendGuard, ExchangeBackendRoute } from './exchange-backend.g
 import { ExchangeCustomersService } from './customers.service.js';
 import type { Response } from 'express';
 
-const createSchema = z
-  .object({
-    externalId: z
-      .string()
-      .min(1)
-      .max(128)
-      .refine((value) => value.trim().length > 0, 'External ID cannot be blank'),
-  })
-  .strict();
 const assignmentSchema = z
   .object({ chain: chainSchema, network: z.string().min(1).max(128) })
   .strict();
@@ -38,14 +29,9 @@ const emptyQuerySchema = z.object({}).strict();
 
 @ExchangeBackendRoute()
 @UseGuards(ExchangeBackendGuard)
-@Controller('v1/customers')
+@Controller('internal/customers')
 export class ExchangeCustomersController {
   constructor(private readonly customers: ExchangeCustomersService) {}
-
-  @Post()
-  create(@Body(new ZodValidationPipe(createSchema)) body: z.infer<typeof createSchema>) {
-    return this.customers.create(body.externalId);
-  }
 
   @Get(':customerId')
   get(
