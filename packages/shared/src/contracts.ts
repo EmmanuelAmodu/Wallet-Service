@@ -222,6 +222,7 @@ export const signSchema = z
             .min(1)
             .max(100),
           satsPerVbyte: z.number().int().min(1).max(1000),
+          sweepAll: z.literal(true).optional(),
         })
         .strict(),
       z

@@ -173,11 +173,63 @@ model Transaction {
   last_error           String?
   created_at           DateTime                @default(now()) @db.Timestamptz
   updated_at           DateTime                @default(now()) @updatedAt @db.Timestamptz
+  custody_execution    CustodyExecution?
 
   @@unique([wallet_id, idempotency_key])
   @@unique([wallet_id], where: raw("\"status\" IN ('preparing', 'signing', 'signed', 'queued', 'broadcasting', 'submitted', 'attention')"), map: "one_pending_per_wallet")
   @@index([created_at], map: "transactions_created_at")
   @@map("transactions")
+}
+
+model CustodyExecution {
+  id                  String                   @id @db.Uuid
+  operation_id        String                   @unique @db.Uuid
+  attempt_id          String                   @unique @db.Uuid
+  transaction_id      String                   @unique @db.Uuid
+  transaction         Transaction              @relation(fields: [transaction_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  domain_id           String
+  reset_epoch         String
+  customer_id         String                   @db.Uuid
+  source_wallet_id    String                   @db.Uuid
+  hot_wallet_id       String                   @db.Uuid
+  request_digest      String
+  plan                Json
+  prepared_request    Json?
+  preparation_digest  String?
+  authorization       Json?
+  principal_units     String?
+  maximum_fee_units   String?
+  expires_at          DateTime?                @db.Timestamptz
+  state               String
+  revision            Int                      @default(0)
+  settlement_revision Int                      @default(0)
+  ledger_ack_revision Int                      @default(0)
+  ledger_batch_id     String?                  @db.Uuid
+  inclusion           Json?
+  reversed            Boolean                  @default(false)
+  retired_at          DateTime?                @db.Timestamptz
+  next_check_at       DateTime                 @default(now()) @db.Timestamptz
+  last_error          String?
+  created_at          DateTime                 @default(now()) @db.Timestamptz
+  updated_at          DateTime                 @default(now()) @updatedAt @db.Timestamptz
+  claims              ExecutionResourceClaim[]
+
+  @@unique([source_wallet_id], where: raw("\"retired_at\" IS NULL"), map: "one_active_custody_execution_per_source")
+  @@index([next_check_at, id])
+  @@map("custody_executions")
+}
+
+model ExecutionResourceClaim {
+  id           String           @id @db.Uuid
+  resource_key String
+  execution_id String           @db.Uuid
+  execution    CustodyExecution @relation(fields: [execution_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  active       Boolean          @default(true)
+  created_at   DateTime         @default(now()) @db.Timestamptz
+  released_at  DateTime?        @db.Timestamptz
+
+  @@unique([resource_key], where: raw("\"active\""), map: "one_active_custody_resource_claim")
+  @@map("execution_resource_claims")
 }
 
 model Outbox {

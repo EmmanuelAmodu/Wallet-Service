@@ -116,6 +116,8 @@ export class TransactionsService {
         include: { wallet: true },
       });
       if (!tx) throw new NotFoundException('Transaction not found');
+      if (tx.wallet.custody_role !== 'legacy')
+        throw new ConflictException('Custody execution requires its bound reconciliation workflow');
       if (['queued', 'broadcasting', 'submitted', 'confirmed', 'failed'].includes(tx.status))
         return tx;
       if (!['signed', 'attention'].includes(tx.status) || !tx.signed)
@@ -152,6 +154,8 @@ export class TransactionsService {
         include: { wallet: true },
       });
       if (!tx) throw new NotFoundException('Transaction not found');
+      if (tx.wallet.custody_role !== 'legacy')
+        throw new ConflictException('Custody execution requires its bound reconciliation workflow');
       if (['confirmed', 'failed'].includes(tx.status)) return tx;
       if (!tx.signed || tx.status !== 'attention')
         throw new ConflictException(

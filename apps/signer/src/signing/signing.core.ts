@@ -25,6 +25,53 @@ function bytes(value: string): Uint8Array {
   return Buffer.from(hex, 'hex');
 }
 
+function bitcoinVirtualSize(encoded: Uint8Array): number {
+  const raw = Buffer.from(encoded);
+  let cursor = 4;
+  const witness = raw[4] === 0 && raw[5] === 1;
+  if (witness) cursor += 2;
+
+  function count(): number {
+    const b = raw[cursor++];
+    if (b < 253) return b;
+    if (b === 253) {
+      const n = raw.readUInt16LE(cursor);
+      cursor += 2;
+      return n;
+    }
+    if (b === 254) {
+      const n = raw.readUInt32LE(cursor);
+      cursor += 4;
+      return n;
+    }
+    throw new Error('Unsupported Bitcoin compact count');
+  }
+
+  const inputCount = count();
+  for (let i = 0; i < inputCount; i++) {
+    cursor += 36;
+    const n = count();
+    cursor += n + 4;
+  }
+  const outputCount = count();
+  for (let i = 0; i < outputCount; i++) {
+    cursor += 8;
+    const n = count();
+    cursor += n;
+  }
+  const baseSize = cursor - (witness ? 2 : 0) + 4;
+  if (witness)
+    for (let i = 0; i < inputCount; i++) {
+      const n = count();
+      for (let j = 0; j < n; j++) {
+        const len = count();
+        cursor += len;
+      }
+    }
+  if (cursor + 4 !== raw.length) throw new Error('Malformed signed Bitcoin transaction');
+  return Math.ceil((baseSize * 3 + raw.length) / 4);
+}
+
 export class SigningCore {
   private constructor(
     private readonly core: WalletCore,
@@ -237,6 +284,7 @@ export class SigningCore {
       changeAddress: signingAddress(address),
       byteFee: String(tx.satsPerVbyte),
       useMaxUtxo: true,
+      useMaxAmount: tx.sweepAll === true,
       extraOutputs: tx.outputs
         .slice(1)
         .map((output) => ({ toAddress: signingAddress(output.address), amount: output.amount })),
@@ -250,10 +298,61 @@ export class SigningCore {
         },
       })),
     });
+    if (tx.sweepAll) {
+      if (tx.outputs.length !== 1)
+        throw new BadRequestException('Bitcoin sweep requires one hot output');
+      const total = tx.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n);
+      const amount = BigInt(tx.outputs[0].amount),
+        fee = total - amount;
+      if (fee <= 0n) throw new BadRequestException('Bitcoin sweep fee must be positive');
+      input.plan = proto.TransactionPlan.fromObject({
+        amount: amount.toString(),
+        availableAmount: total.toString(),
+        fee: fee.toString(),
+        change: '0',
+        utxos: input.utxo,
+      });
+    }
     const encodedInput = proto.SigningInput.encode(input).finish();
     try {
       const output = proto.SigningOutput.decode(this.core.AnySigner.sign(encodedInput, coin));
       this.check(output.error, output.encoded.length);
+      if (tx.sweepAll) {
+        const signed = output.transaction;
+        const targetScript = this.core.BitcoinScript.lockScriptForAddress(
+          signingAddress(tx.outputs[0].address),
+          coin,
+        );
+        try {
+          if (
+            !signed ||
+            signed.outputs?.length !== 1 ||
+            signed.inputs?.length !== tx.utxos.length ||
+            signed.outputs[0].value?.toString() !== tx.outputs[0].amount ||
+            !Buffer.from(signed.outputs[0].script ?? []).equals(Buffer.from(targetScript.data()))
+          )
+            throw new BadRequestException('Signed Bitcoin sweep differs from authorized output');
+          const outpoints = new Set(tx.utxos.map((u) => `${u.txid}:${u.vout}`));
+          for (const input of signed.inputs) {
+            const outpoint = input.previousOutput;
+            if (
+              !outpoint ||
+              !outpoints.delete(
+                `${Buffer.from(outpoint.hash ?? [])
+                  .reverse()
+                  .toString('hex')}:${outpoint.index}`,
+              )
+            )
+              throw new BadRequestException('Signed Bitcoin sweep changed inputs');
+          }
+          const fee =
+            tx.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n) - BigInt(tx.outputs[0].amount);
+          if (fee < BigInt(bitcoinVirtualSize(output.encoded) * tx.satsPerVbyte))
+            throw new BadRequestException('Signed Bitcoin sweep fee below authorized rate');
+        } finally {
+          targetScript.delete();
+        }
+      }
       return {
         raw: Buffer.from(output.encoded).toString('hex'),
         txHash: output.transactionId,

@@ -1,6 +1,6 @@
 import { BroadcastPrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '.prisma/broadcast-client';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { lock, lockTransaction } from '../../../../packages/database/src/locks.js';
 import {
@@ -14,6 +14,9 @@ import { networkFor } from '../../../../packages/chain/src/config.js';
 import { BroadcastRpcService } from './broadcast-rpc.service.js';
 
 import { broadcastConfig, BroadcastConfig } from '../config/broadcast.config.js';
+import { NativeSweepPlanner,NativeSweepObservation } from '../../../../packages/chain/src/native-sweep-planner.js';
+import { executionRequestDigest,verifySignerAttestation } from '../../../../packages/shared/src/execution-authorization.js';
+import { z } from 'zod';
 
 type Action = Extract<Message, { type: 'broadcast.requested' | 'broadcast.confirm' }>;
 const active = ['queued', 'broadcasting', 'submitted', 'attention'];
@@ -23,6 +26,7 @@ export class BroadcastService {
     @Inject(BroadcastPrismaService) private readonly db: BroadcastPrismaService,
     @Inject(BroadcastRpcService) private readonly rpc: BroadcastRpcService,
     @Inject(broadcastConfig.KEY) private readonly config: BroadcastConfig,
+    @Optional() private readonly planner?:NativeSweepPlanner,
   ) {}
 
   async execute(message: Message, finalAttempt: boolean) {
@@ -52,12 +56,15 @@ export class BroadcastService {
       if (tx && action.generation < tx.broadcast_generation) return;
       if (!tx) {
         if (!action.snapshot) throw new Error('Broadcast snapshot not received yet');
+        const snapshot=broadcastSnapshotSchema.parse(action.snapshot);
+        this.verifyExecution(action.transactionId,snapshot);
         await db.transaction.create({
           data: {
             id: action.transactionId,
             snapshot: action.snapshot,
             broadcast_generation: action.generation,
             status: 'queued',
+            ...(snapshot.execution?{domain_id:snapshot.execution.domainId,reset_epoch:snapshot.execution.resetEpoch,operation_id:snapshot.execution.operationId,attempt_id:snapshot.execution.attemptId,request_digest:snapshot.execution.requestDigest,preparation_digest:snapshot.execution.preparationDigest}:{}),
           },
         });
       } else {
@@ -89,6 +96,10 @@ export class BroadcastService {
       status: string;
       broadcast_attempts: number;
       last_error: string | null;
+      operation_id:string|null;
+      attempt_id:string|null;
+      request_digest:string|null;
+      preparation_digest:string|null;
     },
   ) {
     const status = tx.status as Extract<Message, { type: 'broadcast.updated' }>['status'];
@@ -103,6 +114,7 @@ export class BroadcastService {
         status,
         attempts: tx.broadcast_attempts,
         lastError: tx.last_error,
+        ...(tx.operation_id?{execution:{operationId:tx.operation_id,attemptId:tx.attempt_id!,requestDigest:tx.request_digest!,preparationDigest:tx.preparation_digest!}}:{}),
       },
       `broadcast-result-${tx.id}-${tx.broadcast_generation}-${tx.revision}`,
     );
@@ -134,6 +146,11 @@ export class BroadcastService {
     const { chain, signed } = snapshot;
     if (snapshot.network !== networkFor(chain, this.config))
       throw new ActionRejectedError('Configured network differs from wallet network');
+    if(snapshot.execution) {
+      this.verifyExecution(action.transactionId,snapshot);
+      await this.handleCustody(action,tx,snapshot);
+      return;
+    }
     if (action.type === 'broadcast.requested') {
       if (!this.config.allowBroadcast) throw new ActionRejectedError('Broadcasting is disabled');
       await this.change(action, { status: 'broadcasting', broadcast_attempts: { increment: 1 } });
@@ -178,6 +195,7 @@ export class BroadcastService {
     action: Action,
     status?: 'submitted' | 'confirmed' | 'failed',
     nextPoll?: number,
+    observation?:NativeSweepObservation,
   ) {
     await this.db.$transaction(async (db) => {
       await lockTransaction(db, action.transactionId);
@@ -186,7 +204,7 @@ export class BroadcastService {
         return;
       const updated = await db.transaction.update({
         where: { id: tx.id },
-        data: { ...(status ? { status } : {}), last_error: null, revision: { increment: 1 } },
+        data: { ...(status ? { status } : {}), last_error: null, revision: { increment: 1 },...(observation?.blockHash && observation.blockHeight?{observed_block_hash:observation.blockHash,observed_block_height:observation.blockHeight}:{}),...(observation?.actualFeeUnits?{actual_fee_units:observation.actualFeeUnits}:{}) },
       });
       await this.emit(db, updated);
       if (nextPoll !== undefined)
@@ -206,5 +224,45 @@ export class BroadcastService {
           this.config.pollIntervalMs,
         );
     });
+  }
+
+  private verifyExecution(transactionId:string,snapshot:z.infer<typeof broadcastSnapshotSchema>):void {
+    const execution=snapshot.execution;
+    if(!execution) return;
+    if(!this.config.nativeSweepsEnabled || !this.config.executionSignerPublicKey) throw new ActionRejectedError('Native custody broadcasting is disabled');
+    try {
+      if(execution.domainId!==this.config.domainId || execution.resetEpoch!==this.config.resetEpoch || execution.preparedRequest.wallet.chain!==snapshot.chain || execution.preparedRequest.transaction.chain!==snapshot.chain || execution.preparedRequest.wallet.network!==snapshot.network || executionRequestDigest(execution.preparedRequest)!==execution.preparationDigest) throw new Error('Execution snapshot binding mismatch');
+      if(snapshot.chain==='solana' && execution.preparedRequest.transaction.chain==='solana' && snapshot.lastValidBlockHeight!==execution.preparedRequest.transaction.lastValidBlockHeight) throw new Error('Solana snapshot validity mismatch');
+      const {signerAttestation,...binding}=execution;
+      const unsigned={type:'transaction.custody.signed',transactionId,operationId:binding.operationId,attemptId:binding.attemptId,requestDigest:binding.requestDigest,preparationDigest:binding.preparationDigest,signed:snapshot.signed};
+      const claims=verifySignerAttestation(signerAttestation,unsigned,this.config.executionSignerPublicKey);
+      if(claims.domainId!==execution.domainId || claims.resetEpoch!==execution.resetEpoch || claims.status!=='signed') throw new Error('Signer execution identity mismatch');
+    } catch {throw new ActionRejectedError('Independent signer attestation does not authorize this broadcast');}
+  }
+
+  private async handleCustody(action:Action,tx:{observed_block_hash:string|null;observed_block_height:string|null},snapshot:z.infer<typeof broadcastSnapshotSchema>) {
+    const execution=snapshot.execution!;
+    if(!['ethereum','bitcoin','solana'].includes(snapshot.chain)) throw new ActionRejectedError('Native custody chain is unsupported');
+    if(action.type==='broadcast.requested') {
+      if(!this.config.allowBroadcast) throw new ActionRejectedError('Broadcasting is disabled');
+      await this.change(action,{status:'broadcasting',broadcast_attempts:{increment:1}});
+    }
+    const planner=this.planner??new NativeSweepPlanner(this.rpc);
+    const observed=await planner.observe({chain:snapshot.chain as 'ethereum'|'bitcoin'|'solana',network:snapshot.network,hash:snapshot.signed.txHash,request:execution.preparedRequest,signed:snapshot.signed,...(tx.observed_block_hash && tx.observed_block_height?{priorInclusion:{blockHash:tx.observed_block_hash,blockHeight:tx.observed_block_height}}:{})});
+    if(observed.state==='confirmed' || observed.state==='failed') {await this.record(action,observed.state,undefined,observed);return;}
+    if(observed.state==='reverted') throw new ActionRejectedError('Custody inclusion reverted; authoritative reconciliation required before reuse');
+    if(action.type==='broadcast.confirm') {
+      if(action.poll>=this.config.maxPolls) throw new ActionRejectedError('Custody monitoring exhausted; hold the attempt for authoritative reconciliation');
+      await this.record(action,undefined,action.poll+1,observed);return;
+    }
+    if(observed.blockHash) {await this.record(action,'submitted',0,observed);return;}
+    if(snapshot.chain==='solana') {
+      const height=await this.rpc.call('solana','getBlockHeight',[{commitment:'finalized'}]);
+      if(typeof height!=='number' || !Number.isSafeInteger(height)) throw new Error('Invalid Solana block height');
+      if(height>snapshot.lastValidBlockHeight!) throw new ActionRejectedError('Solana blockhash expired; hold the signed attempt for canonical reconciliation');
+    }
+    await this.rpc.preflight(snapshot.chain,snapshot.signed);
+    await this.rpc.broadcast(snapshot.chain,snapshot.signed);
+    await this.record(action,'submitted',0,observed);
   }
 }

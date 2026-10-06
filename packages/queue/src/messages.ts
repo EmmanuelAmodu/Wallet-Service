@@ -8,6 +8,8 @@ import { deriveSchema, signSchema, signedSchema, chainSchema } from '../../share
 import { matches, token } from '../../shared/src/security/tokens.js';
 import { exchangeEventSchema, ExchangeEvent } from './exchange-contracts.js';
 import { exchangeDiscoverySchema } from '../../shared/src/exchange-discovery.js';
+import { custodySignSchema, custodySignedSchema, custodyRejectedSchema } from '../../shared/src/execution-contracts.js';
+import { signerAttestationSchema } from '../../shared/src/execution-authorization.js';
 
 export const QUEUES = {
   wallet: 'wallet-actions',
@@ -77,12 +79,20 @@ export const walletRejectedSchema = derivationBindingSchema
   })
   .strict()
   .refine(validDerivationBinding, 'Invalid derivation identity or account role');
+export const executionBindingSchema = z.object({
+  operationId:z.uuid(), attemptId:z.uuid(), requestDigest:z.string().regex(/^[a-f0-9]{64}$/),
+  preparationDigest:z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
 export const broadcastSnapshotSchema = z
   .object({
     chain: chainSchema,
     network: z.string().min(1),
     signed: signedSchema,
     lastValidBlockHeight: z.number().int().nonnegative().optional(),
+    execution: executionBindingSchema.extend({
+      domainId:z.string().min(1).max(128),resetEpoch:z.string().min(1).max(128),
+      preparedRequest:signSchema,signerAttestation:signerAttestationSchema,
+    }).strict().optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -127,6 +137,10 @@ const legacyMessageSchema = z.discriminatedUnion('type', [
   walletDeriveSchema,
   walletDerivedSchema,
   walletRejectedSchema,
+  custodySignSchema,
+  custodySignedSchema,
+  custodyRejectedSchema,
+  z.object({ type: z.literal('execution.reconcile'), transactionId: z.uuid() }).strict(),
   z.object({ type: z.literal('transaction.prepare'), transactionId: z.uuid() }).strict(),
   z
     .object({ type: z.literal('transaction.sign'), transactionId: z.uuid(), request: signSchema })
@@ -166,6 +180,7 @@ const legacyMessageSchema = z.discriminatedUnion('type', [
       status: z.enum(['queued', 'broadcasting', 'submitted', 'confirmed', 'failed', 'attention']),
       attempts: z.number().int().nonnegative(),
       lastError: z.string().nullable(),
+      execution: executionBindingSchema.optional(),
     })
     .strict(),
   z

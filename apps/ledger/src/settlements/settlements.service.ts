@@ -520,9 +520,8 @@ export class SettlementsService {
           'Canonical settlement exceeds observed custody; reconcile and fund the shortfall',
         );
     }
-    await enqueue(
+    await this.publishSettlementResult(
       tx,
-      QUEUES.wallet,
       {
         ...resultIdentity(event),
         operationId: event.operationId,
@@ -715,9 +714,8 @@ export class SettlementsService {
         ? 'Reorg restored an obligation after released funds were spent; customer frozen'
         : event.data.reason,
     );
-    await enqueue(
+    await this.publishSettlementResult(
       tx,
-      QUEUES.wallet,
       {
         ...resultIdentity(event),
         operationId: event.operationId,
@@ -731,6 +729,22 @@ export class SettlementsService {
         },
       },
       `settlement-reorg:${operation.id}:${event.revision}`,
+    );
+  }
+
+  private async publishSettlementResult(
+    tx: Prisma.TransactionClient,
+    event: ExchangeEvent,
+    key: string,
+  ) {
+    // Preserve Wallet's established dedupe key, then reuse the durable first
+    // payload. A resumed producer cannot generate a different ID/time for Sweep.
+    const walletDelivery = await enqueue(tx, QUEUES.wallet, event, key);
+    await enqueue(
+      tx,
+      QUEUES.sweep,
+      exchangeEventSchema.parse(walletDelivery.payload),
+      `${key}:sweep`,
     );
   }
 

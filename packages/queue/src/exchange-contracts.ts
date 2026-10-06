@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { chainSchema, isEvmChain } from '../../shared/src/contracts.js';
+import { executionEventSchemas } from '../../shared/src/execution-contracts.js';
 
 const resetEpoch = z.string().min(1).max(128);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -347,6 +348,7 @@ const sweepExecuteRequested = event(
       sourceWalletId: z.uuid(),
       destinationWalletId: z.uuid(),
       amount: assetAmountSchema,
+      preparationDigest: digest.optional(),
     })
     .strict(),
   executionIdentityFields,
@@ -449,6 +451,7 @@ const executionAttemptUpdated = event(
       ]),
       transactionHash: z.string().min(1).max(256).optional(),
       reason: z.string().min(1).max(500).optional(),
+      terminalSafe: z.boolean().optional(),
     })
     .strict(),
   { operationId: z.uuid(), attemptId: z.uuid(), requestDigest: digest },
@@ -518,6 +521,7 @@ const custodyLossReverted = event(
 );
 
 export const exchangeEventSchema = z.discriminatedUnion('type', [
+  ...executionEventSchemas,
   userRegistered,
   customerRegistryRequested,
   customerRegistryAcknowledged,

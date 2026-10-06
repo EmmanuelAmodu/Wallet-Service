@@ -76,12 +76,129 @@ model SweepWork {
   state                  String
   reason                 String
   revision               Int      @default(1)
+  generation             Int      @default(1)
+  consumed_generation    Int      @default(0)
+  active_operation_id    String?  @db.Uuid
+  last_operation_id      String?  @db.Uuid
+  next_attempt_at        DateTime? @db.Timestamptz
+  scheduling_error       String?
+  last_scanned_at        DateTime? @db.Timestamptz
   created_at             DateTime @default(now()) @db.Timestamptz
   updated_at             DateTime @default(now()) @updatedAt @db.Timestamptz
 
   @@unique([domain_id, reset_epoch, source_wallet_id, chain, network, asset_id])
   @@index([domain_id, reset_epoch, state])
   @@map("sweep_work")
+}
+
+// A scheduling generation and exact Wallet preparation belong to one immutable attempt.
+// Incoming credits may advance SweepWork.generation, but never mutate this identity.
+model SweepOperation {
+  id                       String @id @db.Uuid
+  work_id                  String @db.Uuid
+  domain_id                String
+  reset_epoch              String
+  customer_id              String @db.Uuid
+  source_wallet_id         String @db.Uuid
+  hot_wallet_id            String @db.Uuid
+  chain                    String
+  network                  String
+  asset_id                 String
+  generation               Int
+  source_registry_revision Int
+  hot_registry_revision    Int
+  policy_version           String
+  request_digest           String
+  revision                 Int @default(1)
+  supersedes_operation_id  String? @db.Uuid
+  state                    String
+  reason                   String?
+  terminal_at              DateTime? @db.Timestamptz
+  created_at               DateTime @default(now()) @db.Timestamptz
+  updated_at               DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@index([domain_id, reset_epoch, source_wallet_id, terminal_at])
+  @@map("sweep_operations")
+}
+
+model SweepAttempt {
+  id                       String @id @db.Uuid
+  operation_id             String @unique @db.Uuid
+  preparation_digest       String?
+  amount                   String?
+  maximum_fee_units        String?
+  expires_at               DateTime? @db.Timestamptz
+  execute_event_id         String? @unique @db.Uuid
+  state                    String
+  transaction_hash         String?
+  terminal_safe            Boolean @default(false)
+  execution_revision       Int @default(0)
+  execution_digest         String?
+  settlement_revision      Int @default(0)
+  settlement_digest        String?
+  settlement_state         String @default("none")
+  ledger_batch_id          String? @db.Uuid
+  reversal_fence_revision  Int @default(0)
+  created_at               DateTime @default(now()) @db.Timestamptz
+  updated_at               DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@map("sweep_attempts")
+}
+
+model SweepException {
+  id              String @id @default(uuid()) @db.Uuid
+  domain_id       String
+  reset_epoch     String
+  work_id         String @db.Uuid
+  operation_id    String? @db.Uuid
+  category        String
+  reason          String
+  fingerprint     String @unique
+  occurrence_count Int @default(1)
+  created_at      DateTime @default(now()) @db.Timestamptz
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@index([domain_id, reset_epoch, category])
+  @@map("sweep_exceptions")
+}
+
+// Funding is deliberately separate from native principal sweeping. No code creates
+// or executes these intents until token funding policy and reconciliation exist.
+model SweepFundingPolicy {
+  id                      String @id @db.Uuid
+  domain_id               String
+  reset_epoch             String
+  chain                   String
+  network                 String
+  management_wallet_id    String @db.Uuid
+  purpose                 String
+  policy_version          String
+  per_operation_cap       String
+  per_customer_daily_cap  String
+  per_domain_daily_cap    String
+  enabled                 Boolean @default(false)
+  created_at              DateTime @default(now()) @db.Timestamptz
+
+  @@unique([domain_id, reset_epoch, chain, network, purpose])
+  @@map("sweep_funding_policies")
+}
+
+model SweepFundingIntent {
+  id                      String @id @db.Uuid
+  policy_id               String @db.Uuid
+  domain_id               String
+  reset_epoch             String
+  customer_id             String @db.Uuid
+  source_wallet_id        String @db.Uuid
+  destination_wallet_id   String @db.Uuid
+  requested_units         String
+  request_digest          String @unique
+  state                   String @default("blocked_policy")
+  created_at              DateTime @default(now()) @db.Timestamptz
+  updated_at              DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@index([domain_id, reset_epoch, customer_id, created_at])
+  @@map("sweep_funding_intents")
 }
 
 model Inbox {

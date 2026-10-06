@@ -17,16 +17,26 @@ enum BroadcastTransactionStatus {
 }
 
 model Transaction {
-  id                   String   @id @db.Uuid
-  snapshot             Json
-  status               BroadcastTransactionStatus
-  broadcast_generation Int
-  broadcast_attempts   Int      @default(0)
-  revision             Int      @default(0)
-  last_error           String?
-  created_at           DateTime @default(now()) @db.Timestamptz
-  updated_at           DateTime @default(now()) @updatedAt @db.Timestamptz
+  id                    String                     @id @db.Uuid
+  snapshot              Json
+  status                BroadcastTransactionStatus
+  broadcast_generation  Int
+  broadcast_attempts    Int                        @default(0)
+  revision              Int                        @default(0)
+  last_error            String?
+  domain_id             String?
+  reset_epoch           String?
+  operation_id          String?                    @db.Uuid
+  attempt_id            String?                    @unique @db.Uuid
+  request_digest        String?
+  preparation_digest    String?
+  observed_block_hash   String?
+  observed_block_height String?
+  actual_fee_units      String?
+  created_at            DateTime                   @default(now()) @db.Timestamptz
+  updated_at            DateTime                   @default(now()) @updatedAt @db.Timestamptz
 
+  @@index([operation_id, created_at])
   @@map("transactions")
 }
 

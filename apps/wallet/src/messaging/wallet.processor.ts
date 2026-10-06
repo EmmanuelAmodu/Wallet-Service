@@ -5,6 +5,7 @@ import { Job, UnrecoverableError } from 'bullmq';
 import { MessageAuth, QUEUES, isExchangeEvent } from '../../../../packages/queue/src/messages.js';
 import { WalletWorkflowService } from './wallet-workflow.service.js';
 import { ExchangeMessagingService } from '../exchange-messaging/exchange-messaging.service.js';
+import { CustodyExecutionService } from '../execution/execution.service.js';
 
 @Processor(QUEUES.wallet, { concurrency: 8 })
 export class WalletProcessor extends WorkerHost implements BeforeApplicationShutdown {
@@ -12,6 +13,7 @@ export class WalletProcessor extends WorkerHost implements BeforeApplicationShut
     private readonly service: WalletWorkflowService,
     private readonly auth: MessageAuth,
     @Optional() private readonly exchange?: ExchangeMessagingService,
+    @Optional() private readonly execution?: CustodyExecutionService,
   ) {
     super();
   }
@@ -29,6 +31,7 @@ export class WalletProcessor extends WorkerHost implements BeforeApplicationShut
     }
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     try {
+      if (this.execution && await this.execution.handle(message)) return;
       if (isExchangeEvent(message)) {
         if (!this.exchange) throw new ActionRejectedError('Exchange projection unavailable');
         await this.exchange.handle(message);
