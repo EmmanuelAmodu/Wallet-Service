@@ -7,7 +7,14 @@ import { WalletPrismaModule } from '../prisma/prisma.module.js';
 import { executionConfig } from '../config/execution.config.js';
 import { CustodyExecutionService } from './execution.service.js';
 @Module({
-  imports:[WalletPrismaModule,CustodyModule,ChainModule,MessagingModule,ConfigModule.forFeature(executionConfig)],
-  providers:[CustodyExecutionService],exports:[CustodyExecutionService],
+  imports: [
+    WalletPrismaModule,
+    CustodyModule,
+    ChainModule,
+    MessagingModule,
+    ConfigModule.forFeature(executionConfig),
+  ],
+  providers: [CustodyExecutionService],
+  exports: [CustodyExecutionService],
 })
 export class ExecutionModule {}

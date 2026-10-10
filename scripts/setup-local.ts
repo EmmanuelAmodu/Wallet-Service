@@ -1,6 +1,7 @@
 import { initWasm } from '@trustwallet/wallet-core';
 import { mkdir, readFile, writeFile, access } from 'node:fs/promises';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import { executionKeyPaths, setupExecutionPolicy } from './setup-execution-policy.js';
 
 async function setup() {
   for (const path of [
@@ -8,6 +9,7 @@ async function setup() {
     'secrets/local.mnemonic',
     'secrets/user-token-private.pem',
     'secrets/user-token-public.pem',
+    ...Object.values(executionKeyPaths()),
   ]) {
     const exists = await access(path).then(
       () => true,
@@ -30,6 +32,7 @@ async function setup() {
     });
     await writeFile('secrets/user-token-private.pem', keys.privateKey, { mode: 0o600, flag: 'wx' });
     await writeFile('secrets/user-token-public.pem', keys.publicKey, { mode: 0o600, flag: 'wx' });
+    await setupExecutionPolicy();
     const template = await readFile('.env.example', 'utf8');
     const resetEpoch = randomUUID();
     await writeFile(

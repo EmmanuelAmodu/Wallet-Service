@@ -378,7 +378,16 @@ export class SweepService {
     const work = await tx.sweepWork.findUniqueOrThrow({ where: { id: operation.work_id } });
     const hash = digest({ type: event.type, data: event.data });
     if (event.type === 'sweep.plan.deferred.v1') {
-      if (attempt.preparation_digest || !['planning', 'preparing', 'deferred'].includes(attempt.state))
+      const unsignedPreparation =
+        attempt.execution_revision === 0 &&
+        event.data.terminalSafe === true &&
+        event.data.preparationDigest === attempt.preparation_digest &&
+        ['prepared', 'queued', 'attention'].includes(attempt.state);
+      const unprepared =
+        !attempt.preparation_digest &&
+        attempt.execution_revision === 0 &&
+        ['planning', 'preparing', 'deferred'].includes(attempt.state);
+      if (!unsignedPreparation && !unprepared)
         throw new ActionRejectedError(
           'Prepared or signed sweep cannot be deferred without terminal proof',
         );
@@ -397,12 +406,13 @@ export class SweepService {
           revision: { increment: 1 },
         },
       });
+      const gate = await this.executionGate(tx, work);
       await tx.sweepWork.update({
         where: { id: work.id },
         data: {
           active_operation_id: null,
-          state: 'deferred',
-          reason: event.data.reason,
+          state: gate?.state ?? 'deferred',
+          reason: gate?.reason ?? event.data.reason,
           next_attempt_at: retryAt,
         },
       });
@@ -518,6 +528,13 @@ export class SweepService {
         throw new ActionRejectedError('Sweep transaction hash changed');
       if (event.data.terminalSafe && !['confirmed', 'failed'].includes(event.data.state))
         throw new ActionRejectedError('Sweep terminal proof requires confirmed or failed outcome');
+      if (
+        event.data.terminalSafe &&
+        (!event.data.settlementRevision || !event.data.transactionHash)
+      )
+        throw new ActionRejectedError(
+          'Sweep terminal proof requires canonical hash and settlement revision',
+        );
       const terminalSafe = event.data.terminalSafe ?? false;
       // Reversal delivery can precede an old terminal notification.
       const fenced =
@@ -530,6 +547,8 @@ export class SweepService {
           execution_digest: hash,
           transaction_hash: event.data.transactionHash ?? attempt.transaction_hash,
           terminal_safe: terminalSafe && !fenced,
+          terminal_settlement_revision:
+            terminalSafe && !fenced ? event.data.settlementRevision : null,
         },
       });
       await tx.sweepOperation.update({
@@ -577,7 +596,11 @@ export class SweepService {
         },
       });
     } else if (event.type === 'settlement.reversed.v1') {
-      if (event.revision < attempt.reversal_fence_revision) return;
+      if (
+        event.revision < attempt.reversal_fence_revision ||
+        event.revision < attempt.settlement_revision
+      )
+        return;
       if (event.revision === attempt.reversal_fence_revision) {
         if (attempt.settlement_state === 'reversed' && hash !== attempt.settlement_digest)
           throw new ActionRejectedError('Sweep reversal revision content changed');
@@ -591,6 +614,7 @@ export class SweepService {
           settlement_digest: hash,
           reversal_fence_revision: event.revision,
           terminal_safe: false,
+          terminal_settlement_revision: null,
           state: 'attention',
         },
       });
@@ -639,7 +663,9 @@ export class SweepService {
   ) {
     if (
       !attempt.terminal_safe ||
+      attempt.terminal_settlement_revision !== attempt.settlement_revision ||
       attempt.settlement_state !== 'committed' ||
+      attempt.reversal_fence_revision >= attempt.settlement_revision ||
       !['confirmed', 'failed'].includes(attempt.state) ||
       work.active_operation_id !== operation.id
     )

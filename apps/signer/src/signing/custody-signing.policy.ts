@@ -157,7 +157,7 @@ export class CustodySigningPolicy {
         tx.outputs.length !== 1 ||
         tx.outputs[0].address !== hotAddress ||
         BigInt(tx.outputs[0].amount) !== principal ||
-        tx.satsPerVbyte > 50 ||
+        tx.satsPerVbyte > 100 ||
         tx.utxos.length > 100
       )
         throw new Error('Bitcoin native sweep policy rejected');

@@ -21,7 +21,7 @@ export function custodySettings(domainId: string): WalletConfig {
 // sibling databases, rather than disabling production invariants for cleanup.
 export async function isolatedDatabase(
   source: string,
-  application: 'wallet' | 'ledger' = 'wallet',
+  application: 'wallet' | 'ledger' | 'sweep' | 'broadcast' = 'wallet',
 ) {
   const name = `waas_${application}_test_${randomUUID().replaceAll('-', '')}`;
   const admin = new Client({ connectionString: source });

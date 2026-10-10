@@ -1,5 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createPublicKey, verify } from 'node:crypto';
+import { Transaction as EvmTransaction } from 'ethers';
+import { Transaction as BitcoinTransaction } from 'bitcoinjs-lib';
+import { getWalletCore } from '../packages/chain/src/coin-metadata.js';
 import { ChainRpcService, RpcFailure } from '../packages/chain/src/chain-rpc.service.js';
 import {
   NativeSweepPlanner,
@@ -313,6 +317,7 @@ function solRpc(
     fee?: number | null;
     height?: number;
     feeContext?: number;
+    blockhashValid?: boolean;
   } = {},
 ) {
   return new FakeRpc((method) => {
@@ -340,6 +345,11 @@ function solRpc(
         };
       case 'getBlockHeight':
         return options.height ?? 990;
+      case 'isBlockhashValid':
+        return {
+          context: { slot: options.feeContext ?? 101 },
+          value: options.blockhashValid ?? true,
+        };
       default:
         throw new Error(`Unexpected ${method}`);
     }
@@ -664,5 +674,312 @@ test('Bitcoin and Solana prior inclusion checks preserve evidence on outage and 
       throw new Error(method);
     });
     assert.equal((await new NativeSweepPlanner(missing).observe(input)).state, 'pending');
+  }
+});
+
+test('Ethereum revalidation preserves exact principal while rechecking nonce, balances, hot ownership and live fees', async () => {
+  const rpc = ethRpc();
+  const planner = new NativeSweepPlanner(rpc);
+  const plan = await planner.plan({
+    chain: 'ethereum',
+    network: '11155111',
+    sourceAddress: ethSource,
+    hotAddress: ethHot,
+  });
+  const request: SignRequest = {
+    wallet: {
+      chain: 'ethereum',
+      account: 10,
+      seedId: 'sweep-test',
+      address: ethSource,
+      network: '11155111',
+    },
+    transaction: plan.request,
+  };
+  await planner.revalidate(request, plan.maxFeeUnits);
+  for (const [overrides, code] of [
+    [{ eth_getTransactionCount: '0x8' }, 'waiting_resources'],
+    [{ eth_getBalance: '0x3e8' }, 'waiting_funds'],
+    [{ eth_getCode: '0x6000' }, 'attention'],
+    [{ eth_getBlockByNumber: { baseFeePerGas: '0xb2d05e00' } }, 'fee_budget'],
+    [{ eth_maxPriorityFeePerGas: '0x77359400' }, 'fee_budget'],
+    [{ eth_estimateGas: '0x186a0' }, 'fee_budget'],
+  ] as const)
+    await assert.rejects(
+      new NativeSweepPlanner(ethRpc(overrides)).revalidate(request, plan.maxFeeUnits),
+      expectDeferral(code),
+    );
+  await assert.rejects(
+    planner.revalidate(request, String(BigInt(plan.maxFeeUnits) + 1n)),
+    expectDeferral('fee_budget'),
+  );
+  const original = rpc.handle;
+  rpc.handle = (method, params) =>
+    method === 'eth_getTransactionCount' && params[1] === 'pending'
+      ? '0x8'
+      : original(method, params);
+  await assert.rejects(
+    planner.revalidate(request, plan.maxFeeUnits),
+    expectDeferral('waiting_resources'),
+  );
+  rpc.handle = (method, params) =>
+    method === 'eth_getBalance' && params[1] === 'finalized' ? '0x3e8' : original(method, params);
+  await assert.rejects(
+    planner.revalidate(request, plan.maxFeeUnits),
+    expectDeferral('waiting_funds'),
+  );
+});
+
+test('Bitcoin revalidation checks the exact reserved outpoints and keeps new arrivals outside the attempt', async () => {
+  const source = wallet('bitcoin', 10);
+  const hot = wallet('bitcoin', 0);
+  const plan = await new NativeSweepPlanner(btcRpc()).plan({
+    chain: 'bitcoin',
+    network: 'regtest',
+    sourceAddress: source.address,
+    hotAddress: hot.address,
+  });
+  const request: SignRequest = { wallet: source, transaction: plan.request };
+  const rpc = btcRpc({ count: 3 });
+  await new NativeSweepPlanner(rpc).revalidate(request, plan.maxFeeUnits);
+  assert.equal(rpc.calls.filter((c) => c.method === 'gettxout').length, 1);
+  assert(!rpc.calls.some((c) => c.method === 'listunspent'));
+  for (const [options, code] of [
+    [{ spent: true }, 'waiting_resources'],
+    [{ confirmations: 5 }, 'waiting_resources'],
+    [{ coinbase: true, confirmations: 99 }, 'waiting_resources'],
+    [{ rate: '0.00003' }, 'fee_budget'],
+    [{ error: new RpcFailure() }, 'unavailable'],
+  ] as const)
+    await assert.rejects(
+      new NativeSweepPlanner(btcRpc(options)).revalidate(request, plan.maxFeeUnits),
+      expectDeferral(code),
+    );
+  await assert.rejects(
+    new NativeSweepPlanner(btcRpc({ value: '0.00100001' })).revalidate(request, plan.maxFeeUnits),
+    /outpoint amount/,
+  );
+  await assert.rejects(
+    new NativeSweepPlanner(btcRpc({ foreign: true })).revalidate(request, plan.maxFeeUnits),
+    /ownership/,
+  );
+  await assert.rejects(
+    new NativeSweepPlanner(btcRpc()).revalidate(request, String(BigInt(plan.maxFeeUnits) - 1n)),
+    expectDeferral('fee_budget'),
+  );
+});
+
+test('Solana revalidation pins the original message and rejects changed rent, fees, validity and account state', async () => {
+  const source = wallet('solana', 10);
+  const hot = wallet('solana', 0);
+  const plan = await new NativeSweepPlanner(solRpc()).plan({
+    chain: 'solana',
+    network: DEVNET,
+    sourceAddress: source.address,
+    hotAddress: hot.address,
+  });
+  const request: SignRequest = { wallet: source, transaction: plan.request };
+  const rpc = solRpc();
+  await new NativeSweepPlanner(rpc).revalidate(request, plan.maxFeeUnits);
+  assert('recentBlockhash' in request.transaction);
+  const expected = await nativeSolanaMessage(
+    source.address,
+    hot.address,
+    request.transaction.recentBlockhash,
+    BigInt(plan.amount),
+  );
+  assert.equal(
+    rpc.calls.find((c) => c.method === 'getFeeForMessage')?.params[0],
+    expected.toString('base64'),
+  );
+  assert.deepEqual(rpc.calls.find((c) => c.method === 'isBlockhashValid')?.params, [
+    blockhash,
+    { commitment: 'finalized', minContextSlot: 100 },
+  ]);
+  assert(!rpc.calls.some((c) => c.method === 'getLatestBlockhash'));
+  for (const [options, code] of [
+    [{ rent: 890881 }, 'waiting_funds'],
+    [{ balance: 100 }, 'waiting_funds'],
+    [{ fee: 5001 }, 'fee_budget'],
+    [{ fee: null }, 'unavailable'],
+    [{ feeContext: 99 }, 'unavailable'],
+    [{ height: 1000 }, 'preparation_expired'],
+    [{ blockhashValid: false }, 'preparation_expired'],
+    [{ executable: true }, 'attention'],
+    [{ owner: hot.address }, 'attention'],
+    [{ data: 'AA==' }, 'attention'],
+  ] as const)
+    await assert.rejects(
+      new NativeSweepPlanner(solRpc(options)).revalidate(request, plan.maxFeeUnits),
+      expectDeferral(code),
+    );
+});
+
+test('Ethereum observation verifies signed byte fields and recovers the source independently of provider assertions', async () => {
+  const { rpc, input } = await ethereumObservation();
+  assert('nonce' in input.request.transaction);
+  const alteredRequest: SignRequest = {
+    ...input.request,
+    transaction: { ...input.request.transaction, nonce: '8' },
+  };
+  await assert.rejects(
+    new NativeSweepPlanner(rpc).observe({ ...input, request: alteredRequest }),
+    /exact signed request fields/,
+  );
+  const alteredSource: SignRequest = {
+    ...input.request,
+    wallet: { ...input.request.wallet, address: ethSource },
+  };
+  await assert.rejects(
+    new NativeSweepPlanner(rpc).observe({ ...input, request: alteredSource }),
+    /signed source/,
+  );
+});
+
+test('Solana observation rejects forged source signatures before using RPC inclusion assertions', async () => {
+  const source = wallet('solana', 10);
+  const hot = wallet('solana', 0);
+  const plan = await new NativeSweepPlanner(solRpc()).plan({
+    chain: 'solana',
+    network: DEVNET,
+    sourceAddress: source.address,
+    hotAddress: hot.address,
+  });
+  const request: SignRequest = { wallet: source, transaction: plan.request };
+  const signed = signer.sign(request);
+  const bytes = Buffer.from(signed.raw, 'base64');
+  bytes[1] ^= 1;
+  const core = await getWalletCore();
+  const forged = {
+    ...signed,
+    raw: bytes.toString('base64'),
+    txHash: core.Base58.encodeNoCheck(bytes.subarray(1, 65)),
+  };
+  await assert.rejects(
+    new NativeSweepPlanner(solRpc()).observe({
+      chain: 'solana',
+      network: DEVNET,
+      hash: forged.txHash,
+      request,
+      signed: forged,
+    }),
+    /source signature/,
+  );
+});
+
+test('Native signed sweeps decode with independent EVM and Bitcoin tooling and verify Solana Ed25519 signatures', async () => {
+  const { input } = await ethereumObservation();
+  const eth = EvmTransaction.from(input.signed.raw);
+  assert('amount' in input.request.transaction);
+  const ethRequest = input.request.transaction;
+  assert('gasLimit' in ethRequest);
+  assert.equal(eth.from?.toLowerCase(), input.request.wallet.address);
+  assert.equal(eth.to?.toLowerCase(), ethRequest.to);
+  assert.equal(eth.value.toString(), ethRequest.amount);
+  assert.equal(eth.gasLimit.toString(), ethRequest.gasLimit);
+  assert.equal(eth.chainId.toString(), ethRequest.chainId);
+  assert.equal(eth.nonce, Number(ethRequest.nonce));
+  assert.equal(eth.maxFeePerGas?.toString(), ethRequest.maxFeePerGas);
+  assert.equal(eth.data, '0x');
+
+  const source = wallet('bitcoin', 10);
+  const hot = wallet('bitcoin', 0);
+  const plan = await new NativeSweepPlanner(btcRpc({ count: 2 })).plan({
+    chain: 'bitcoin',
+    network: 'regtest',
+    sourceAddress: source.address,
+    hotAddress: hot.address,
+  });
+  assert('utxos' in plan.request);
+  const btc = BitcoinTransaction.fromHex(
+    signer.sign({ wallet: source, transaction: plan.request }).raw,
+  );
+  assert.equal(btc.ins.length, 2);
+  assert.equal(btc.outs.length, 1);
+  assert.equal(btc.outs[0].value.toString(), plan.amount);
+  assert.equal(
+    Buffer.from(btc.outs[0].script).toString('hex'),
+    '0014' + Buffer.from(regtestWitnessAddress(hot.address).program).toString('hex'),
+  );
+  const core = await getWalletCore();
+  const p2pkh = Buffer.from(
+    '76a914' + Buffer.from(regtestWitnessAddress(source.address).program).toString('hex') + '88ac',
+    'hex',
+  );
+  for (let index = 0; index < btc.ins.length; index++) {
+    const witness = btc.ins[index].witness;
+    assert.equal(witness.length, 2);
+    const publicKey = core.PublicKey.createWithData(witness[1], core.PublicKeyType.secp256k1);
+    try {
+      const signature = Buffer.from(witness[0]);
+      const digest = btc.hashForWitnessV0(
+        index,
+        p2pkh,
+        BigInt(plan.request.utxos[index].amount),
+        signature[signature.length - 1],
+      );
+      assert(publicKey.verifyAsDER(signature.subarray(0, -1), digest));
+    } finally {
+      publicKey.delete();
+    }
+  }
+  const solSource = wallet('solana', 10);
+  const solHot = wallet('solana', 0);
+  const solPlan = await new NativeSweepPlanner(solRpc()).plan({
+    chain: 'solana',
+    network: DEVNET,
+    sourceAddress: solSource.address,
+    hotAddress: solHot.address,
+  });
+  const sol = Buffer.from(
+    signer.sign({ wallet: solSource, transaction: solPlan.request }).raw,
+    'base64',
+  );
+  const publicKey = createPublicKey({
+    key: Buffer.concat([
+      Buffer.from('302a300506032b6570032100', 'hex'),
+      Buffer.from(core.Base58.decodeNoCheck(solSource.address)),
+    ]),
+    format: 'der',
+    type: 'spki',
+  });
+  assert(verify(null, sol.subarray(65), publicKey, sol.subarray(1, 65)));
+  assert.equal(sol.subarray(-8).readBigUInt64LE().toString(), solPlan.amount);
+});
+
+test('Revalidation refuses an unavailable or switched RPC without creating a new preparation', async () => {
+  for (const chain of ['ethereum', 'bitcoin', 'solana'] as const) {
+    const source =
+      chain === 'ethereum'
+        ? { chain, account: 10, seedId: 'sweep-test', address: ethSource, network: '11155111' }
+        : wallet(chain, 10);
+    const hotAddress = chain === 'ethereum' ? ethHot : wallet(chain, 0).address;
+    const network = chain === 'ethereum' ? '11155111' : chain === 'bitcoin' ? 'regtest' : DEVNET;
+    const healthy = chain === 'ethereum' ? ethRpc() : chain === 'bitcoin' ? btcRpc() : solRpc();
+    const plan = await new NativeSweepPlanner(healthy).plan({
+      chain,
+      network,
+      sourceAddress: source.address,
+      hotAddress,
+    });
+    const request: SignRequest = { wallet: source, transaction: plan.request };
+    const outage = new FakeRpc(() => {
+      throw new RpcFailure();
+    });
+    await assert.rejects(
+      new NativeSweepPlanner(outage).revalidate(request, plan.maxFeeUnits),
+      expectDeferral('unavailable'),
+    );
+    const switched = new FakeRpc(() => {
+      throw new Error('No balance RPC should run');
+    });
+    await assert.rejects(
+      new NativeSweepPlanner(switched).revalidate(
+        { ...request, wallet: { ...request.wallet, network: 'other' } },
+        plan.maxFeeUnits,
+      ),
+      expectDeferral('attention'),
+    );
+    assert.equal(switched.calls.length, 0);
   }
 });

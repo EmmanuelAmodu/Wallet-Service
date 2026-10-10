@@ -7,6 +7,15 @@ import { BroadcastRpcService } from './broadcast-rpc.service.js';
 import { NativeSweepPlanner } from '../../../../packages/chain/src/native-sweep-planner.js';
 @Module({
   imports: [MessagingModule, BroadcastPrismaModule],
-  providers: [BroadcastProcessor, BroadcastService, BroadcastRpcService,{provide:NativeSweepPlanner,inject:[BroadcastRpcService],useFactory:(rpc:BroadcastRpcService)=>new NativeSweepPlanner(rpc)}],
+  providers: [
+    BroadcastProcessor,
+    BroadcastService,
+    BroadcastRpcService,
+    {
+      provide: NativeSweepPlanner,
+      inject: [BroadcastRpcService],
+      useFactory: (rpc: BroadcastRpcService) => new NativeSweepPlanner(rpc),
+    },
+  ],
 })
 export class BroadcastModule {}

@@ -38,9 +38,9 @@ export class SigningService implements OnApplicationShutdown {
         result = { ...binding, type: 'wallet.rejected' };
       }
     } else if (action.type === 'transaction.sign') {
-      if (this.custodyPolicy?.settings.enabled)
+      if (this.custodyPolicy)
         throw new ActionRejectedError(
-          'Legacy signing is disabled while native custody execution is enabled',
+          'Legacy signing is disabled for custody deployments; independent execution authorization required',
         );
       try {
         result = {

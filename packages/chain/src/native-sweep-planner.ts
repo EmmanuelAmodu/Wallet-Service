@@ -7,6 +7,7 @@ import {
   EvmChain,
   SignRequest,
   SignedTransaction,
+  signSchema,
 } from '../../shared/src/contracts.js';
 import { ChainRpcService, RpcFailure } from './chain-rpc.service.js';
 import { getWalletCore } from './coin-metadata.js';
@@ -36,7 +37,16 @@ export interface NativeSweepObservationInput {
   priorInclusion?: { blockHash: string; blockHeight: string };
 }
 export type SweepDeferralCode =
-  'dust' | 'insufficient_balance' | 'fee_budget' | 'unavailable' | 'attention';
+  | 'dust'
+  | 'insufficient_balance'
+  | 'fee_budget'
+  | 'unavailable'
+  | 'attention'
+  | 'disabled'
+  | 'paused_review'
+  | 'waiting_resources'
+  | 'waiting_funds'
+  | 'preparation_expired';
 export class SweepDeferral extends Error {
   constructor(
     readonly code: SweepDeferralCode,
@@ -467,6 +477,250 @@ export class NativeSweepPlanner {
     };
   }
 
+  /** Re-read the exact reserved resources immediately before policy authorization.
+   * Newly arrived balances and UTXOs never alter an existing prepared request.
+   */
+  async revalidate(input: SignRequest, maxFeeUnits: string): Promise<void> {
+    const request = signSchema.parse(input);
+    const chain = request.wallet.chain;
+    if (chain !== 'ethereum' && chain !== 'bitcoin' && chain !== 'solana')
+      defer('attention', 'Native sweep chain is not permitted');
+    if (!request.wallet.network) defer('attention', 'Native sweep network is required');
+    const fee = BigInt(
+      z
+        .string()
+        .regex(/^(0|[1-9][0-9]*)$/)
+        .parse(maxFeeUnits),
+    );
+    try {
+      await this.verify(chain, request.wallet.network);
+      if (chain === 'ethereum') await this.revalidateEthereum(request, fee);
+      else if (chain === 'bitcoin') await this.revalidateBitcoin(request, fee);
+      else await this.revalidateSolana(request, fee);
+    } catch (error) {
+      if (error instanceof RpcFailure)
+        defer('unavailable', 'Canonical RPC is unavailable; retain the prepared reservation');
+      throw error;
+    }
+  }
+
+  private async revalidateEthereum(input: SignRequest, fee: bigint) {
+    const request = input.transaction as EvmRequest;
+    const source = input.wallet.address;
+    if (source === request.to || request.chainId !== '11155111')
+      defer('attention', 'Invalid native Ethereum sweep destination or chain');
+    const amount = BigInt(request.amount);
+    const gas = BigInt(request.gasLimit);
+    const maxFee = BigInt(request.maxFeePerGas);
+    const priority = BigInt(request.maxPriorityFeePerGas);
+    if (
+      fee !== gas * maxFee ||
+      maxFee > 100_000_000_000n ||
+      priority > 2_000_000_000n ||
+      priority > maxFee
+    )
+      defer('fee_budget', 'Prepared Ethereum fee authorization is inconsistent with policy');
+    budget(amount, fee, 1_000_000_000_000_000n, 5_000_000_000_000_000n);
+    const [
+      finalizedRaw,
+      pendingRaw,
+      latestNonceRaw,
+      pendingNonceRaw,
+      blockRaw,
+      priorityRaw,
+      codeRaw,
+      gasRaw,
+    ] = await Promise.all([
+      this.rpc.call('ethereum', 'eth_getBalance', [source, 'finalized']),
+      this.rpc.call('ethereum', 'eth_getBalance', [source, 'pending']),
+      this.rpc.call('ethereum', 'eth_getTransactionCount', [source, 'latest']),
+      this.rpc.call('ethereum', 'eth_getTransactionCount', [source, 'pending']),
+      this.rpc.call('ethereum', 'eth_getBlockByNumber', ['latest', false]),
+      this.rpc.call('ethereum', 'eth_maxPriorityFeePerGas', []),
+      this.rpc.call('ethereum', 'eth_getCode', [request.to, 'finalized']),
+      this.rpc.call('ethereum', 'eth_estimateGas', [
+        {
+          from: source,
+          to: request.to,
+          value: `0x${amount.toString(16)}`,
+          maxFeePerGas: `0x${maxFee.toString(16)}`,
+          maxPriorityFeePerGas: `0x${priority.toString(16)}`,
+        },
+      ]),
+    ]);
+    if (codeRaw !== '0x')
+      defer('attention', 'Native hot wallet is no longer an externally owned account');
+    if (
+      BigInt(hexQuantity.parse(latestNonceRaw)) !== BigInt(request.nonce) ||
+      BigInt(hexQuantity.parse(pendingNonceRaw)) !== BigInt(request.nonce)
+    )
+      defer('waiting_resources', 'Prepared source nonce is occupied or has advanced');
+    if (
+      BigInt(hexQuantity.parse(finalizedRaw)) < amount + fee ||
+      BigInt(hexQuantity.parse(pendingRaw)) < amount + fee
+    )
+      defer(
+        'waiting_funds',
+        'Prepared Ethereum balance no longer covers principal and reserved fees',
+      );
+    const baseFee = BigInt(z.object({ baseFeePerGas: hexQuantity }).parse(blockRaw).baseFeePerGas);
+    const quotedPriority = BigInt(hexQuantity.parse(priorityRaw));
+    if (
+      quotedPriority > priority ||
+      baseFee + priority > maxFee ||
+      BigInt(hexQuantity.parse(gasRaw)) > gas
+    )
+      defer('fee_budget', 'Fresh Ethereum execution costs exceed the immutable preparation');
+  }
+
+  private async revalidateBitcoin(input: SignRequest, fee: bigint) {
+    const request = input.transaction as BitcoinRequest;
+    if (request.outputs.length !== 1 || request.sweepAll !== true)
+      defer('attention', 'Bitcoin sweep must have one hot output and no change');
+    const source = regtestWitnessAddress(input.wallet.address);
+    const hot = regtestWitnessAddress(request.outputs[0].address);
+    if (source.program.length !== 20 || hot.program.length !== 20 || source.address === hot.address)
+      defer('attention', 'Bitcoin sweep requires distinct P2WPKH source and hot addresses');
+    const ownScript = `0014${Buffer.from(source.program).toString('hex')}`;
+    if (new Set(request.utxos.map((u) => `${u.txid}:${u.vout}`)).size !== request.utxos.length)
+      defer('attention', 'Duplicate prepared Bitcoin outpoint');
+    const amount = BigInt(request.outputs[0].amount);
+    if (
+      request.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n) !== amount + fee ||
+      request.satsPerVbyte > 100
+    )
+      defer('fee_budget', 'Prepared Bitcoin principal or fee budget is inconsistent');
+    budget(amount, fee, 10_000n, 10_000n);
+    for (const utxo of request.utxos) {
+      if (utxo.script !== ownScript)
+        defer('attention', 'Prepared Bitcoin script is not owned by source');
+      const raw = await this.rpc.call('bitcoin', 'gettxout', [utxo.txid, utxo.vout, true]);
+      if (raw === null) defer('waiting_resources', 'Prepared Bitcoin outpoint has been spent');
+      const output = z
+        .object({
+          value: z.union([z.number(), z.string()]),
+          confirmations: safeInteger,
+          coinbase: z.boolean(),
+          scriptPubKey: z.object({ hex: z.string(), address: z.string().optional() }),
+        })
+        .parse(raw);
+      evidence(
+        output.scriptPubKey.hex === ownScript &&
+          (!output.scriptPubKey.address || output.scriptPubKey.address === source.address),
+        'prepared Bitcoin outpoint ownership',
+      );
+      evidence(
+        bitcoinDecimalUnits(output.value) === BigInt(utxo.amount),
+        'prepared Bitcoin outpoint amount',
+      );
+      if (output.confirmations < 6 || (output.coinbase && output.confirmations < 100))
+        defer('waiting_resources', 'Prepared Bitcoin outpoint is no longer mature');
+    }
+    const estimate = z
+      .object({
+        feerate: z.union([z.number(), z.string()]).optional(),
+        errors: z.array(z.string()).optional(),
+      })
+      .parse(await this.rpc.call('bitcoin', 'estimatesmartfee', [6, 'CONSERVATIVE']));
+    if (
+      estimate.feerate === undefined &&
+      (!estimate.errors?.length ||
+        !estimate.errors.every((error) => /insufficient|not enough|no feerate found/i.test(error)))
+    )
+      defer('unavailable', 'Bitcoin fee estimate is missing without a no-data explanation');
+    const rate =
+      estimate.feerate === undefined ? 2n : (bitcoinDecimalUnits(estimate.feerate) + 999n) / 1000n;
+    if (rate < 1n || rate > BigInt(request.satsPerVbyte))
+      defer('fee_budget', 'Fresh Bitcoin fee estimate exceeds the immutable preparation');
+  }
+
+  private async revalidateSolana(input: SignRequest, fee: bigint) {
+    const request = input.transaction as SolanaRequest;
+    if (request.outputs.length !== 1 || request.outputs[0].address === input.wallet.address)
+      defer('attention', 'Native Solana sweep requires one distinct hot recipient');
+    const amount = BigInt(request.outputs[0].amount);
+    budget(amount, fee, 1_000_000n, 100_000n);
+    const [balanceRaw, accountRaw] = await Promise.all([
+      this.rpc.call('solana', 'getBalance', [input.wallet.address, { commitment: 'finalized' }]),
+      this.rpc.call('solana', 'getAccountInfo', [
+        input.wallet.address,
+        { commitment: 'finalized', encoding: 'base64' },
+      ]),
+    ]);
+    const balance = z
+      .object({ context: z.object({ slot: safeInteger }), value: safeInteger })
+      .parse(balanceRaw);
+    const account = z
+      .object({
+        context: z.object({ slot: safeInteger }),
+        value: z
+          .object({
+            owner: z.string(),
+            executable: z.boolean(),
+            lamports: safeInteger,
+            data: z.tuple([z.string(), z.literal('base64')]),
+          })
+          .nullable(),
+      })
+      .parse(accountRaw);
+    if (!account.value) defer('waiting_funds', 'Prepared Solana account no longer exists');
+    if (
+      account.value.owner !== SYSTEM ||
+      account.value.executable ||
+      Buffer.from(account.value.data[0], 'base64').length !== 0
+    )
+      defer('attention', 'Prepared Solana source is no longer an ordinary System account');
+    const floor = Math.max(balance.context.slot, account.context.slot);
+    const rent = BigInt(
+      safeInteger.parse(
+        await this.rpc.call('solana', 'getMinimumBalanceForRentExemption', [
+          0,
+          { commitment: 'finalized' },
+        ]),
+      ),
+    );
+    if (rent > 5_000_000n) defer('fee_budget', 'Solana retained rent exceeds the pinned budget');
+    if (
+      BigInt(balance.value) < amount + fee + rent ||
+      BigInt(account.value.lamports) < amount + fee + rent
+    )
+      defer(
+        'waiting_funds',
+        'Prepared Solana balance no longer covers principal, fee and retained rent',
+      );
+    const message = await nativeSolanaMessage(
+      input.wallet.address,
+      request.outputs[0].address,
+      request.recentBlockhash,
+      amount,
+    );
+    const [feeRaw, heightRaw, validRaw] = await Promise.all([
+      this.rpc.call('solana', 'getFeeForMessage', [
+        message.toString('base64'),
+        { commitment: 'finalized', minContextSlot: floor },
+      ]),
+      this.rpc.call('solana', 'getBlockHeight', [
+        { commitment: 'finalized', minContextSlot: floor },
+      ]),
+      this.rpc.call('solana', 'isBlockhashValid', [
+        request.recentBlockhash,
+        { commitment: 'finalized', minContextSlot: floor },
+      ]),
+    ]);
+    const quote = z
+      .object({ context: z.object({ slot: safeInteger }), value: safeInteger.nullable() })
+      .parse(feeRaw);
+    const valid = z
+      .object({ context: z.object({ slot: safeInteger }), value: z.boolean() })
+      .parse(validRaw);
+    if (quote.context.slot < floor || valid.context.slot < floor || quote.value === null)
+      defer('unavailable', 'Fresh Solana evidence is unavailable for the prepared message context');
+    if (safeInteger.parse(heightRaw) >= request.lastValidBlockHeight || !valid.value)
+      defer('preparation_expired', 'Prepared Solana blockhash is no longer valid');
+    if (BigInt(quote.value) !== fee)
+      defer('fee_budget', 'Solana fee changed for the immutable prepared message');
+  }
+
   async observe(input: NativeSweepObservationInput): Promise<NativeSweepObservation> {
     await this.verify(input.chain, input.network);
     evidence(
@@ -541,6 +795,34 @@ export class NativeSweepPlanner {
         input.hash.toLowerCase(),
       'Ethereum signed raw hash',
     );
+    const decoded = decodeEthereumSweep(input.signed.raw);
+    evidence(
+      decoded.chainId === BigInt(request.chainId) &&
+        decoded.nonce === BigInt(request.nonce) &&
+        decoded.amount === BigInt(request.amount) &&
+        decoded.to === request.to &&
+        decoded.gasLimit === BigInt(request.gasLimit) &&
+        decoded.maxFeePerGas === BigInt(request.maxFeePerGas) &&
+        decoded.maxPriorityFeePerGas === BigInt(request.maxPriorityFeePerGas),
+      'Ethereum exact signed request fields',
+    );
+    const recovered = core.PublicKey.recover(
+      decoded.signature,
+      core.Hash.keccak256(decoded.signingBytes),
+    );
+    try {
+      const address = core.AnyAddress.createWithPublicKey(recovered, core.CoinType.ethereum);
+      try {
+        evidence(
+          address.description().toLowerCase() === input.request.wallet.address,
+          'Ethereum signed source',
+        );
+      } finally {
+        address.delete();
+      }
+    } finally {
+      recovered.delete();
+    }
     const raw = await this.rpc.call('ethereum', 'eth_getTransactionReceipt', [input.hash]);
     if (raw === null) return { state: 'pending' as const };
     const receipt = z
@@ -723,6 +1005,15 @@ export class NativeSweepPlanner {
       BigInt(request.outputs[0].amount),
     );
     evidence(rawBytes.subarray(65).equals(expected), 'Solana exact System transfer message');
+    const sourceKey = core.PublicKey.createWithData(
+      core.Base58.decodeNoCheck(input.request.wallet.address),
+      core.PublicKeyType.ed25519,
+    );
+    try {
+      evidence(sourceKey.verify(rawBytes.subarray(1, 65), expected), 'Solana source signature');
+    } finally {
+      sourceKey.delete();
+    }
     const raw = await this.rpc.call('solana', 'getTransaction', [
       input.hash,
       { commitment: 'finalized', encoding: 'base64', maxSupportedTransactionVersion: 0 },
@@ -803,8 +1094,8 @@ function decodeBitcoinSweep(raw: string) {
     const txid = Buffer.from(take(32)).reverse().toString('hex');
     const vout = take(4).readUInt32LE();
     inputs.push(`${txid}:${vout}`);
-    take(compact());
-    take(4);
+    evidence(compact() === 0, 'Bitcoin native scriptSig');
+    evidence(take(4).readUInt32LE() === 0xffffffff, 'Bitcoin native input sequence');
   }
   const outputCount = compact();
   evidence(outputCount === 1, 'Bitcoin sweep output count');
@@ -812,10 +1103,20 @@ function decodeBitcoinSweep(raw: string) {
   const baseEnd = offset;
   for (let i = 0; i < inputCount; i++) {
     const count = compact();
-    evidence(count <= 100, 'Bitcoin witness count');
-    for (let j = 0; j < count; j++) take(compact());
+    evidence(count === 2, 'Bitcoin native witness count');
+    const signature = take(compact());
+    const publicKey = take(compact());
+    evidence(
+      signature.length >= 9 &&
+        signature.length <= 73 &&
+        signature[signature.length - 1] === 1 &&
+        publicKey.length === 33 &&
+        (publicKey[0] === 2 || publicKey[0] === 3),
+      'Bitcoin native witness fields',
+    );
   }
   const locktime = take(4);
+  evidence(locktime.readUInt32LE() === 0, 'Bitcoin native locktime');
   evidence(offset === bytes.length, 'Bitcoin trailing bytes');
   const base = Buffer.concat([version, bytes.subarray(6, baseEnd), locktime]);
   const txid = Buffer.from(
@@ -824,4 +1125,100 @@ function decodeBitcoinSweep(raw: string) {
     .reverse()
     .toString('hex');
   return { inputs, outputs, txid };
+}
+
+// Minimal canonical RLP reader for Wallet Core's EIP-1559 native transfers.
+// The prepared request and recovered source are checked before querying receipts.
+function decodeEthereumSweep(raw: string) {
+  const bytes = Buffer.from(raw.slice(2), 'hex');
+  evidence(bytes[0] === 2, 'Ethereum native sweep envelope');
+  type Rlp = Buffer | Rlp[];
+  let cursor = 1;
+  const take = (count: number) => {
+    evidence(count >= 0 && cursor + count <= bytes.length, 'truncated Ethereum RLP');
+    const value = bytes.subarray(cursor, cursor + count);
+    cursor += count;
+    return value;
+  };
+  const length = (count: number) => {
+    const encoded = take(count);
+    evidence(encoded[0] !== 0 && count <= 4, 'noncanonical Ethereum RLP length');
+    return Number(BigInt(`0x${encoded.toString('hex')}`));
+  };
+  const read = (depth: number): Rlp => {
+    evidence(depth <= 2, 'Ethereum RLP nesting');
+    const prefix = take(1)[0];
+    if (prefix < 0x80) return Buffer.from([prefix]);
+    if (prefix <= 0xbf) {
+      const size = prefix <= 0xb7 ? prefix - 0x80 : length(prefix - 0xb7);
+      evidence(prefix <= 0xb7 || size >= 56, 'noncanonical Ethereum string length');
+      const value = take(size);
+      evidence(size !== 1 || value[0] >= 0x80, 'noncanonical Ethereum RLP string');
+      return value;
+    }
+    const size = prefix <= 0xf7 ? prefix - 0xc0 : length(prefix - 0xf7);
+    evidence(prefix <= 0xf7 || size >= 56, 'noncanonical Ethereum list length');
+    const end = cursor + size;
+    evidence(end <= bytes.length, 'truncated Ethereum RLP list');
+    const list: Rlp[] = [];
+    while (cursor < end) {
+      evidence(list.length < 12, 'Ethereum native sweep field count');
+      list.push(read(depth + 1));
+    }
+    evidence(cursor === end, 'Ethereum RLP list size');
+    return list;
+  };
+  const fields = read(0);
+  evidence(
+    Array.isArray(fields) && fields.length === 12 && cursor === bytes.length,
+    'Ethereum EIP-1559 field count',
+  );
+  const field = (index: number) => {
+    const value = fields[index];
+    evidence(Buffer.isBuffer(value), 'Ethereum native scalar field');
+    return value;
+  };
+  const uint = (index: number) => {
+    const value = field(index);
+    evidence(
+      value.length <= 32 && (value.length === 0 || value[0] !== 0),
+      'Ethereum canonical integer',
+    );
+    return value.length === 0 ? 0n : BigInt(`0x${value.toString('hex')}`);
+  };
+  evidence(
+    field(5).length === 20 &&
+      field(7).length === 0 &&
+      Array.isArray(fields[8]) &&
+      fields[8].length === 0,
+    'Ethereum native recipient, data and access list',
+  );
+  const parity = uint(9);
+  evidence(parity <= 1n && uint(10) > 0n && uint(11) > 0n, 'Ethereum signature fields');
+  const encode = (value: Rlp): Buffer => {
+    const list = Array.isArray(value);
+    const data = list ? Buffer.concat(value.map(encode)) : value;
+    if (!list && data.length === 1 && data[0] < 0x80) return data;
+    const base = list ? 0xc0 : 0x80;
+    if (data.length < 56) return Buffer.concat([Buffer.from([base + data.length]), data]);
+    let hex = data.length.toString(16);
+    if (hex.length % 2) hex = `0${hex}`;
+    const encodedLength = Buffer.from(hex, 'hex');
+    return Buffer.concat([Buffer.from([base + 55 + encodedLength.length]), encodedLength, data]);
+  };
+  return {
+    chainId: uint(0),
+    nonce: uint(1),
+    maxPriorityFeePerGas: uint(2),
+    maxFeePerGas: uint(3),
+    gasLimit: uint(4),
+    to: `0x${field(5).toString('hex')}`,
+    amount: uint(6),
+    signingBytes: Buffer.concat([Buffer.from([2]), encode(fields.slice(0, 9))]),
+    signature: Buffer.concat([
+      Buffer.from(uint(10).toString(16).padStart(64, '0'), 'hex'),
+      Buffer.from(uint(11).toString(16).padStart(64, '0'), 'hex'),
+      Buffer.from([Number(parity)]),
+    ]),
+  };
 }

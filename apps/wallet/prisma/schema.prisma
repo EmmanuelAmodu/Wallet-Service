@@ -197,6 +197,7 @@ model CustodyExecution {
   prepared_request    Json?
   preparation_digest  String?
   authorization       Json?
+  signer_result       Json?
   principal_units     String?
   maximum_fee_units   String?
   expires_at          DateTime?                @db.Timestamptz

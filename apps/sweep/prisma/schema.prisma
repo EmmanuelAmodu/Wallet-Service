@@ -132,6 +132,7 @@ model SweepAttempt {
   state                    String
   transaction_hash         String?
   terminal_safe            Boolean @default(false)
+  terminal_settlement_revision Int?
   execution_revision       Int @default(0)
   execution_digest         String?
   settlement_revision      Int @default(0)

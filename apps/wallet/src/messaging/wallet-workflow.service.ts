@@ -42,6 +42,24 @@ export class WalletWorkflowService {
   ) {}
 
   async handle(message: Message, messageId: string, finalAttempt: boolean) {
+    if (
+      [
+        'transaction.prepare',
+        'transaction.signed',
+        'transaction.rejected',
+        'broadcast.updated',
+      ].includes(message.type) &&
+      'transactionId' in message
+    ) {
+      const owned = await this.db.transaction.findUnique({
+        where: { id: message.transactionId },
+        select: { wallet: { select: { custody_role: true } } },
+      });
+      if (owned && owned.wallet.custody_role !== 'legacy')
+        throw new ActionRejectedError(
+          'Custody transactions require independently authorized attempt results',
+        );
+    }
     if (message.type === 'custody.assignment.issue') {
       if (!this.customers) throw new Error('Custody assignment handler is unavailable');
       await this.customers.issueAssignment(message.assignmentId, message.domainId);

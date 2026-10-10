@@ -59,7 +59,11 @@ services:
       AUTH_TOKEN_PUBLIC_KEY_FILE: /run/secrets/auth-public
       AUTH_TOKEN_ISSUER: ${AUTH_TOKEN_ISSUER:-exchange-user}
       AUTH_TOKEN_AUDIENCE: ${AUTH_TOKEN_AUDIENCE:-exchange-wallet}
-    secrets: [auth-public]
+      ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      EXECUTION_RECONCILIATION_MS: ${EXECUTION_RECONCILIATION_MS:-30000}
+      EXECUTION_AUTHORITY_PRIVATE_KEY_FILE: /run/secrets/execution-authority-private
+      EXECUTION_SIGNER_PUBLIC_KEY_FILE: /run/secrets/execution-signer-public
+    secrets: [auth-public, execution-authority-private, execution-signer-public]
     ports: ['${PUBLIC_BIND_ADDRESS:-127.0.0.1}:3000:3000']
     depends_on:
       postgres: { condition: service_healthy }
@@ -84,7 +88,10 @@ services:
       SIGNER_SEED_ID: ${SIGNER_SEED_ID:-local-v1}
       SIGNER_SEED_FILE: /run/secrets/custody-seed
       EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
-    secrets: [custody-seed]
+      ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      EXECUTION_AUTHORITY_PUBLIC_KEY_FILE: /run/secrets/execution-authority-public
+      EXECUTION_SIGNER_PRIVATE_KEY_FILE: /run/secrets/execution-signer-private
+    secrets: [custody-seed, execution-authority-public, execution-signer-private]
     depends_on:
       redis: { condition: service_healthy }
   broadcast:
@@ -94,6 +101,10 @@ services:
       <<: [*queue, *chain]
       BROADCAST_DATABASE_URL: postgresql://broadcast:broadcast_local_only@broadcast-postgres:5432/broadcast
       ALLOW_BROADCAST: ${ALLOW_BROADCAST:-false}
+      ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
+      EXECUTION_SIGNER_PUBLIC_KEY_FILE: /run/secrets/execution-signer-public
+    secrets: [execution-signer-public]
     depends_on:
       broadcast-postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -104,6 +115,10 @@ services:
       <<: *queue
       SWEEP_DATABASE_URL: postgresql://sweep:sweep_local_only@sweep-postgres:5432/sweep
       EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
+      ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      SWEEP_RECONCILIATION_MS: ${SWEEP_RECONCILIATION_MS:-15000}
+      SWEEP_RETRY_DELAY_MS: ${SWEEP_RETRY_DELAY_MS:-60000}
+      EXCHANGE_FINANCIAL_POLICY_VERSION: ${EXCHANGE_FINANCIAL_POLICY_VERSION:-exchange-financial-v1}
     depends_on:
       sweep-postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -139,3 +154,11 @@ secrets:
     file: ${AUTH_TOKEN_PUBLIC_KEY_FILE:-./secrets/user-token-public.pem}
   custody-seed:
     file: ${SIGNER_SEED_FILE:-./secrets/local.mnemonic}
+  execution-authority-private:
+    file: ${EXECUTION_AUTHORITY_PRIVATE_KEY_FILE:-./secrets/execution-authority-private.pem}
+  execution-authority-public:
+    file: ${EXECUTION_AUTHORITY_PUBLIC_KEY_FILE:-./secrets/execution-authority-public.pem}
+  execution-signer-private:
+    file: ${EXECUTION_SIGNER_PRIVATE_KEY_FILE:-./secrets/execution-signer-private.pem}
+  execution-signer-public:
+    file: ${EXECUTION_SIGNER_PUBLIC_KEY_FILE:-./secrets/execution-signer-public.pem}

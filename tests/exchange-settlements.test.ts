@@ -561,6 +561,78 @@ test(
 );
 
 test(
+  'settlement and reversal results durably fan out once with identical payloads to Wallet and Sweep',
+  { skip: !db || !sweepDb },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    const execution = await f.execute('sweep', '500', native, '3');
+    const paid = settlement(execution, 'confirmed', '3');
+    await settlements!.handle(paid);
+    await settlements!.handle({ ...paid, eventId: randomUUID() });
+    const committed = await db!.outbox.findMany({
+      where: {
+        payload: { path: ['operationId'], equals: execution.operationId },
+        AND: { payload: { path: ['type'], equals: 'settlement.committed.v1' } },
+      },
+    });
+    assert.equal(committed.length, 2);
+    assert.deepEqual(
+      new Set(committed.map((delivery) => delivery.queue)),
+      new Set([QUEUES.wallet, QUEUES.sweep]),
+    );
+    assert.deepEqual(committed[0].payload, committed[1].payload);
+    assert.deepEqual(
+      new Set(committed.map((delivery) => delivery.dedupe_key)),
+      new Set([
+        `settlement-result:${execution.operationId}:1`,
+        `settlement-result:${execution.operationId}:1:sweep`,
+      ]),
+    );
+    const reverted = reversal(execution);
+    await settlements!.handle(reverted);
+    await settlements!.handle(reverted);
+    await settlements!.handle({ ...reverted, eventId: randomUUID() });
+    const reversed = await db!.outbox.findMany({
+      where: {
+        payload: { path: ['operationId'], equals: execution.operationId },
+        AND: { payload: { path: ['type'], equals: 'settlement.reversed.v1' } },
+      },
+    });
+    assert.equal(reversed.length, 2);
+    assert.deepEqual(
+      new Set(reversed.map((delivery) => delivery.queue)),
+      new Set([QUEUES.wallet, QUEUES.sweep]),
+    );
+    assert.deepEqual(reversed[0].payload, reversed[1].payload);
+    assert.deepEqual(
+      new Set(reversed.map((delivery) => delivery.dedupe_key)),
+      new Set([
+        `settlement-reorg:${execution.operationId}:2`,
+        `settlement-reorg:${execution.operationId}:2:sweep`,
+      ]),
+    );
+    const sweep = new SweepService(sweepDb!, new MessageAuth('s'.repeat(64), config.resetEpoch), {
+      domainId: f.domainId,
+      enableNativeSweeps: true,
+    });
+    for (const delivery of [...committed, ...reversed]) {
+      const result = exchangeEventSchema.parse(delivery.payload);
+      await sweep.handle(result);
+      await sweep.handle(result);
+    }
+    assert.equal(await sweepDb!.inbox.count({ where: { domain_id: f.domainId } }), 2);
+    assert.equal(await sweepDb!.sweepOperation.count({ where: { domain_id: f.domainId } }), 0);
+    assert.equal(await sweepDb!.sweepCustomer.count({ where: { domain_id: f.domainId } }), 0);
+    assert.equal(await sweepDb!.sweepDomainGate.count({ where: { domain_id: f.domainId } }), 0);
+    assert.equal(await f.balance('customer_available', f.customerId), 1000n);
+    assert.equal(await f.balance('custody_deposit', f.walletId), 1000n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 0n);
+    assert.equal(await f.balance('fee_expense', f.domainId), 0n);
+  },
+);
+
+test(
   'settlement fee, custody-shortfall and reorg incidents independently pause Sweep before registry with identical durable deliveries',
   { skip: !db || !sweepDb },
   async () => {

@@ -452,6 +452,7 @@ const executionAttemptUpdated = event(
       transactionHash: z.string().min(1).max(256).optional(),
       reason: z.string().min(1).max(500).optional(),
       terminalSafe: z.boolean().optional(),
+      settlementRevision: z.number().int().positive().optional(),
     })
     .strict(),
   { operationId: z.uuid(), attemptId: z.uuid(), requestDigest: digest },

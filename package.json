@@ -15,6 +15,7 @@
     "start:ledger": "node dist/apps/ledger/src/main.js",
     "migrate": "tsx --env-file-if-exists=.env scripts/migrate.ts",
     "setup:local": "tsx scripts/setup-local.ts",
+    "setup:execution-policy": "tsx scripts/setup-execution-policy.ts",
     "setup:pubsub": "tsx --env-file-if-exists=.env scripts/setup-pubsub.ts",
     "reset:development": "tsx --env-file-if-exists=.env scripts/reset-development.ts",
     "lint": "eslint .",

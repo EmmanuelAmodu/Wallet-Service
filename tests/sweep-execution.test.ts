@@ -215,7 +215,7 @@ test(
       f.response(
         plan,
         'execution.attempt.updated.v1',
-        { state: 'confirmed', transactionHash: hash, terminalSafe: true },
+        { state: 'confirmed', transactionHash: hash, terminalSafe: true, settlementRevision: 1 },
         { revision: 2 },
       ),
     );
@@ -313,6 +313,280 @@ test(
 );
 
 test(
+  'matching unsigned terminal proof releases expired and queued preparations for a fresh retry',
+  { skip: !enabled },
+  async () => {
+    for (const expired of [false, true]) {
+      const f = await fixture(),
+        plan = await f.start();
+      await f.service.handle(
+        f.prepared(plan, expired ? { expiresAt: new Date(Date.now() - 1).toISOString() } : {}),
+      );
+      assert.equal((await f.work()).state, expired ? 'attention' : 'queued');
+      const deferred = f.response(plan, 'sweep.plan.deferred.v1', {
+        code: 'expired',
+        reason: 'Wallet retired the unsigned preparation',
+        retryAfter: new Date(Date.now() - 1).toISOString(),
+        preparationDigest: 'a'.repeat(64),
+        terminalSafe: true,
+      });
+      await f.service.handle(deferred);
+      await f.service.handle(deferred);
+      assert.equal((await f.work()).active_operation_id, null);
+      assert.equal((await f.work()).state, 'deferred');
+      assert.equal(
+        (await db!.sweepAttempt.findUniqueOrThrow({ where: { id: plan.attemptId } })).terminal_safe,
+        true,
+      );
+      assert.equal(await f.service.scheduleEligible(), 1);
+      const next = (await f.plans()).at(-1)!;
+      assert.notEqual(next.operationId, plan.operationId);
+      assert.notEqual(next.attemptId, plan.attemptId);
+    }
+  },
+);
+
+test(
+  'prepared deferral rejects mismatched proof and remains fenced after a signing or unknown result',
+  { skip: !enabled },
+  async () => {
+    for (const executionState of ['signing', 'attention'] as const) {
+      const f = await fixture(),
+        plan = await f.start();
+      await f.service.handle(f.prepared(plan));
+      const deferred = (preparationDigest: string) =>
+        f.response(plan, 'sweep.plan.deferred.v1', {
+          code: 'expired',
+          reason: 'Preparation expired',
+          retryAfter: new Date().toISOString(),
+          preparationDigest,
+          terminalSafe: true,
+        });
+      await assert.rejects(f.service.handle(deferred('b'.repeat(64))), /terminal proof/);
+      await f.service.handle(
+        f.response(plan, 'execution.attempt.updated.v1', { state: executionState }),
+      );
+      await assert.rejects(f.service.handle(deferred('a'.repeat(64))), /terminal proof/);
+      assert.equal((await f.work()).active_operation_id, plan.operationId);
+      assert.equal(await f.service.scheduleEligible(), 0);
+    }
+  },
+);
+
+test(
+  'unsigned preparation release preserves an existing custody review gate',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture(),
+      plan = await f.start();
+    await f.service.handle(
+      f.event('custody.incident.opened.v1', {
+        incidentId: randomUUID(),
+        severity: 'critical',
+        category: 'custody_review',
+        status: 'open',
+        reason: 'Custody review is required',
+      }),
+    );
+    await f.service.handle(f.prepared(plan));
+    await f.service.handle(
+      f.response(plan, 'sweep.plan.deferred.v1', {
+        code: 'expired',
+        reason: 'Unsigned preparation expired',
+        retryAfter: new Date(Date.now() - 1).toISOString(),
+        preparationDigest: 'a'.repeat(64),
+        terminalSafe: true,
+      }),
+    );
+    assert.equal((await f.work()).active_operation_id, null);
+    assert.equal((await f.work()).state, 'paused_review');
+    assert.equal(await f.service.scheduleEligible(), 0);
+  },
+);
+
+test(
+  'a delayed reversal older than a newer settlement cannot reopen or pause the operation',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture(),
+      plan = await f.start();
+    const hash = `0x${'d'.repeat(64)}`;
+    await f.service.handle(f.prepared(plan));
+    await f.service.handle(
+      f.response(
+        plan,
+        'settlement.committed.v1',
+        { ledgerBatchId: randomUUID(), transactionHash: hash },
+        { revision: 3 },
+      ),
+    );
+    await f.service.handle(
+      f.response(plan, 'execution.attempt.updated.v1', {
+        state: 'confirmed',
+        transactionHash: hash,
+        terminalSafe: true,
+        settlementRevision: 3,
+      }),
+    );
+    assert.equal((await f.work()).active_operation_id, null);
+    const settled = await db!.sweepOperation.findUniqueOrThrow({ where: { id: plan.operationId } });
+    const reversed = f.response(
+      plan,
+      'settlement.reversed.v1',
+      { ledgerBatchId: randomUUID(), priorSettlementRevision: 1 },
+      { revision: 2 },
+    );
+    await f.service.handle(reversed);
+    await f.service.handle(reversed);
+    assert.deepEqual(
+      await db!.sweepOperation.findUniqueOrThrow({ where: { id: plan.operationId } }),
+      settled,
+    );
+    assert.equal((await f.work()).active_operation_id, null);
+    assert.equal((await f.work()).state, 'settled_residual');
+    assert.equal(
+      (await db!.sweepCustomer.findUniqueOrThrow({ where: { customer_id: f.customerId } })).paused,
+      false,
+    );
+    assert.equal(await f.service.scheduleEligible(), 1);
+  },
+);
+
+test(
+  'an old terminal proof cannot release a newer settlement until matching revision proof arrives',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture(),
+      plan = await f.start();
+    const hash = `0x${'e'.repeat(64)}`;
+    await f.service.handle(f.prepared(plan));
+    await f.service.handle(
+      f.response(
+        plan,
+        'settlement.committed.v1',
+        { ledgerBatchId: randomUUID(), transactionHash: hash },
+        { revision: 3 },
+      ),
+    );
+    await f.service.handle(
+      f.response(plan, 'execution.attempt.updated.v1', {
+        state: 'confirmed',
+        transactionHash: hash,
+        terminalSafe: true,
+        settlementRevision: 1,
+      }),
+    );
+    assert.equal((await f.work()).active_operation_id, plan.operationId);
+    assert.equal(await f.service.scheduleEligible(), 0);
+    assert.equal(
+      (await db!.sweepAttempt.findUniqueOrThrow({ where: { id: plan.attemptId } }))
+        .terminal_settlement_revision,
+      1,
+    );
+    await f.service.handle(
+      f.response(
+        plan,
+        'execution.attempt.updated.v1',
+        { state: 'confirmed', transactionHash: hash, terminalSafe: true, settlementRevision: 3 },
+        { revision: 2 },
+      ),
+    );
+    assert.equal((await f.work()).active_operation_id, null);
+    assert.equal(await f.service.scheduleEligible(), 1);
+  },
+);
+
+test(
+  'canonical terminal proof requires both its hash and positive settlement revision',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture(),
+      plan = await f.start();
+    await f.service.handle(f.prepared(plan));
+    for (const incomplete of [
+      { state: 'confirmed', terminalSafe: true },
+      { state: 'confirmed', terminalSafe: true, transactionHash: `0x${'f'.repeat(64)}` },
+      { state: 'confirmed', terminalSafe: true, settlementRevision: 1 },
+    ])
+      await assert.rejects(
+        f.service.handle(f.response(plan, 'execution.attempt.updated.v1', incomplete)),
+        /canonical hash and settlement revision/,
+      );
+    assert.equal((await f.work()).active_operation_id, plan.operationId);
+    assert.equal(
+      (await db!.sweepAttempt.findUniqueOrThrow({ where: { id: plan.attemptId } }))
+        .terminal_settlement_revision,
+      null,
+    );
+    await assert.rejects(
+      db!.sweepAttempt.update({
+        where: { id: plan.attemptId },
+        data: { terminal_settlement_revision: 0 },
+      }),
+      /terminal_settlement_revision/,
+    );
+  },
+);
+
+test(
+  'reversal clears a persisted terminal proof and requires fresh proof after re-inclusion',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture(),
+      plan = await f.start();
+    const hash = `0x${'9'.repeat(64)}`;
+    await f.service.handle(f.prepared(plan));
+    await f.service.handle(
+      f.response(plan, 'execution.attempt.updated.v1', {
+        state: 'confirmed',
+        transactionHash: hash,
+        terminalSafe: true,
+        settlementRevision: 1,
+      }),
+    );
+    assert.equal((await f.work()).active_operation_id, plan.operationId);
+    assert.equal(
+      (await db!.sweepAttempt.findUniqueOrThrow({ where: { id: plan.attemptId } }))
+        .terminal_settlement_revision,
+      1,
+    );
+    await f.service.handle(
+      f.response(
+        plan,
+        'settlement.reversed.v1',
+        { ledgerBatchId: randomUUID(), priorSettlementRevision: 1 },
+        { revision: 2 },
+      ),
+    );
+    const reversedAttempt = await db!.sweepAttempt.findUniqueOrThrow({
+      where: { id: plan.attemptId },
+    });
+    assert.equal(reversedAttempt.terminal_safe, false);
+    assert.equal(reversedAttempt.terminal_settlement_revision, null);
+    await f.service.handle(
+      f.response(
+        plan,
+        'settlement.committed.v1',
+        { ledgerBatchId: randomUUID(), transactionHash: hash },
+        { revision: 3 },
+      ),
+    );
+    assert.equal((await f.work()).active_operation_id, plan.operationId);
+    await f.service.handle(
+      f.response(
+        plan,
+        'execution.attempt.updated.v1',
+        { state: 'confirmed', transactionHash: hash, terminalSafe: true, settlementRevision: 3 },
+        { revision: 2 },
+      ),
+    );
+    assert.equal((await f.work()).active_operation_id, null);
+    assert.equal((await f.work()).state, 'paused_review');
+    assert.equal(await f.service.scheduleEligible(), 0);
+  },
+);
+
+test(
   'reversal first delivery suppresses stale commit and terminal status and creates sticky review',
   { skip: !enabled },
   async () => {
@@ -338,6 +612,7 @@ test(
         state: 'confirmed',
         transactionHash: `0x${'c'.repeat(64)}`,
         terminalSafe: true,
+        settlementRevision: 1,
       }),
     );
     const work = await f.work();
@@ -348,6 +623,11 @@ test(
       true,
     );
     assert.equal(await f.service.scheduleEligible(), 0);
+    assert.equal(
+      (await db!.sweepAttempt.findUniqueOrThrow({ where: { id: plan.attemptId } }))
+        .terminal_settlement_revision,
+      null,
+    );
   },
 );
 
