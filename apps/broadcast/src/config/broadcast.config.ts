@@ -21,8 +21,14 @@ export const broadcastConfig = registerAs('broadcast', () => {
   const native = process.env.ENABLE_NATIVE_SWEEPS ?? 'false';
   if (native !== 'true' && native !== 'false')
     throw new Error('Invalid configuration: ENABLE_NATIVE_SWEEPS');
+  const withdrawals = process.env.ENABLE_NATIVE_WITHDRAWALS ?? 'false';
+  if (!['true', 'false'].includes(withdrawals))
+    throw new Error('Invalid configuration: ENABLE_NATIVE_WITHDRAWALS');
   const custodyMode = process.env.EXCHANGE_DOMAIN_ID !== undefined;
-  const domainId = custodyMode || native === 'true' ? required('EXCHANGE_DOMAIN_ID') : undefined;
+  const domainId =
+    custodyMode || native === 'true' || withdrawals === 'true'
+      ? required('EXCHANGE_DOMAIN_ID')
+      : undefined;
   return {
     databaseUrl: required('BROADCAST_DATABASE_URL'),
     allowBroadcast: allow === 'true',
@@ -31,10 +37,11 @@ export const broadcastConfig = registerAs('broadcast', () => {
     chainNetworks: chainNetworksFromEnv(ethereumChainId, solanaGenesisHash),
     pollIntervalMs: integerSetting('CONFIRMATION_POLL_MS', 30000, 10, 86400000),
     maxPolls: integerSetting('CONFIRMATION_MAX_POLLS', 120, 1, 10000),
+    nativeWithdrawalsEnabled: withdrawals === 'true',
     nativeSweepsEnabled: native === 'true',
     custodyMode,
     ...(domainId ? { domainId } : {}),
-    ...(native === 'true'
+    ...(native === 'true' || withdrawals === 'true'
       ? {
           executionSignerPublicKey: signerPublicKey(),
           resetEpoch: required('RESET_EPOCH'),
@@ -44,9 +51,14 @@ export const broadcastConfig = registerAs('broadcast', () => {
 });
 export type BroadcastConfig = Omit<
   ConfigType<typeof broadcastConfig>,
-  'databaseUrl' | 'chainNetworks' | 'nativeSweepsEnabled' | 'custodyMode'
+  | 'databaseUrl'
+  | 'chainNetworks'
+  | 'nativeSweepsEnabled'
+  | 'nativeWithdrawalsEnabled'
+  | 'custodyMode'
 > & {
   chainNetworks?: ConfigType<typeof broadcastConfig>['chainNetworks'];
   nativeSweepsEnabled?: boolean;
+  nativeWithdrawalsEnabled?: boolean;
   custodyMode?: boolean;
 };

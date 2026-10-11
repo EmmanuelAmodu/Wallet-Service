@@ -10,6 +10,10 @@ import { ExchangeCustomersService } from '../apps/wallet/src/customers/customers
 import { ExchangeMessagingService } from '../apps/wallet/src/exchange-messaging/exchange-messaging.service.js';
 import { CustodyExecutionService } from '../apps/wallet/src/execution/execution.service.js';
 import { WalletWorkflowService } from '../apps/wallet/src/messaging/wallet-workflow.service.js';
+import {
+  WithdrawalsService,
+  withdrawalRequestSchema,
+} from '../apps/wallet/src/withdrawals/withdrawals.service.js';
 import { TransactionsService } from '../apps/wallet/src/transactions/transactions.service.js';
 import { LedgerClient } from '../apps/wallet/src/ledger/ledger-client.service.js';
 import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
@@ -237,6 +241,7 @@ before(async () => {
     new CustodySigningPolicy(
       {
         enabled: true,
+        withdrawalsEnabled: true,
         domainId: settings.domainId,
         resetEpoch: auth.resetEpoch,
         authorityPublicKey: authority.publicKey,
@@ -267,7 +272,7 @@ before(async () => {
   await ledgerAcknowledgements();
   await db.assetConfiguration.updateMany({
     where: { domain_id: settings.domainId, standard: 'native' },
-    data: { sweep_enabled: true },
+    data: { sweep_enabled: true, withdrawal_enabled: true },
   });
 });
 after(async () => {
@@ -526,7 +531,7 @@ test(
     await sweep.handle(committed);
     assert.equal(
       (await sweepDb.sweepOperation.findUniqueOrThrow({ where: { id: f.plan.operationId } })).state,
-      'confirmed',
+      'settled',
     );
   },
 );
@@ -940,5 +945,672 @@ test(
     );
     await f.service.handle(reversed);
     assert.equal((await f.execution()).reversed, false);
+  },
+);
+
+let hotNonce = 20n;
+
+async function withdrawalFixture() {
+  await db.custodyDomain.update({ where: { id: settings.domainId }, data: { status: 'active' } });
+  const f = await fixture();
+  await f.sign();
+  await f.settle();
+  const rpc = new FakeRpc();
+  rpc.nonce = hotNonce++;
+  const executionSettings = {
+    enabled: true,
+    withdrawalsEnabled: true,
+    authorityPrivateKey: authority.privateKey,
+    signerPublicKey: attestor.publicKey,
+    pollIntervalMs: 1000,
+  };
+  const withdrawals = new WithdrawalsService(
+    db,
+    custody,
+    exchange,
+    auth,
+    config,
+    executionSettings,
+  );
+  const service = new CustodyExecutionService(db, custody, rpc, config, executionSettings, auth);
+  const request = {
+    asset,
+    destination: '0x' + 'aa'.repeat(20),
+    amount: '10000000000000000',
+    idempotencyKey: randomUUID(),
+  };
+  const response = async (id: string, type: string, queue: string = QUEUES.wallet) =>
+    messageSchema.parse(
+      (
+        await db.outbox.findFirstOrThrow({
+          where: {
+            queue,
+            payload: { path: ['operationId'], equals: id },
+            AND: { payload: { path: ['type'], equals: type } },
+          },
+          orderBy: { created_at: 'desc' },
+        })
+      ).payload,
+    );
+  const reserve = async (input = request) => {
+    const w = await withdrawals.request(f.customerId, input);
+    const event = await response(w.id, 'withdrawal.reserve.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in event);
+    await new ReservationsService(ledger, new JournalService(new AccountsService()), auth).handle(
+      event,
+    );
+    const result = exchangeEventSchema.parse(
+      (
+        await ledger.outbox.findFirstOrThrow({
+          where: {
+            queue: QUEUES.wallet,
+            payload: { path: ['operationId'], equals: w.id },
+            AND: { payload: { path: ['type'], string_contains: 'withdrawal.reserve' } },
+          },
+          orderBy: { created_at: 'desc' },
+        })
+      ).payload,
+    );
+    await withdrawals.handle(result);
+    await exchange.handle(result);
+    return await withdrawals.get(f.customerId, w.id);
+  };
+  const prepare = async (id: string) => {
+    await withdrawals.repairDue();
+    await service.handle(await response(id, 'withdrawal.plan.requested.v1'));
+    const result = await response(id, 'withdrawal.plan.prepared.v1');
+    await withdrawals.handle(result);
+    return await response(id, 'withdrawal.execute.requested.v1');
+  };
+  const authorize = async (id: string) => {
+    await service.handle(await prepare(id));
+    const event = await response(id, 'withdrawal.execute.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in event);
+    await settlements.handle(event);
+    const action = await response(id, 'transaction.custody.sign', QUEUES.signer);
+    assert.equal(action.type, 'transaction.custody.sign');
+    rpc.request = action.request;
+    return action;
+  };
+  const sign = async (id: string) => {
+    const result = signer.execute(await authorize(id));
+    assert.equal(result.type, 'transaction.custody.signed');
+    rpc.signed = result.signed;
+    await service.handle(result);
+    return result;
+  };
+  const settle = async (id: string) => {
+    const w = await db.withdrawal.findUniqueOrThrow({ where: { id } });
+    rpc.included = true;
+    await service.reconcile(w.attempt_id!);
+    const event = await response(id, 'settlement.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in event);
+    await settlements.handle(event);
+    const committed = exchangeEventSchema.parse(
+      (
+        await ledger.outbox.findFirstOrThrow({
+          where: {
+            queue: QUEUES.wallet,
+            payload: { path: ['operationId'], equals: id },
+            AND: { payload: { path: ['type'], equals: 'settlement.committed.v1' } },
+          },
+          orderBy: { created_at: 'desc' },
+        })
+      ).payload,
+    );
+    await service.handle(committed);
+    await withdrawals.handle(committed);
+    await withdrawals.handle(await response(id, 'execution.attempt.updated.v1'));
+  };
+  const release = async (id: string) => {
+    const event = await response(id, 'reservation.release.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in event);
+    await new ReservationsService(ledger, new JournalService(new AccountsService()), auth).handle(
+      event,
+    );
+    const released = exchangeEventSchema.parse(
+      (
+        await ledger.outbox.findFirstOrThrow({
+          where: {
+            queue: QUEUES.wallet,
+            payload: { path: ['operationId'], equals: id },
+            AND: { payload: { path: ['type'], equals: 'reservation.released.v1' } },
+          },
+          orderBy: { created_at: 'desc' },
+        })
+      ).payload,
+    );
+    await withdrawals.handle(released);
+  };
+  return {
+    ...f,
+    rpc,
+    service,
+    withdrawals,
+    request,
+    response,
+    reserve,
+    prepare,
+    authorize,
+    sign,
+    settle,
+    release,
+  };
+}
+
+test(
+  'native withdrawal reserves once, pays exact principal from hot0 and settles one customer obligation',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.reserve();
+    assert.equal(w.state, 'queued');
+    const duplicate = await f.withdrawals.request(f.customerId, f.request);
+    assert.equal(duplicate.id, w.id);
+    await assert.rejects(
+      () => f.withdrawals.request(f.customerId, { ...f.request, amount: '20000000000000000' }),
+      /Idempotency/,
+    );
+    await assert.rejects(() => f.withdrawals.get(randomUUID(), w.id), /not found/);
+    await assert.rejects(
+      () =>
+        f.withdrawals.request(f.customerId, {
+          ...f.request,
+          idempotencyKey: randomUUID(),
+          destination: f.source.address!,
+        }),
+      /Exchange-owned/,
+    );
+    const result = await f.sign(w.id);
+    assert.equal(f.rpc.request!.wallet.account, 0);
+    assert.equal(f.rpc.request!.transaction.chain, 'ethereum');
+    if (f.rpc.request!.transaction.chain === 'ethereum')
+      assert.equal(f.rpc.request!.transaction.amount, f.request.amount);
+    assert.equal(result.type, 'transaction.custody.signed');
+    await assert.rejects(() => f.withdrawals.cancel(f.customerId, w.id), /Authorized/);
+    await f.settle(w.id);
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'settled');
+    assert.equal(await ledger.withdrawalReservation.count({ where: { operation_id: w.id } }), 1);
+    assert.equal(
+      await ledger.journalBatch.count({ where: { operation_id: w.id, kind: 'settlement' } }),
+      1,
+    );
+    assert.ok(
+      (await db.custodyExecution.findUniqueOrThrow({ where: { operation_id: w.id } })).retired_at,
+    );
+    const balances = await registry.balances(settings.domainId, f.customerId);
+    assert.equal(balances.balances[0].available, String(10n ** 18n - BigInt(f.request.amount)));
+    await f.service.reconcile(
+      (await db.withdrawal.findUniqueOrThrow({ where: { id: w.id } })).attempt_id!,
+    );
+    assert.equal(
+      await ledger.journalBatch.count({ where: { operation_id: w.id, kind: 'settlement' } }),
+      1,
+    );
+  },
+);
+
+test(
+  'withdrawal backlog retains a customer hold for low hot liquidity and cancellation closes unsigned execution',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.reserve();
+    f.rpc.balance = 0n;
+    await f.withdrawals.repairDue();
+    await f.service.handle(await f.response(w.id, 'withdrawal.plan.requested.v1'));
+    await f.withdrawals.handle(await f.response(w.id, 'execution.attempt.updated.v1'));
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'waiting_liquidity');
+    assert.equal(
+      await db.outbox.count({
+        where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: w.id } },
+      }),
+      0,
+    );
+    assert.equal(
+      (await ledger.withdrawalReservation.findUniqueOrThrow({ where: { operation_id: w.id } }))
+        .state,
+      'held',
+    );
+    await f.withdrawals.cancel(f.customerId, w.id);
+    await f.release(w.id);
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'cancelled');
+    await f.service.handle(await f.response(w.id, 'withdrawal.plan.requested.v1'));
+    assert.equal(
+      await db.outbox.count({
+        where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: w.id } },
+      }),
+      0,
+    );
+  },
+);
+
+test(
+  'cancellation before reservation result delivery recovers the original hold and releases it once',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.withdrawals.request(f.customerId, f.request);
+    await f.withdrawals.cancel(f.customerId, w.id);
+    const event = await f.response(w.id, 'withdrawal.reserve.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in event);
+    await new ReservationsService(ledger, new JournalService(new AccountsService()), auth).handle(
+      event,
+    );
+    const result = exchangeEventSchema.parse(
+      (
+        await ledger.outbox.findFirstOrThrow({
+          where: { queue: QUEUES.wallet, payload: { path: ['operationId'], equals: w.id } },
+        })
+      ).payload,
+    );
+    await f.withdrawals.handle(result);
+    await f.release(w.id);
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'cancelled');
+    assert.equal(
+      (await ledger.withdrawalReservation.findUniqueOrThrow({ where: { operation_id: w.id } }))
+        .state,
+      'released',
+    );
+  },
+);
+
+test(
+  'withdrawal failed on chain releases principal and records actual exchange fee without duplicate payout',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.reserve();
+    await f.sign(w.id);
+    f.rpc.failed = true;
+    await f.settle(w.id);
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'failed');
+    const balance = await registry.balances(settings.domainId, f.customerId);
+    assert.equal(balance.balances[0].available, String(10n ** 18n));
+    const batches = await ledger.journalBatch.findMany({
+      where: { operation_id: w.id, kind: 'settlement' },
+      include: { entries: true },
+    });
+    assert.equal(batches.length, 1);
+    assert.ok(batches[0].entries.length > 0);
+  },
+);
+
+test(
+  'withdrawal post-settlement reorg restores its original obligation and never queues replacement bytes',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.reserve();
+    await f.sign(w.id);
+    await f.settle(w.id);
+    const execution = await db.custodyExecution.findUniqueOrThrow({
+      where: { operation_id: w.id },
+    });
+    f.rpc.canonicalBlock = replacementBlock;
+    await f.service.reconcile(execution.transaction_id);
+    await f.withdrawals.handle(await f.response(w.id, 'execution.attempt.updated.v1'));
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'reconciliation_required');
+    const reversal = await f.response(w.id, 'settlement.reverted.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in reversal);
+    await settlements.handle(reversal);
+    const result = exchangeEventSchema.parse(
+      (
+        await ledger.outbox.findFirstOrThrow({
+          where: {
+            queue: QUEUES.wallet,
+            payload: { path: ['operationId'], equals: w.id },
+            AND: { payload: { path: ['type'], equals: 'settlement.reversed.v1' } },
+          },
+        })
+      ).payload,
+    );
+    await f.service.handle(result);
+    await f.withdrawals.handle(result);
+    assert.equal(
+      (await ledger.withdrawalReservation.findUniqueOrThrow({ where: { operation_id: w.id } }))
+        .state,
+      'held',
+    );
+    assert.equal(
+      await db.outbox.count({
+        where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: w.id } },
+      }),
+      1,
+    );
+    assert.equal(
+      (await db.custodyDomain.findUniqueOrThrow({ where: { id: settings.domainId } })).status,
+      'paused',
+    );
+    // Resolve the fixture's canonical inclusion so subsequent tests have a free hot fence.
+    f.rpc.block = replacementBlock;
+    await f.service.reconcile(execution.transaction_id);
+    await f.settle(w.id);
+  },
+);
+
+test('withdrawal input forbids customer-selected sources, fees, nonces and UTXOs', () => {
+  for (const field of ['sourceWalletId', 'path', 'nonce', 'utxos', 'customerFee'])
+    assert.equal(
+      withdrawalRequestSchema.safeParse({
+        asset,
+        destination: '0x' + 'aa'.repeat(20),
+        amount: '1',
+        idempotencyKey: 'x',
+        [field]: 'unexpected',
+      }).success,
+      false,
+    );
+});
+
+test(
+  'concurrent customer withdrawals cannot over-reserve and the hot scheduler admits only one intent',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const body = { ...f.request, amount: '600000000000000000' };
+    const [a, duplicate, b] = await Promise.all([
+      f.withdrawals.request(f.customerId, body),
+      f.withdrawals.request(f.customerId, body),
+      f.withdrawals.request(f.customerId, { ...body, idempotencyKey: randomUUID() }),
+    ]);
+    assert.equal(a.id, duplicate.id);
+    const reservations = new ReservationsService(
+      ledger,
+      new JournalService(new AccountsService()),
+      auth,
+    );
+    for (const w of [a, b]) {
+      const intent = await f.response(w.id, 'withdrawal.reserve.requested.v1', QUEUES.ledger);
+      assert.ok('schemaVersion' in intent);
+      await reservations.handle(intent);
+      const result = exchangeEventSchema.parse(
+        (
+          await ledger.outbox.findFirstOrThrow({
+            where: { queue: QUEUES.wallet, payload: { path: ['operationId'], equals: w.id } },
+          })
+        ).payload,
+      );
+      await f.withdrawals.handle(result);
+    }
+    assert.deepEqual(
+      [
+        (await f.withdrawals.get(f.customerId, a.id)).state,
+        (await f.withdrawals.get(f.customerId, b.id)).state,
+      ],
+      ['queued', 'rejected'],
+    );
+    assert.equal(
+      (await registry.balances(settings.domainId, f.customerId)).balances[0].reserved,
+      body.amount,
+    );
+    // A separate customer's payable work queues behind the first hot intent.
+    const other = await fixture();
+    const queued = await f.withdrawals.request(other.customerId, {
+      ...f.request,
+      idempotencyKey: randomUUID(),
+    });
+    const intent = await f.response(queued.id, 'withdrawal.reserve.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in intent);
+    await reservations.handle(intent);
+    const result = exchangeEventSchema.parse(
+      (
+        await ledger.outbox.findFirstOrThrow({
+          where: { queue: QUEUES.wallet, payload: { path: ['operationId'], equals: queued.id } },
+        })
+      ).payload,
+    );
+    await f.withdrawals.handle(result);
+    await Promise.all([f.withdrawals.repairDue(), f.withdrawals.repairDue()]);
+    assert.equal(
+      await db.withdrawal.count({
+        where: { hot_wallet_id: f.source.hot_wallet_id!, state: 'planning' },
+      }),
+      1,
+    );
+    for (const w of [a, queued]) {
+      await f.withdrawals.cancel(w.id === a.id ? f.customerId : other.customerId, w.id);
+      await f.release(w.id);
+    }
+  },
+);
+
+test(
+  'lost reservation result repair republishes the original immutable quote without creating another hold',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.withdrawals.request(f.customerId, f.request);
+    const first = await f.response(w.id, 'withdrawal.reserve.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in first);
+    const reservations = new ReservationsService(
+      ledger,
+      new JournalService(new AccountsService()),
+      auth,
+    );
+    await reservations.handle(first);
+    await db.withdrawal.update({ where: { id: w.id }, data: { next_check_at: new Date(0) } });
+    await f.withdrawals.repairDue();
+    const replay = await f.response(w.id, 'withdrawal.reserve.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in replay);
+    assert.notEqual(replay.eventId, first.eventId);
+    assert.deepEqual(replay.data, first.data);
+    await reservations.handle(replay);
+    assert.equal(await ledger.withdrawalReservation.count({ where: { operation_id: w.id } }), 1);
+    assert.equal(
+      await ledger.journalBatch.count({
+        where: { operation_id: w.id, kind: 'withdrawal.reserve' },
+      }),
+      1,
+    );
+    const deliveries = await ledger.outbox.findMany({
+      where: { queue: QUEUES.wallet, payload: { path: ['operationId'], equals: w.id } },
+    });
+    assert.equal(deliveries.length, 2);
+    await f.withdrawals.handle(messageSchema.parse(deliveries.at(-1)!.payload));
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'queued');
+    await f.withdrawals.cancel(f.customerId, w.id);
+    await f.release(w.id);
+  },
+);
+
+test(
+  'customer freeze between preparation and authorization prevents signing and safely closes the hold',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.reserve();
+    const execute = await f.prepare(w.id);
+    await db.exchangeCustomer.update({
+      where: { customer_id: f.customerId },
+      data: { state: 'frozen' },
+    });
+    await f.service.handle(execute);
+    await f.withdrawals.handle(await f.response(w.id, 'withdrawal.plan.deferred.v1'));
+    await f.release(w.id);
+    assert.equal(
+      await db.outbox.count({
+        where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: w.id } },
+      }),
+      0,
+    );
+    assert.equal(await ledger.exchangeOperation.count({ where: { id: w.id } }), 0);
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'cancelled');
+  },
+);
+
+test(
+  'withdrawal cancellation racing authorization either cancels unsigned work or retains the authorized hold',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.reserve();
+    const execute = await f.prepare(w.id);
+    const outcomes = await Promise.allSettled([
+      f.service.handle(execute),
+      f.withdrawals.cancel(f.customerId, w.id),
+    ]);
+    const execution = await db.custodyExecution.findUniqueOrThrow({
+      where: { operation_id: w.id },
+    });
+    if (execution.authorization) {
+      assert.equal(outcomes[1].status, 'rejected');
+      assert.equal(execution.retired_at, null);
+      const action = await f.response(w.id, 'transaction.custody.sign', QUEUES.signer);
+      assert.equal(action.type, 'transaction.custody.sign');
+      f.rpc.request = action.request;
+      const result = signer.execute(action);
+      assert.equal(result.type, 'transaction.custody.signed');
+      f.rpc.signed = result.signed;
+      const intent = await f.response(w.id, 'withdrawal.execute.requested.v1', QUEUES.ledger);
+      assert.ok('schemaVersion' in intent);
+      await settlements.handle(intent);
+      await f.service.handle(result);
+      await f.settle(w.id);
+    } else {
+      assert.equal(outcomes[1].status, 'fulfilled');
+      assert.ok(execution.retired_at);
+      await f.release(w.id);
+      assert.equal(
+        await db.outbox.count({
+          where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: w.id } },
+        }),
+        0,
+      );
+    }
+  },
+);
+
+test(
+  'withdrawal recovery republishes lost preparation and terminal proof without changing the attempt or bytes',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const w = await f.reserve();
+    await f.withdrawals.repairDue();
+    await f.service.handle(await f.response(w.id, 'withdrawal.plan.requested.v1'));
+    await db.withdrawal.update({ where: { id: w.id }, data: { next_check_at: new Date(0) } });
+    await f.withdrawals.repairDue();
+    await f.withdrawals.handle(await f.response(w.id, 'withdrawal.plan.prepared.v1'));
+    await f.service.handle(await f.response(w.id, 'withdrawal.execute.requested.v1'));
+    const intent = await f.response(w.id, 'withdrawal.execute.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in intent);
+    await settlements.handle(intent);
+    const action = await f.response(w.id, 'transaction.custody.sign', QUEUES.signer);
+    assert.equal(action.type, 'transaction.custody.sign');
+    f.rpc.request = action.request;
+    const signed = signer.execute(action);
+    assert.equal(signed.type, 'transaction.custody.signed');
+    f.rpc.signed = signed.signed;
+    await f.service.handle(signed);
+    const execution = await db.custodyExecution.findUniqueOrThrow({
+      where: { operation_id: w.id },
+    });
+    f.rpc.included = true;
+    await f.service.reconcile(execution.transaction_id);
+    const settlement = await f.response(w.id, 'settlement.requested.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in settlement);
+    await settlements.handle(settlement);
+    const committed = exchangeEventSchema.parse(
+      (
+        await ledger.outbox.findFirstOrThrow({
+          where: {
+            queue: QUEUES.wallet,
+            payload: { path: ['operationId'], equals: w.id },
+            AND: { payload: { path: ['type'], equals: 'settlement.committed.v1' } },
+          },
+        })
+      ).payload,
+    );
+    await f.service.handle(committed);
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'executing');
+    await db.withdrawal.update({ where: { id: w.id }, data: { next_check_at: new Date(0) } });
+    await f.withdrawals.repairDue();
+    await f.withdrawals.handle(await f.response(w.id, 'execution.attempt.updated.v1'));
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'settled');
+    assert.equal(
+      await db.outbox.count({
+        where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: w.id } },
+      }),
+      1,
+    );
+  },
+);
+
+test(
+  'destination that becomes exchange-owned after acceptance is blocked before hot authorization',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const body = { ...f.request, destination: '0x' + 'be'.repeat(20) };
+    const w = await f.reserve(body);
+    const execute = await f.prepare(w.id);
+    await db.wallet.create({
+      data: {
+        id: randomUUID(),
+        external_id: randomUUID(),
+        chain: 'ethereum',
+        network: '11155111',
+        seed_id: 'legacy-ownership-fixture',
+        account: 120,
+        path: "m/44'/60'/120'/0/0",
+        address: body.destination.toUpperCase().replace('0X', '0x'),
+        status: 'ready',
+      },
+    });
+    await f.service.handle(execute);
+    await f.withdrawals.handle(await f.response(w.id, 'withdrawal.plan.deferred.v1'));
+    await f.release(w.id);
+    assert.equal(
+      await db.outbox.count({
+        where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: w.id } },
+      }),
+      0,
+    );
+    assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'cancelled');
+  },
+);
+
+test(
+  're-included older hot withdrawal gets fresh terminal proof while a newer authorized hot fence stays intact',
+  { skip: !enabled },
+  async () => {
+    const first = await withdrawalFixture();
+    const a = await first.reserve();
+    await first.sign(a.id);
+    await first.settle(a.id);
+    const next = await withdrawalFixture();
+    const b = await next.reserve();
+    const action = await next.authorize(b.id);
+    const old = await db.custodyExecution.findUniqueOrThrow({ where: { operation_id: a.id } }),
+      newer = await db.custodyExecution.findUniqueOrThrow({ where: { operation_id: b.id } });
+    first.rpc.canonicalBlock = replacementBlock;
+    await first.service.reconcile(old.transaction_id);
+    const reversal = await first.response(a.id, 'settlement.reverted.v1', QUEUES.ledger);
+    assert.ok('schemaVersion' in reversal);
+    await settlements.handle(reversal);
+    first.rpc.block = replacementBlock;
+    await first.service.reconcile(old.transaction_id);
+    await first.settle(a.id);
+    assert.equal((await first.withdrawals.get(first.customerId, a.id)).state, 'settled');
+    const recovered = await db.custodyExecution.findUniqueOrThrow({
+      where: { operation_id: a.id },
+    });
+    assert.equal(recovered.terminal_proof_revision, 3);
+    assert.equal(recovered.ledger_ack_revision, 3);
+    assert.equal(
+      (await db.custodyExecution.findUniqueOrThrow({ where: { operation_id: b.id } })).retired_at,
+      null,
+    );
+    assert.equal(
+      await db.executionResourceClaim.count({ where: { execution_id: newer.id, active: true } }),
+      1,
+    );
+    // An already authorized delivery may have signed before the domain pause; settle that same attempt.
+    const signed = signer.execute(action);
+    assert.equal(signed.type, 'transaction.custody.signed');
+    next.rpc.signed = signed.signed;
+    await next.service.handle(signed);
+    await next.settle(b.id);
   },
 );

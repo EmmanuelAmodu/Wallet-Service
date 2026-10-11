@@ -83,4 +83,4 @@ This is a development stack with local database credentials. Configure public in
 
 Refresh tokens, logout/session revocation, password reset, verified email, and MFA are not implemented. Current tokens expire naturally; coordinated reset invalidates all tokens from the old epoch. Deploy shared edge/distributed rate limits before running multiple public authentication replicas. Key rotation presently requires coordinated issuer/verifier configuration.
 
-JWT access does not make deposit addresses ready or enable withdrawals. Phase 1 custody/bootstrap, external QuickNode certification, and Phase 4/5 execution controls remain prerequisites in [the exchange checklist](exchange-wallet-todo.md).
+JWT access does not make deposit addresses ready or enable withdrawals. Deployment custody reset/bootstrap, external QuickNode/RPC certification and deliberate native asset/execution enablement remain prerequisites. Phase 5 withdrawal routes use the same owner-scoped JWT boundary; see [the native withdrawal API](exchange-wallet-phase5.md). These rollout gates are tracked in [the exchange checklist](exchange-wallet-todo.md).

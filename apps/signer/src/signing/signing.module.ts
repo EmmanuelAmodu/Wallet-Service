@@ -22,7 +22,9 @@ import { queueConfig } from '../../../../packages/queue/src/queue.config.js';
       ) =>
         new CustodySigningPolicy(
           {
-            enabled: config.nativeSweepsEnabled,
+            enabled: config.nativeSweepsEnabled || config.nativeWithdrawalsEnabled,
+            sweepsEnabled: config.nativeSweepsEnabled,
+            withdrawalsEnabled: config.nativeWithdrawalsEnabled,
             domainId: config.domainId,
             resetEpoch: queue.resetEpoch,
             authorityPublicKey: config.executionAuthorityPublicKey,

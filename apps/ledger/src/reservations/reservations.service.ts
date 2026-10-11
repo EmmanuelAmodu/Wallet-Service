@@ -79,7 +79,7 @@ export class ReservationsService {
     tx: LedgerPrisma.TransactionClient,
     event: ReserveEvent,
     reservation: WithdrawalReservation,
-    redelivery = '',
+    redelivery = `:${event.eventId}`,
   ) {
     if (reservation.state === 'rejected') {
       const rejected = reservation.request as unknown as {
@@ -247,7 +247,7 @@ export class ReservationsService {
             ledgerBatchId: reservation.release_batch_id!,
           },
         },
-        `reservation:${reservation.id}:released`,
+        `reservation:${reservation.id}:released:${event.eventId}`,
       );
       return;
     }
@@ -283,7 +283,7 @@ export class ReservationsService {
               'Recorded execution intents retain their reservation until explicit nonpayment proof; delayed signing observations cannot authorize release',
           },
         },
-        `reservation:${reservation.id}:release-rejected:${event.revision}`,
+        `reservation:${reservation.id}:release-rejected:${event.revision}:${event.eventId}`,
       );
       return;
     }
@@ -315,7 +315,7 @@ export class ReservationsService {
           ledgerBatchId: batch.id,
         },
       },
-      `reservation:${reservation.id}:released`,
+      `reservation:${reservation.id}:released:${event.eventId}`,
     );
   }
 

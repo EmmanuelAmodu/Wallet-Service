@@ -74,6 +74,58 @@ export const executionEventSchemas = [
         .strict(),
     })
     .strict(),
+  base
+    .extend({
+      type: z.literal('withdrawal.plan.requested.v1'),
+      data: z
+        .object({
+          sourceWalletId: z.uuid(),
+          destinationWalletId: z.uuid(),
+          asset: nativeExecutionAssetSchema,
+          sourceRegistryRevision: z.number().int().positive(),
+          hotRegistryRevision: z.number().int().positive(),
+          generation: z.number().int().nonnegative(),
+          destination: z.string().min(1).max(256),
+          amount: executionUnitsSchema.refine((n) => BigInt(n) > 0n),
+          reservationId: z.uuid(),
+        })
+        .strict(),
+    })
+    .strict(),
+  base
+    .extend({
+      type: z.literal('withdrawal.plan.prepared.v1'),
+      data: z
+        .object({
+          sourceWalletId: z.uuid(),
+          destinationWalletId: z.uuid(),
+          amount: z
+            .object({
+              asset: nativeExecutionAssetSchema,
+              amount: executionUnitsSchema.refine((n) => BigInt(n) > 0n),
+            })
+            .strict(),
+          preparationDigest: digest,
+          maxFeeUnits: executionUnitsSchema,
+          expiresAt: z.iso.datetime({ offset: true }),
+        })
+        .strict(),
+    })
+    .strict(),
+  base
+    .extend({
+      type: z.literal('withdrawal.plan.deferred.v1'),
+      data: z
+        .object({
+          code: z.string().min(1).max(128),
+          reason: z.string().min(1).max(500),
+          retryAfter: z.iso.datetime({ offset: true }),
+          preparationDigest: digest.optional(),
+          terminalSafe: z.literal(true).optional(),
+        })
+        .strict(),
+    })
+    .strict(),
 ] as const;
 const binding = {
   transactionId: z.uuid(),

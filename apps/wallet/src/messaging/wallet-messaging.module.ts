@@ -8,6 +8,7 @@ import { ExchangeMessagingModule } from '../exchange-messaging/exchange-messagin
 import { CustodyModule } from '../custody/custody.module.js';
 import { CustomersModule } from '../customers/customers.module.js';
 import { ExecutionModule } from '../execution/execution.module.js';
+import { WithdrawalsModule } from '../withdrawals/withdrawals.module.js';
 @Module({
   imports: [
     MessagingModule,
@@ -17,6 +18,7 @@ import { ExecutionModule } from '../execution/execution.module.js';
     CustodyModule,
     CustomersModule,
     ExecutionModule,
+    WithdrawalsModule,
   ],
   providers: [WalletProcessor, WalletWorkflowService],
 })

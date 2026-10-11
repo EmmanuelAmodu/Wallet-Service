@@ -107,6 +107,8 @@ Add these feature modules under `apps/wallet/src`:
 
 Reuse existing `transactions/` preparation and execution behind versioned queue commands. Sweep must not import Wallet application internals. One logical withdrawal or sweep may have several execution attempts; an attempt is not another customer payment.
 
+**Phase 4 native implementation (11 October):** Wallet now owns an `execution/` module and authoritative source/resource fences; shared native adapters serve Wallet and Broadcast. The initial native sweep implementation conservatively permits one immutable attempt per operation. Safely unsigned retries use a linked superseding operation and residual sweeps use a new operation; signed/uncertain replacement is unavailable. Multi-attempt withdrawal replacement/hold handling remains Phase 5. Wallet owns native settlement/reversal revisions; Listener classifies and audits the matching persisted attempt. Independent Ed25519 spending authorization and Signer result attestation supplement queue HMAC. See [Phase 4 notes](exchange-wallet-phase4.md).
+
 ### User application
 
 Own identity, email/password registration/login, password verification, token issuance, and its private Prisma database. Atomically publish `user.registered.v1` with only `userId`; Wallet owns financial identity provisioning and requests Ledger registration. User exposes no custody API or wallet provisioning state. Login issues short-lived RS256 tokens; Wallet verifies the public key locally and derives the customer from the subject. Keep the private token key exclusively in User, and separate it from the custody seed. Refresh/session revocation, email verification, password recovery, and MFA remain later work. See [authentication contract](user-authentication.md).
@@ -245,8 +247,8 @@ Fee-on-transfer, rebasing, frozen, delegated, or Token-2022 extension assets req
 - `POST /v1/me/deposit-addresses`: idempotent address assignment for an enabled chain/network.
 - `GET /v1/me/balances`: pending, available, reserved, and frozen exchange balances.
 - `GET /v1/me/deposits`: deposit status, credit identity, and history.
-- Planned Phase 5 `POST /v1/me/withdrawals`: canonical asset/network, destination, amount, accepted fee quote, and `Idempotency-Key`; customer identity comes from the verified JWT.
-- Planned Phase 5 `GET /v1/me/withdrawals/:id`: owner-scoped logical payment status and permitted attempt details.
+- Implemented Phase 5 `POST /v1/me/withdrawals`: native asset/network, destination, amount and body `idempotencyKey`; customer identity comes from the verified JWT. Wallet accepts/persists the pinned zero development fee and five-minute reservation quote.
+- Implemented Phase 5 `GET /v1/me/withdrawals/:id`: owner-scoped logical payment status and permitted attempt details.
 - Internal/admin paths under `/internal`: bootstrap, management funding, sweep retry, reconciliation, and incident resolution; use service credentials and prefer queued actions.
 
 Initially reject destinations registered as exchange-owned hot, management, or customer deposit addresses. A future internal-transfer API can atomically debit the sender liability and credit the recipient without an on-chain withdrawal or another deposit credit. Revalidate ownership against the registry at execution and in signer policy to cover registry changes after request acceptance.
@@ -382,6 +384,8 @@ Implement durable sweep/funding operations and immutable execution attempts, sou
 Exit: eligible finalized native deposits are swept to hot0; deposits arriving during a sweep create later work; fees and dust follow policy; crashes/retries/uncertain submission cannot create conflicting execution or duplicate custody settlement.
 
 ### Phase 5 — Hot-wallet withdrawals
+
+Local implementation is documented in [Phase 5 notes](exchange-wallet-phase5.md). The initial native delivery uses one immutable attempt per logical hold, independently authorized hot0 signing, exact principal and same-byte retries. Automatic signed replacements/blockhash refresh remain unavailable; safely unsigned closure releases the original hold and a further payout needs a new customer request. This conservative restriction narrows replacement scope while preserving cancellation/reorg safety. Ledger execution intent is published atomically with spending authorization, after preparation and final authority/resource checks. Live deployment/provider/chain gates remain open.
 
 Implement customer withdrawal requests and accepted fee quotes, authenticated ownership validation, Ledger reservation/result/release saga, hot liquidity scheduling, immutable attempts, automatic submission, settlement, and safe cancellation/reorg handling. Restrict generic customer-wallet transfers and reject exchange-owned destinations until a separate internal-transfer flow exists.
 

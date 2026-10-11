@@ -16,6 +16,12 @@ import { AuthenticationService } from '../apps/user/src/auth/authentication.serv
 import { LoginThrottleGuard } from '../apps/user/src/auth/login-throttle.guard.js';
 import { userConfig, UserConfig } from '../apps/user/src/config/user.config.js';
 import { WalletPrismaService } from '../apps/wallet/src/prisma/prisma.service.js';
+import { NotFoundException } from '@nestjs/common';
+import { WithdrawalsController } from '../apps/wallet/src/withdrawals/withdrawals.controller.js';
+import {
+  WithdrawalsService,
+  WithdrawalRequest,
+} from '../apps/wallet/src/withdrawals/withdrawals.service.js';
 import { CustomerApiController } from '../apps/wallet/src/customers/customer-api.controller.js';
 import { ExchangeCustomersController } from '../apps/wallet/src/customers/customers.controller.js';
 import { ExchangeCustomersService } from '../apps/wallet/src/customers/customers.service.js';
@@ -127,9 +133,31 @@ after(async () => {
 })
 class UserApiTestModule {}
 
+const withdrawalApiRows = new Map<string, { id: string; customerId: string; state: string }>();
+const withdrawalApiFixture = {
+  request: async (customerId: string, _input: WithdrawalRequest) => {
+    const row = { id: randomUUID(), customerId, state: 'reserving' };
+    withdrawalApiRows.set(row.id, row);
+    return row;
+  },
+  get: async (customerId: string, id: string) => {
+    const row = withdrawalApiRows.get(id);
+    if (row?.customerId !== customerId) throw new NotFoundException();
+    return row;
+  },
+  list: async (customerId: string) => ({
+    items: [...withdrawalApiRows.values()].filter((row) => row.customerId === customerId),
+  }),
+  cancel: async (customerId: string, id: string) => {
+    const row = await withdrawalApiFixture.get(customerId, id);
+    return { ...row, state: 'cancelling' };
+  },
+};
+
 @Module({
-  controllers: [CustomerApiController, ExchangeCustomersController],
+  controllers: [CustomerApiController, ExchangeCustomersController, WithdrawalsController],
   providers: [
+    { provide: WithdrawalsService, useValue: withdrawalApiFixture },
     { provide: APP_GUARD, useClass: WalletAuthGuard },
     CustomerAuthGuard,
     ExchangeBackendGuard,
@@ -316,6 +344,57 @@ test(
           )
         ).status,
         400,
+      );
+      const payout = {
+        asset: { chain: 'ethereum', network: '11155111', assetId: 'token:ethereum:native' },
+        destination: '0x' + 'aa'.repeat(20),
+        amount: '1',
+        idempotencyKey: randomUUID(),
+      };
+      const requested = await request(walletUrl, '/v1/me/withdrawals', token.accessToken, payout);
+      assert.equal(requested.status, 201);
+      const withdrawal = await requested.json();
+      assert.equal(withdrawal.customerId, alice.userId);
+      for (const bearer of [undefined, 'e'.repeat(64), 'w'.repeat(64)])
+        assert.equal((await request(walletUrl, '/v1/me/withdrawals', bearer, payout)).status, 401);
+      assert.equal(
+        (
+          await request(walletUrl, '/v1/me/withdrawals', token.accessToken, {
+            ...payout,
+            customerId: bob.userId,
+          })
+        ).status,
+        400,
+      );
+      assert.equal(
+        (await request(walletUrl, `/v1/me/withdrawals/${withdrawal.id}`, bobToken.accessToken))
+          .status,
+        404,
+      );
+      assert.equal(
+        (
+          await request(
+            walletUrl,
+            `/v1/me/withdrawals/${withdrawal.id}/cancel`,
+            bobToken.accessToken,
+            {},
+          )
+        ).status,
+        404,
+      );
+      assert.equal(
+        (
+          await request(
+            walletUrl,
+            '/v1/me/withdrawals?customerId=' + alice.userId,
+            bobToken.accessToken,
+          )
+        ).status,
+        400,
+      );
+      assert.equal(
+        (await request(walletUrl, `/v1/me/withdrawals/${withdrawal.id}`, token.accessToken)).status,
+        200,
       );
       const docs = await (await request(walletUrl, '/docs-json')).json();
       assert.ok(Object.keys(docs.paths).every((path) => path.startsWith('/v1/me')));

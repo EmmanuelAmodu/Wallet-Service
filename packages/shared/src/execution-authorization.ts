@@ -30,42 +30,60 @@ const walletIdentity = {
   address: z.string().min(1).max(256),
   registryRevision: z.number().int().positive(),
 };
-export const executionAuthorizationClaimsSchema = z
-  .object({
-    version: z.literal(1),
-    purpose: z.literal('native_sweep'),
-    domainId: identity,
-    resetEpoch: identity,
-    seedId: z.string().min(1).max(64),
-    customerId: z.uuid(),
-    source: z
-      .object({
-        ...walletIdentity,
-        role: z.literal('customer_deposit'),
-        account: z.number().int().min(10).max(2147483647),
-      })
-      .strict(),
-    target: z
-      .object({
-        ...walletIdentity,
-        role: z.literal('hot'),
-        account: z.literal(0),
-        seedId: z.string().min(1).max(64),
-        domainId: identity,
-      })
-      .strict(),
-    asset: nativeExecutionAssetSchema,
-    policyVersion: z.literal('exchange-financial-v1'),
-    operationId: z.uuid(),
-    attemptId: z.uuid(),
-    requestDigest: digest,
-    preparationDigest: digest,
-    principalUnits: executionUnitsSchema.refine((n) => BigInt(n) > 0n),
-    maxFeeUnits: executionUnitsSchema,
-    expiresAt: z.iso.datetime({ offset: true }),
-    requestHash: digest,
-  })
-  .strict();
+const commonAuthorization = {
+  version: z.literal(1),
+  domainId: identity,
+  resetEpoch: identity,
+  seedId: z.string().min(1).max(64),
+  customerId: z.uuid(),
+  asset: nativeExecutionAssetSchema,
+  policyVersion: z.literal('exchange-financial-v1'),
+  operationId: z.uuid(),
+  attemptId: z.uuid(),
+  requestDigest: digest,
+  preparationDigest: digest,
+  principalUnits: executionUnitsSchema.refine((n) => BigInt(n) > 0n),
+  maxFeeUnits: executionUnitsSchema,
+  expiresAt: z.iso.datetime({ offset: true }),
+  requestHash: digest,
+};
+export const executionAuthorizationClaimsSchema = z.discriminatedUnion('purpose', [
+  z
+    .object({
+      ...commonAuthorization,
+      purpose: z.literal('native_sweep'),
+      source: z
+        .object({
+          ...walletIdentity,
+          role: z.literal('customer_deposit'),
+          account: z.number().int().min(10).max(2147483647),
+        })
+        .strict(),
+      target: z
+        .object({
+          ...walletIdentity,
+          role: z.literal('hot'),
+          account: z.literal(0),
+          seedId: z.string().min(1).max(64),
+          domainId: identity,
+        })
+        .strict(),
+    })
+    .strict(),
+  z
+    .object({
+      ...commonAuthorization,
+      purpose: z.literal('native_withdrawal'),
+      source: z
+        .object({ ...walletIdentity, role: z.literal('hot'), account: z.literal(0) })
+        .strict(),
+      target: z
+        .object({ role: z.literal('external'), address: z.string().min(1).max(256) })
+        .strict(),
+      reservationId: z.uuid(),
+    })
+    .strict(),
+]);
 export type ExecutionAuthorizationClaims = z.infer<typeof executionAuthorizationClaimsSchema>;
 export const signedExecutionAuthorizationSchema = z
   .object({

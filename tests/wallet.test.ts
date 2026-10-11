@@ -35,7 +35,7 @@ test('confirmation refresh is limited to attention and never resends signed byte
     signed: { raw: '0x1234', txHash: '0x' + 'ab'.repeat(32), encoding: 'hex' },
     broadcast_generation: 4,
     prepared: null,
-    wallet: { chain: 'ethereum', network: '11155111' },
+    wallet: { chain: 'ethereum', network: '11155111', custody_role: 'legacy' },
   };
   const transactionDb = {
     $queryRaw: async () => [],

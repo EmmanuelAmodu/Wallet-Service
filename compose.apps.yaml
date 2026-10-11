@@ -60,6 +60,7 @@ services:
       AUTH_TOKEN_ISSUER: ${AUTH_TOKEN_ISSUER:-exchange-user}
       AUTH_TOKEN_AUDIENCE: ${AUTH_TOKEN_AUDIENCE:-exchange-wallet}
       ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      ENABLE_NATIVE_WITHDRAWALS: ${ENABLE_NATIVE_WITHDRAWALS:-false}
       EXECUTION_RECONCILIATION_MS: ${EXECUTION_RECONCILIATION_MS:-30000}
       EXECUTION_AUTHORITY_PRIVATE_KEY_FILE: /run/secrets/execution-authority-private
       EXECUTION_SIGNER_PUBLIC_KEY_FILE: /run/secrets/execution-signer-public
@@ -89,6 +90,7 @@ services:
       SIGNER_SEED_FILE: /run/secrets/custody-seed
       EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
       ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      ENABLE_NATIVE_WITHDRAWALS: ${ENABLE_NATIVE_WITHDRAWALS:-false}
       EXECUTION_AUTHORITY_PUBLIC_KEY_FILE: /run/secrets/execution-authority-public
       EXECUTION_SIGNER_PRIVATE_KEY_FILE: /run/secrets/execution-signer-private
     secrets: [custody-seed, execution-authority-public, execution-signer-private]
@@ -102,6 +104,7 @@ services:
       BROADCAST_DATABASE_URL: postgresql://broadcast:broadcast_local_only@broadcast-postgres:5432/broadcast
       ALLOW_BROADCAST: ${ALLOW_BROADCAST:-false}
       ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      ENABLE_NATIVE_WITHDRAWALS: ${ENABLE_NATIVE_WITHDRAWALS:-false}
       EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
       EXECUTION_SIGNER_PUBLIC_KEY_FILE: /run/secrets/execution-signer-public
     secrets: [execution-signer-public]

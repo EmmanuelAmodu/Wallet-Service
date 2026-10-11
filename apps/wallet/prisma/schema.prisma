@@ -205,6 +205,7 @@ model CustodyExecution {
   revision            Int                      @default(0)
   settlement_revision Int                      @default(0)
   ledger_ack_revision Int                      @default(0)
+  terminal_proof_revision Int                   @default(0)
   ledger_batch_id     String?                  @db.Uuid
   inclusion           Json?
   reversed            Boolean                  @default(false)
@@ -371,4 +372,41 @@ model ExchangeDepositProjection {
 
   @@index([customer_id, deposit_id])
   @@map("exchange_deposit_projections")
+}
+
+// Wallet owns customer withdrawal intents and their reservation/execution saga.
+model Withdrawal {
+  id String @id @db.Uuid
+  customer_id String @db.Uuid
+  domain_id String
+  reset_epoch String
+  idempotency_key String
+  request_digest String
+  request Json
+  chain String
+  network String
+  asset_id String
+  destination String
+  principal_units String
+  customer_fee_units String @default("0")
+  policy_version String
+  hot_wallet_id String @db.Uuid
+  hot_registry_revision Int
+  reservation_id String? @unique @db.Uuid
+  attempt_id String? @unique @db.Uuid
+  state String
+  reason String?
+  cancel_requested Boolean @default(false)
+  reservation_revision Int @default(0)
+  execution_revision Int @default(0)
+  settlement_revision Int @default(0)
+  revision Int @default(1)
+  next_check_at DateTime @default(now()) @db.Timestamptz
+  transaction_hash String?
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+  @@unique([customer_id, idempotency_key])
+  @@index([state, next_check_at, id])
+  @@index([customer_id, created_at, id])
+  @@map("withdrawals")
 }

@@ -361,6 +361,7 @@ const withdrawalExecuteRequested = event(
       sourceWalletId: z.uuid(),
       destination: z.string().min(1).max(256),
       amount: assetAmountSchema,
+      preparationDigest: digest.optional(),
     })
     .strict(),
   executionIdentityFields,

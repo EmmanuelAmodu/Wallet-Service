@@ -58,7 +58,9 @@ before(async () => {
 });
 after(() => core.close());
 
-function action(chain: 'ethereum' | 'bitcoin' | 'solana'): CustodySignAction {
+function action(chain: 'ethereum' | 'bitcoin' | 'solana'): CustodySignAction & {
+  authorization: { claims: Extract<ExecutionAuthorizationClaims, { purpose: 'native_sweep' }> };
+} {
   const source = core.derive({ chain, seedId: 'test', account: 10 }),
     target = core.derive({ chain, seedId: 'test', account: 0 });
   const wallet = {
@@ -157,7 +159,7 @@ function action(chain: 'ethereum' | 'bitcoin' | 'solana'): CustodySignAction {
     maxFeeUnits,
     expiresAt: new Date(Date.now() + 120000).toISOString(),
   };
-  return custodySignSchema.parse({
+  const parsed = custodySignSchema.parse({
     type: 'transaction.custody.sign',
     transactionId: randomUUID(),
     operationId,
@@ -167,6 +169,12 @@ function action(chain: 'ethereum' | 'bitcoin' | 'solana'): CustodySignAction {
     request,
     authorization: signExecutionAuthorization(claims, authority.privateKey),
   });
+  assert.equal(parsed.authorization.claims.purpose, 'native_sweep');
+  if (parsed.authorization.claims.purpose !== 'native_sweep') throw new Error('Invalid fixture');
+  return {
+    ...parsed,
+    authorization: { ...parsed.authorization, claims: parsed.authorization.claims },
+  };
 }
 
 function sign(a: CustodySignAction) {
@@ -373,4 +381,125 @@ test('custody signer refuses a shared authority/attestation identity and incorre
       ),
     /ownership/,
   );
+});
+
+test('disabling native execution does not reopen legacy signing in a custody deployment', () => {
+  const disabled = new SigningService(
+    core,
+    new CustodySigningPolicy({ enabled: false, domainId: 'exchange', resetEpoch: 'epoch' }, core),
+  );
+  const command = action('ethereum');
+  assert.throws(
+    () =>
+      disabled.execute({
+        type: 'transaction.sign',
+        transactionId: command.transactionId,
+        request: command.request,
+      }),
+    /Legacy signing is disabled/,
+  );
+  assert.throws(() => disabled.execute(command), /disabled/);
+});
+
+function withdrawalAction(chain: 'ethereum' | 'bitcoin' | 'solana'): CustodySignAction {
+  const original = action(chain),
+    hot = core.derive({ chain, seedId: 'test', account: 0 }),
+    external = core.derive({ chain, seedId: 'test', account: 12 });
+  const request: SignRequest = {
+    wallet: {
+      chain,
+      seedId: 'test',
+      account: 0,
+      address: hot.address,
+      network: networks[chain].network,
+    },
+    transaction: original.request.transaction,
+  };
+  if (request.transaction.chain === 'ethereum')
+    request.transaction = { ...request.transaction, to: external.address, amount: '1' };
+  else if (request.transaction.chain === 'bitcoin') {
+    const own = bitcoin.payments.p2wpkh({
+      address: hot.address,
+      network: bitcoin.networks.regtest,
+    }).output!;
+    request.transaction = {
+      ...request.transaction,
+      outputs: [{ address: external.address, amount: '50000' }],
+      utxos: request.transaction.utxos.map((u) => ({
+        ...u,
+        script: Buffer.from(own).toString('hex'),
+      })),
+      changeAmount: '149600',
+    };
+    delete request.transaction.sweepAll;
+  } else if (request.transaction.chain === 'solana')
+    request.transaction = {
+      ...request.transaction,
+      outputs: [{ address: external.address, amount: '1' }],
+    };
+  else throw new Error('Invalid fixture chain');
+  const preparationDigest = executionRequestDigest(request);
+  const claims: Extract<ExecutionAuthorizationClaims, { purpose: 'native_withdrawal' }> = {
+    ...original.authorization.claims,
+    purpose: 'native_withdrawal',
+    reservationId: randomUUID(),
+    source: {
+      walletId: randomUUID(),
+      role: 'hot',
+      account: 0,
+      path: hot.path,
+      address: hot.address,
+      registryRevision: 1,
+    },
+    target: { role: 'external', address: external.address },
+    principalUnits: chain === 'bitcoin' ? '50000' : '1',
+    maxFeeUnits: chain === 'bitcoin' ? '400' : original.authorization.claims.maxFeeUnits,
+    preparationDigest,
+    requestHash: preparationDigest,
+  };
+  return {
+    ...original,
+    request,
+    preparationDigest,
+    authorization: signExecutionAuthorization(claims, authority.privateKey),
+  };
+}
+
+test('independent withdrawal policy derives hot0 and binds external recipient, exact amount, hold and hot change on each chain', () => {
+  const enabled = new SigningService(
+    core,
+    new CustodySigningPolicy({ ...policy.settings, withdrawalsEnabled: true }, core),
+  );
+  for (const chain of ['ethereum', 'bitcoin', 'solana'] as const) {
+    const a = withdrawalAction(chain);
+    const result = enabled.execute(a);
+    assert.equal(result.type, 'transaction.custody.signed');
+    const { signerAttestation, ...body } = result as Extract<
+      ReturnType<SigningService['execute']>,
+      { type: 'transaction.custody.signed' }
+    >;
+    verifySignerAttestation(signerAttestation, body, attestor.publicKey);
+    assert.throws(() => policy.authorize(a), /withdrawals disabled/);
+    const c = a.authorization.claims;
+    assert.equal(c.purpose, 'native_withdrawal');
+    if (c.purpose !== 'native_withdrawal') throw new Error();
+    const altered = {
+      ...c,
+      target: { ...c.target, address: core.derive({ chain, seedId: 'test', account: 13 }).address },
+    };
+    assert.throws(
+      () =>
+        new CustodySigningPolicy({ ...policy.settings, withdrawalsEnabled: true }, core).authorize({
+          ...a,
+          authorization: signExecutionAuthorization(altered, authority.privateKey),
+        }),
+      /policy rejected/,
+    );
+    assert.throws(() =>
+      signExecutionAuthorization(
+        { ...c, source: { ...c.source, account: 10 } } as unknown as ExecutionAuthorizationClaims,
+        authority.privateKey,
+      ),
+    );
+  }
 });

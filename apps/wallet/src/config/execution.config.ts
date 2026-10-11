@@ -5,6 +5,8 @@ import { integerSetting, required } from '../../../../packages/shared/src/config
 
 export interface ExecutionSettings {
   enabled: boolean;
+  sweepsEnabled?: boolean;
+  withdrawalsEnabled?: boolean;
   authorityPrivateKey?: KeyObject;
   signerPublicKey?: KeyObject;
   pollIntervalMs: number;
@@ -13,9 +15,14 @@ export const executionConfig = registerAs('custodyExecution', (): ExecutionSetti
   const flag = process.env.ENABLE_NATIVE_SWEEPS ?? 'false';
   if (!['true', 'false'].includes(flag))
     throw new Error('Invalid configuration: ENABLE_NATIVE_SWEEPS');
-  const enabled = flag === 'true';
+  const withdrawalFlag = process.env.ENABLE_NATIVE_WITHDRAWALS ?? 'false';
+  if (!['true', 'false'].includes(withdrawalFlag))
+    throw new Error('Invalid configuration: ENABLE_NATIVE_WITHDRAWALS');
+  const withdrawalsEnabled = withdrawalFlag === 'true';
+  const sweepsEnabled = flag === 'true';
+  const enabled = sweepsEnabled || withdrawalsEnabled;
   const pollIntervalMs = integerSetting('EXECUTION_RECONCILIATION_MS', 30000, 100, 86400000);
-  if (!enabled) return { enabled, pollIntervalMs };
+  if (!enabled) return { enabled, sweepsEnabled, withdrawalsEnabled, pollIntervalMs };
   const path = required('EXECUTION_AUTHORITY_PRIVATE_KEY_FILE');
   const stat = statSync(path);
   if (!stat.isFile() || stat.mode & 0o077 || (process.getuid && stat.uid !== process.getuid()))
@@ -35,5 +42,12 @@ export const executionConfig = registerAs('custodyExecution', (): ExecutionSetti
     signerPublicKey.export({ type: 'spki', format: 'pem' })
   )
     throw new Error('Execution authority and Signer attestation need independent keys');
-  return { enabled, authorityPrivateKey, signerPublicKey, pollIntervalMs };
+  return {
+    enabled,
+    sweepsEnabled,
+    withdrawalsEnabled,
+    authorityPrivateKey,
+    signerPublicKey,
+    pollIntervalMs,
+  };
 });

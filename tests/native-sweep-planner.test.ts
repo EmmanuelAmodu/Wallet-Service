@@ -983,3 +983,137 @@ test('Revalidation refuses an unavailable or switched RPC without creating a new
     assert.equal(switched.calls.length, 0);
   }
 });
+
+test('native withdrawal plans preserve the accepted Ethereum amount and reserve only hot principal plus fees', async () => {
+  const hot = signer.derive({ chain: 'ethereum', account: 0, seedId: 'sweep-test' });
+  hot.address = hot.address.toLowerCase();
+  const rpc = ethRpc();
+  const planner = new NativeSweepPlanner(rpc);
+  const plan = await planner.plan({
+    chain: 'ethereum',
+    network: '11155111',
+    sourceAddress: hot.address,
+    hotAddress: ethHot,
+    amount: '1',
+  });
+  assert.equal(plan.amount, '1');
+  const request = {
+    wallet: {
+      chain: hot.chain,
+      seedId: hot.seedId,
+      account: hot.account,
+      address: hot.address,
+      network: '11155111',
+    },
+    transaction: plan.request,
+  };
+  await planner.revalidate(request, plan.maxFeeUnits);
+  const signed = signer.sign(request);
+  const decoded = EvmTransaction.from(signed.raw);
+  assert.equal(decoded.from?.toLowerCase(), hot.address);
+  assert.equal(decoded.value, 1n);
+  assert.equal(decoded.to?.toLowerCase(), ethHot);
+  await assert.rejects(
+    () =>
+      new NativeSweepPlanner(ethRpc({ eth_getBalance: '0x1' })).plan({
+        chain: 'ethereum',
+        network: '11155111',
+        sourceAddress: hot.address,
+        hotAddress: ethHot,
+        amount: '1',
+      }),
+    expectDeferral('waiting_funds'),
+  );
+});
+
+test('Bitcoin native withdrawal signs exact principal and returns independently decoded change only to hot0', async () => {
+  const hot = wallet('bitcoin', 0),
+    destination = wallet('bitcoin', 11);
+  const ownedScript =
+    '0014' + Buffer.from(regtestWitnessAddress(hot.address).program).toString('hex');
+  const rpc = new FakeRpc((method) => {
+    if (method === 'listunspent')
+      return [{ txid: '01'.repeat(32), vout: 0, address: hot.address, confirmations: 6 }];
+    if (method === 'gettxout')
+      return {
+        value: '0.01000000',
+        confirmations: 6,
+        coinbase: false,
+        scriptPubKey: { hex: ownedScript, address: hot.address },
+      };
+    if (method === 'estimatesmartfee') return { feerate: '0.00002' };
+    throw new Error(`Unexpected ${method}`);
+  });
+  const planner = new NativeSweepPlanner(rpc);
+  const plan = await planner.plan({
+    chain: 'bitcoin',
+    network: 'regtest',
+    sourceAddress: hot.address,
+    hotAddress: destination.address,
+    amount: '50000',
+  });
+  assert.equal(plan.request.chain, 'bitcoin');
+  if (plan.request.chain !== 'bitcoin') throw new Error();
+  assert.equal(plan.amount, '50000');
+  assert.equal(plan.request.sweepAll, undefined);
+  assert.ok(BigInt(plan.request.changeAmount!) > 0n);
+  const request = { wallet: hot, transaction: plan.request };
+  await planner.revalidate(request, plan.maxFeeUnits);
+  const signed = signer.sign(request);
+  const decoded = BitcoinTransaction.fromHex(signed.raw);
+  assert.equal(decoded.outs.length, 2);
+  assert.equal(decoded.outs[0].value, 50000n);
+  assert.equal(decoded.outs[1].value, BigInt(plan.request.changeAmount!));
+  assert.equal(Buffer.from(decoded.outs[1].script).toString('hex'), ownedScript);
+  assert.equal(
+    1_000_000n - decoded.outs.reduce((sum, o) => sum + o.value, 0n),
+    BigInt(plan.maxFeeUnits),
+  );
+  const included = new FakeRpc((method) => {
+    if (method === 'getrawtransaction')
+      return { txid: signed.txHash, hex: signed.raw, blockhash: btcBlock };
+    if (method === 'getblockheader') return { hash: btcBlock, height: 10, confirmations: 6 };
+    if (method === 'getblockhash') return btcBlock;
+    throw new Error(`Unexpected ${method}`);
+  });
+  const observation = await new NativeSweepPlanner(included).observe({
+    chain: 'bitcoin',
+    network: 'regtest',
+    hash: signed.txHash,
+    request,
+    signed,
+  });
+  assert.equal(observation.state, 'confirmed');
+  assert.equal(observation.actualFeeUnits, plan.maxFeeUnits);
+});
+
+test('Solana native withdrawal keeps exact principal and hot rent instead of sweeping the balance', async () => {
+  const hot = wallet('solana', 0),
+    destination = wallet('solana', 11);
+  const planner = new NativeSweepPlanner(solRpc());
+  const plan = await planner.plan({
+    chain: 'solana',
+    network: DEVNET,
+    sourceAddress: hot.address,
+    hotAddress: destination.address,
+    amount: '1000000',
+  });
+  assert.equal(plan.amount, '1000000');
+  const request = { wallet: hot, transaction: plan.request };
+  await planner.revalidate(request, plan.maxFeeUnits);
+  const signed = signer.sign(request);
+  assert.equal(signed.encoding, 'base64');
+  const expected = await nativeSolanaMessage(hot.address, destination.address, blockhash, 1000000n);
+  assert.deepEqual(Buffer.from(signed.raw, 'base64').subarray(65), expected);
+  await assert.rejects(
+    () =>
+      new NativeSweepPlanner(solRpc({ balance: 1000 })).plan({
+        chain: 'solana',
+        network: DEVNET,
+        sourceAddress: hot.address,
+        hotAddress: destination.address,
+        amount: '1000000',
+      }),
+    expectDeferral('insufficient_balance'),
+  );
+});

@@ -536,3 +536,54 @@ test(
     assert(scheduled.available_at.getTime() > Date.now());
   },
 );
+
+test(
+  'native withdrawal broadcasting has an independent enablement gate and preserves attested hot0 bytes',
+  { skip: !enabled },
+  async () => {
+    const f = fixture();
+    const execution = f.snapshot.execution!;
+    execution.preparedRequest.wallet.account = 0;
+    execution.preparationDigest = executionRequestDigest(execution.preparedRequest);
+    const body = {
+      type: 'transaction.custody.signed',
+      transactionId: f.transactionId,
+      operationId: execution.operationId,
+      attemptId: execution.attemptId,
+      requestDigest: execution.requestDigest,
+      preparationDigest: execution.preparationDigest,
+      signed: f.snapshot.signed,
+    };
+    execution.signerAttestation = signSignerAttestation(
+      {
+        ...execution.signerAttestation.claims,
+        preparationDigest: execution.preparationDigest,
+        resultDigest: executionDigest(body),
+      },
+      signer.privateKey,
+    );
+    await assert.rejects(worker(async () => included).execute(f.action, false), /disabled/);
+    let sent = 0;
+    let observation: NativeSweepObservation = { state: 'pending' };
+    const service = worker(
+      async () => observation,
+      {
+        async status() {
+          return 'unknown';
+        },
+        async broadcast(_chain, raw) {
+          assert.equal(raw.raw, f.snapshot.signed.raw);
+          sent++;
+        },
+      },
+      { nativeSweepsEnabled: false, nativeWithdrawalsEnabled: true },
+    );
+    await service.execute(f.action, false);
+    assert.equal(sent, 1);
+    const saved = await db.transaction.findUniqueOrThrow({ where: { id: f.transactionId } });
+    assert.equal(saved.operation_id, execution.operationId);
+    observation = included;
+    await service.execute(f.action, false);
+    assert.equal(sent, 1);
+  },
+);

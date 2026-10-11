@@ -267,13 +267,22 @@ export class BroadcastService {
   ): void {
     const execution = snapshot.execution;
     if (!execution) {
-      if (this.config.custodyMode || this.config.nativeSweepsEnabled)
+      if (
+        this.config.custodyMode ||
+        this.config.nativeSweepsEnabled ||
+        this.config.nativeWithdrawalsEnabled
+      )
         throw new ActionRejectedError(
           'Native custody mode requires an independently attested execution',
         );
       return;
     }
-    if (!this.config.nativeSweepsEnabled || !this.config.executionSignerPublicKey)
+    if (
+      !(execution.preparedRequest.wallet.account === 0
+        ? this.config.nativeWithdrawalsEnabled
+        : this.config.nativeSweepsEnabled) ||
+      !this.config.executionSignerPublicKey
+    )
       throw new ActionRejectedError('Native custody broadcasting is disabled');
     try {
       if (

@@ -11,7 +11,10 @@ import { readFileSync, statSync } from 'node:fs';
 function executionKey(name: string, privateKey: boolean): KeyObject {
   const path = required(name),
     stat = statSync(path);
-  if (!stat.isFile() || (privateKey && (stat.mode & 0o077) !== 0))
+  if (
+    !stat.isFile() ||
+    (privateKey && ((stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())))
+  )
     throw new Error(`${name} must be a regular ${privateKey ? 'private mode 0600 ' : ''}key file`);
   const encoded = readFileSync(path);
   if (!privateKey && !encoded.toString('utf8').trimStart().startsWith('-----BEGIN PUBLIC KEY-----'))
@@ -25,6 +28,10 @@ export const signerConfig = registerAs('signer', () => {
   const enable = process.env.ENABLE_NATIVE_SWEEPS ?? 'false';
   if (enable !== 'true' && enable !== 'false')
     throw new Error('ENABLE_NATIVE_SWEEPS must be true or false');
+  const withdrawals = process.env.ENABLE_NATIVE_WITHDRAWALS ?? 'false';
+  if (!['true', 'false'].includes(withdrawals))
+    throw new Error('ENABLE_NATIVE_WITHDRAWALS must be true or false');
+  const nativeWithdrawalsEnabled = withdrawals === 'true';
   const nativeSweepsEnabled = enable === 'true';
   const ethereumChainId = required('ETH_CHAIN_ID');
   const chainIds = {
@@ -42,7 +49,8 @@ export const signerConfig = registerAs('signer', () => {
     ethereumChainIds: chainIds,
     domainId: required('EXCHANGE_DOMAIN_ID'),
     nativeSweepsEnabled,
-    ...(nativeSweepsEnabled
+    nativeWithdrawalsEnabled,
+    ...(nativeSweepsEnabled || nativeWithdrawalsEnabled
       ? {
           executionAuthorityPublicKey: executionKey('EXECUTION_AUTHORITY_PUBLIC_KEY_FILE', false),
           executionSignerPrivateKey: executionKey('EXECUTION_SIGNER_PRIVATE_KEY_FILE', true),

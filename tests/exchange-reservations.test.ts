@@ -8,6 +8,8 @@ import { ReservationsService } from '../apps/ledger/src/reservations/reservation
 import { DepositsService } from '../apps/ledger/src/deposits/deposits.service.js';
 import { ExchangeEvent, exchangeEventSchema } from '../packages/queue/src/exchange-contracts.js';
 
+import { migrate } from '../scripts/migrate.js';
+
 const enabled = Boolean(process.env.TEST_LEDGER_DATABASE_URL);
 const db = enabled
   ? new LedgerPrismaService({ databaseUrl: process.env.TEST_LEDGER_DATABASE_URL! })
@@ -17,7 +19,10 @@ const epoch = 'exchange-reservation-tests';
 const service = enabled ? new ReservationsService(db!, journal, { resetEpoch: epoch }) : undefined;
 const asset = { chain: 'ethereum' as const, network: '11155111', assetId: 'token:ethereum:native' };
 before(async () => {
-  if (db) await db.$connect();
+  if (db) {
+    await migrate(process.env.TEST_LEDGER_DATABASE_URL!, 'ledger');
+    await db.$connect();
+  }
 });
 after(async () => {
   if (db) await db.$disconnect();
@@ -116,11 +121,11 @@ test(
     assert.equal(
       await db!.outbox.count({
         where: {
-          dedupe_key: {
-            in: reservations.map(
-              (r) => `reservation:${r.id}:${r.state === 'held' ? 'reserved' : 'rejected'}`,
-            ),
-          },
+          OR: reservations.map((r) => ({
+            dedupe_key: {
+              startsWith: `reservation:${r.id}:${r.state === 'held' ? 'reserved' : 'rejected'}:`,
+            },
+          })),
         },
       }),
       2,
@@ -293,7 +298,7 @@ test(
       where: { operation_id: request.operationId },
     });
     await db!.outbox.updateMany({
-      where: { dedupe_key: `reservation:${hold.id}:reserved` },
+      where: { dedupe_key: { startsWith: `reservation:${hold.id}:reserved:` } },
       data: { published_at: new Date() },
     });
     assert.equal(await service!.reconcile(f.domainId), 1);

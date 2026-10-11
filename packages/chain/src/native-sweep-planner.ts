@@ -74,10 +74,11 @@ function evidence(condition: boolean, reason: string): asserts condition {
   if (!condition) throw new BadGatewayException(`Sweep RPC evidence mismatch: ${reason}`);
 }
 
-function budget(amount: bigint, fee: bigint, minimum: bigint, cap: bigint) {
+function budget(amount: bigint, fee: bigint, minimum: bigint, cap: bigint, withdrawal = false) {
   if (amount <= 0n) defer('insufficient_balance', 'Balance does not cover the fee reserve');
+  if (withdrawal) minimum = minimum === 10_000n ? 546n : 1n;
   if (amount < minimum) defer('dust', 'Spendable sweep amount is below the minimum');
-  if (fee > cap || fee * 100n > amount)
+  if (fee > cap || (!withdrawal && fee * 100n > amount))
     defer('fee_budget', 'Sweep fee exceeds the fixed or one percent fee budget');
 }
 
@@ -155,6 +156,7 @@ export class NativeSweepPlanner {
     network: string;
     sourceAddress: string;
     hotAddress: string;
+    amount?: string;
   }): Promise<NativeSweepPlan> {
     try {
       await this.verify(input.chain, input.network);
@@ -170,7 +172,7 @@ export class NativeSweepPlanner {
     }
   }
 
-  private async ethereum(input: { sourceAddress: string; hotAddress: string }) {
+  private async ethereum(input: { sourceAddress: string; hotAddress: string; amount?: string }) {
     const source = z
       .string()
       .regex(/^0x[0-9a-f]{40}$/)
@@ -189,7 +191,8 @@ export class NativeSweepPlanner {
         this.rpc.call('ethereum', 'eth_maxPriorityFeePerGas', []),
         this.rpc.call('ethereum', 'eth_getCode', [hot, 'finalized']),
       ]);
-    if (code !== '0x') defer('attention', 'Native hot wallet must be an externally owned account');
+    if (input.amount === undefined && code !== '0x')
+      defer('attention', 'Native hot wallet must be an externally owned account');
     const latestNonce = BigInt(hexQuantity.parse(latestNonceRaw));
     const pendingNonce = BigInt(hexQuantity.parse(pendingNonceRaw));
     if (latestNonce !== pendingNonce)
@@ -220,15 +223,27 @@ export class NativeSweepPlanner {
     if (balance === 0n) defer('insufficient_balance', 'No finalized native balance is spendable');
     let gas = ((await estimate(1n)) * 120n + 99n) / 100n;
     let fee = gas * maxFee;
-    let amount = balance - fee;
-    budget(amount, fee, 1_000_000_000_000_000n, 5_000_000_000_000_000n);
+    let amount = input.amount === undefined ? balance - fee : BigInt(input.amount);
+    if (balance < amount + fee)
+      defer('waiting_funds', 'Hot liquidity cannot cover principal and fees');
+    budget(amount, fee, 1_000_000_000_000_000n, 5_000_000_000_000_000n, input.amount !== undefined);
     const exactGas = ((await estimate(amount)) * 120n + 99n) / 100n;
     if (exactGas > gas) {
       gas = exactGas;
       fee = gas * maxFee;
-      amount = balance - fee;
-      budget(amount, fee, 1_000_000_000_000_000n, 5_000_000_000_000_000n);
+      amount = input.amount === undefined ? balance - fee : BigInt(input.amount);
+      if (balance < amount + fee)
+        defer('waiting_funds', 'Hot liquidity cannot cover principal and fees');
+      budget(
+        amount,
+        fee,
+        1_000_000_000_000_000n,
+        5_000_000_000_000_000n,
+        input.amount !== undefined,
+      );
     }
+    if (gas < 21000n || gas > 100000n)
+      defer('fee_budget', 'Native Ethereum gas limit exceeds the signing policy');
     const request: SignRequest['transaction'] = {
       chain: 'ethereum',
       chainId: '11155111',
@@ -248,7 +263,7 @@ export class NativeSweepPlanner {
     };
   }
 
-  private async bitcoin(input: { sourceAddress: string; hotAddress: string }) {
+  private async bitcoin(input: { sourceAddress: string; hotAddress: string; amount?: string }) {
     const source = regtestWitnessAddress(input.sourceAddress);
     const hot = regtestWitnessAddress(input.hotAddress);
     if (source.program.length !== 20 || hot.program.length !== 20)
@@ -334,12 +349,12 @@ export class NativeSweepPlanner {
     const unsigned = proto.SigningInput.fromObject({
       coinType: core.CoinType.bitcoin.value,
       hashType: core.BitcoinScript.hashTypeForCoin(core.CoinType.bitcoin),
-      amount: total.toString(),
+      amount: input.amount ?? total.toString(),
       toAddress: hot.signingAddress,
       changeAddress: source.signingAddress,
       byteFee: satsPerVbyte.toString(),
       useMaxUtxo: true,
-      useMaxAmount: true,
+      useMaxAmount: input.amount === undefined,
       utxo: utxos.map((utxo) => ({
         amount: utxo.amount,
         script: Buffer.from(utxo.script, 'hex'),
@@ -353,33 +368,85 @@ export class NativeSweepPlanner {
     const plan = proto.TransactionPlan.decode(
       core.AnySigner.plan(proto.SigningInput.encode(unsigned).finish(), core.CoinType.bitcoin),
     );
-    if (plan.error !== 0) defer('insufficient_balance', 'Bitcoin inputs cannot fund the sweep');
+    if (plan.error !== 0)
+      defer('waiting_funds', 'Bitcoin hot inputs cannot fund principal and fees');
     const amount = BigInt(plan.amount.toString());
     const fee = BigInt(plan.fee.toString());
+    const change = BigInt(plan.change.toString());
+    const selected = plan.utxos.map((u) => {
+      const hash = Buffer.from(u.outPoint?.hash ?? [])
+        .reverse()
+        .toString('hex');
+      const found = utxos.find(
+        (candidate) => candidate.txid === hash && candidate.vout === u.outPoint?.index,
+      );
+      evidence(!!found, 'Wallet Core selected an unknown input');
+      return found;
+    });
+    const selectedTotal = selected.reduce((sum, u) => sum + BigInt(u.amount), 0n);
     evidence(
-      amount + fee === total &&
-        BigInt(plan.change.toString()) === 0n &&
-        plan.utxos.length === utxos.length,
-      'Wallet Core sweep plan does not consume the exact input set',
+      amount + fee + change === selectedTotal &&
+        (input.amount === undefined
+          ? change === 0n && selected.length === utxos.length
+          : amount.toString() === input.amount),
+      'Wallet Core exact native payment plan',
     );
-    budget(amount, fee, 10_000n, 10_000n);
+    budget(amount, fee, 10_000n, 10_000n, input.amount !== undefined);
     const request: SignRequest['transaction'] = {
       chain: 'bitcoin',
       outputs: [{ address: hot.address, amount: amount.toString() }],
-      utxos,
+      utxos: selected,
       satsPerVbyte: Number(satsPerVbyte),
-      sweepAll: true,
+      ...(input.amount === undefined
+        ? { sweepAll: true as const }
+        : { changeAmount: change.toString() }),
     };
     return {
       request,
       amount: amount.toString(),
       maxFeeUnits: fee.toString(),
-      resourceKeys: utxos.map((utxo) => `utxo:${utxo.txid}:${utxo.vout}`),
+      resourceKeys: selected.map((utxo) => `utxo:${utxo.txid}:${utxo.vout}`),
       expiresAt: expires(),
     };
   }
 
-  private async solana(input: { sourceAddress: string; hotAddress: string }) {
+  private async withdrawalSolanaRecipient(
+    address: string,
+    amount: bigint,
+    rent: bigint,
+    floor: number,
+  ) {
+    const result = z
+      .object({
+        context: z.object({ slot: safeInteger }),
+        value: z
+          .object({
+            owner: z.string(),
+            executable: z.boolean(),
+            lamports: safeInteger,
+            data: z.tuple([z.string(), z.literal('base64')]),
+          })
+          .nullable(),
+      })
+      .parse(
+        await this.rpc.call('solana', 'getAccountInfo', [
+          address,
+          { commitment: 'finalized', encoding: 'base64', minContextSlot: floor },
+        ]),
+      );
+    if (result.context.slot < floor) defer('unavailable', 'Solana recipient context is stale');
+    if (
+      result.value &&
+      (result.value.owner !== SYSTEM ||
+        result.value.executable ||
+        Buffer.from(result.value.data[0], 'base64').length !== 0)
+    )
+      defer('attention', 'Native withdrawal recipient must be an ordinary System account');
+    if (BigInt(result.value?.lamports ?? 0) + amount < rent)
+      defer('dust', 'Withdrawal cannot create or retain a rent-exempt recipient');
+  }
+
+  private async solana(input: { sourceAddress: string; hotAddress: string; amount?: string }) {
     const [balanceRaw, accountRaw, blockhashRaw] = await Promise.all([
       this.rpc.call('solana', 'getBalance', [input.sourceAddress, { commitment: 'finalized' }]),
       this.rpc.call('solana', 'getAccountInfo', [
@@ -449,9 +516,18 @@ export class NativeSweepPlanner {
         defer('unavailable', 'Solana fee quote is unavailable for the pinned message context');
       return BigInt(result.value);
     };
-    const fee = await feeFor(provisional);
-    const amount = available - rent - fee;
-    budget(amount, fee, 1_000_000n, 100_000n);
+    const fee = await feeFor(input.amount === undefined ? provisional : BigInt(input.amount));
+    const amount = input.amount === undefined ? available - rent - fee : BigInt(input.amount);
+    if (available < amount + rent + fee)
+      defer('waiting_funds', 'Hot liquidity cannot cover principal, fees and rent');
+    budget(amount, fee, 1_000_000n, 100_000n, input.amount !== undefined);
+    if (input.amount !== undefined)
+      await this.withdrawalSolanaRecipient(
+        input.hotAddress,
+        amount,
+        rent,
+        Math.max(balance.context.slot, account.context.slot),
+      );
     if ((await feeFor(amount)) !== fee)
       defer('unavailable', 'Solana fee changed for the exact sweep message');
     const currentHeight = safeInteger.parse(
@@ -520,7 +596,7 @@ export class NativeSweepPlanner {
       priority > maxFee
     )
       defer('fee_budget', 'Prepared Ethereum fee authorization is inconsistent with policy');
-    budget(amount, fee, 1_000_000_000_000_000n, 5_000_000_000_000_000n);
+    budget(amount, fee, 1_000_000_000_000_000n, 5_000_000_000_000_000n, input.wallet.account === 0);
     const [
       finalizedRaw,
       pendingRaw,
@@ -548,7 +624,7 @@ export class NativeSweepPlanner {
         },
       ]),
     ]);
-    if (codeRaw !== '0x')
+    if (input.wallet.account !== 0 && codeRaw !== '0x')
       defer('attention', 'Native hot wallet is no longer an externally owned account');
     if (
       BigInt(hexQuantity.parse(latestNonceRaw)) !== BigInt(request.nonce) ||
@@ -575,7 +651,11 @@ export class NativeSweepPlanner {
 
   private async revalidateBitcoin(input: SignRequest, fee: bigint) {
     const request = input.transaction as BitcoinRequest;
-    if (request.outputs.length !== 1 || request.sweepAll !== true)
+    if (
+      request.outputs.length !== 1 ||
+      (request.sweepAll !== true && request.changeAmount === undefined) ||
+      (request.sweepAll === true && request.changeAmount !== undefined)
+    )
       defer('attention', 'Bitcoin sweep must have one hot output and no change');
     const source = regtestWitnessAddress(input.wallet.address);
     const hot = regtestWitnessAddress(request.outputs[0].address);
@@ -586,11 +666,12 @@ export class NativeSweepPlanner {
       defer('attention', 'Duplicate prepared Bitcoin outpoint');
     const amount = BigInt(request.outputs[0].amount);
     if (
-      request.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n) !== amount + fee ||
+      request.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n) !==
+        amount + fee + BigInt(request.changeAmount ?? '0') ||
       request.satsPerVbyte > 100
     )
       defer('fee_budget', 'Prepared Bitcoin principal or fee budget is inconsistent');
-    budget(amount, fee, 10_000n, 10_000n);
+    budget(amount, fee, 10_000n, 10_000n, input.wallet.account === 0);
     for (const utxo of request.utxos) {
       if (utxo.script !== ownScript)
         defer('attention', 'Prepared Bitcoin script is not owned by source');
@@ -639,7 +720,7 @@ export class NativeSweepPlanner {
     if (request.outputs.length !== 1 || request.outputs[0].address === input.wallet.address)
       defer('attention', 'Native Solana sweep requires one distinct hot recipient');
     const amount = BigInt(request.outputs[0].amount);
-    budget(amount, fee, 1_000_000n, 100_000n);
+    budget(amount, fee, 1_000_000n, 100_000n, input.wallet.account === 0);
     const [balanceRaw, accountRaw] = await Promise.all([
       this.rpc.call('solana', 'getBalance', [input.wallet.address, { commitment: 'finalized' }]),
       this.rpc.call('solana', 'getAccountInfo', [
@@ -680,6 +761,8 @@ export class NativeSweepPlanner {
       ),
     );
     if (rent > 5_000_000n) defer('fee_budget', 'Solana retained rent exceeds the pinned budget');
+    if (input.wallet.account === 0)
+      await this.withdrawalSolanaRecipient(request.outputs[0].address, amount, rent, floor);
     if (
       BigInt(balance.value) < amount + fee + rent ||
       BigInt(account.value.lamports) < amount + fee + rent
@@ -935,16 +1018,28 @@ export class NativeSweepPlanner {
         decoded.inputs.every((ref) => reservedInputs.has(ref)),
       'Bitcoin reserved input set',
     );
-    evidence(request.outputs.length === 1 && decoded.outputs.length === 1, 'Bitcoin output count');
+    evidence(
+      request.outputs.length === 1 &&
+        decoded.outputs.length === (BigInt(request.changeAmount ?? '0') > 0n ? 2 : 1),
+      'Bitcoin output count',
+    );
     const hotScript = `0014${Buffer.from(regtestWitnessAddress(request.outputs[0].address).program).toString('hex')}`;
     evidence(
       decoded.outputs[0].script === hotScript &&
         decoded.outputs[0].amount.toString() === request.outputs[0].amount,
       'Bitcoin hot output',
     );
+    if (decoded.outputs.length === 2) {
+      const sourceScript = `0014${Buffer.from(regtestWitnessAddress(input.request.wallet.address).program).toString('hex')}`;
+      evidence(
+        decoded.outputs[1].script === sourceScript &&
+          decoded.outputs[1].amount.toString() === request.changeAmount,
+        'Bitcoin hot-owned change',
+      );
+    }
     const fee =
       request.utxos.reduce((sum, utxo) => sum + BigInt(utxo.amount), 0n) -
-      decoded.outputs[0].amount;
+      decoded.outputs.reduce((sum, output) => sum + output.amount, 0n);
     evidence(fee >= 0n && fee <= 10_000n, 'Bitcoin fee');
     if (!transaction.blockhash) return { state: 'pending' as const };
     const headerSchema = z.object({
@@ -1098,8 +1193,11 @@ function decodeBitcoinSweep(raw: string) {
     evidence(take(4).readUInt32LE() === 0xffffffff, 'Bitcoin native input sequence');
   }
   const outputCount = compact();
-  evidence(outputCount === 1, 'Bitcoin sweep output count');
-  const outputs = [{ amount: take(8).readBigUInt64LE(), script: take(compact()).toString('hex') }];
+  evidence(outputCount >= 1 && outputCount <= 2, 'Bitcoin native output count');
+  const outputs = Array.from({ length: outputCount }, () => ({
+    amount: take(8).readBigUInt64LE(),
+    script: take(compact()).toString('hex'),
+  }));
   const baseEnd = offset;
   for (let i = 0; i < inputCount; i++) {
     const count = compact();

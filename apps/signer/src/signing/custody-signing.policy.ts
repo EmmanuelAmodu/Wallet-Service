@@ -9,6 +9,8 @@ import { SigningCore } from './signing.core.js';
 
 export type CustodySigningSettings = {
   enabled: boolean;
+  sweepsEnabled?: boolean;
+  withdrawalsEnabled?: boolean;
   domainId: string;
   resetEpoch: string;
   authorityPublicKey?: KeyObject;
@@ -53,8 +55,8 @@ export class CustodySigningPolicy {
       c.domainId !== this.settings.domainId ||
       c.resetEpoch !== this.settings.resetEpoch ||
       c.seedId !== this.core.seedId ||
-      c.target.domainId !== c.domainId ||
-      c.target.seedId !== c.seedId
+      (c.purpose === 'native_sweep' &&
+        (c.target.domainId !== c.domainId || c.target.seedId !== c.seedId))
     )
       throw new Error('Execution custody identity mismatch');
     if (
@@ -95,23 +97,32 @@ export class CustodySigningPolicy {
       chain: c.asset.chain,
       account: c.source.account,
     });
-    this.core.validateDerivation(c.domainId, c.asset.network, c.target.path, {
-      seedId: c.seedId,
-      chain: c.asset.chain,
-      account: 0,
-    });
     const source = this.core.derive({
       seedId: c.seedId,
       chain: c.asset.chain,
       account: c.source.account,
     });
-    const target = this.core.derive({ seedId: c.seedId, chain: c.asset.chain, account: 0 });
-    if (
-      c.source.walletId === c.target.walletId ||
-      !this.sameAddress(c.asset.chain, source.address, c.source.address) ||
-      !this.sameAddress(c.asset.chain, target.address, c.target.address)
-    )
-      throw new Error('Execution destination is not the configured hot derivation');
+    if (!this.sameAddress(c.asset.chain, source.address, c.source.address))
+      throw new Error('Execution source derivation mismatch');
+    if (c.purpose === 'native_sweep') {
+      if (this.settings.sweepsEnabled === false) throw new Error('Native sweeps disabled');
+      this.core.validateDerivation(c.domainId, c.asset.network, c.target.path, {
+        seedId: c.seedId,
+        chain: c.asset.chain,
+        account: 0,
+      });
+      const target = this.core.derive({ seedId: c.seedId, chain: c.asset.chain, account: 0 });
+      if (
+        c.source.walletId === c.target.walletId ||
+        !this.sameAddress(c.asset.chain, target.address, c.target.address)
+      )
+        throw new Error('Execution destination is not the configured hot derivation');
+    } else {
+      if (!this.settings.withdrawalsEnabled) throw new Error('Native withdrawals disabled');
+      this.core.assertValidAddress(c.target.address, c.asset.chain);
+      if (this.sameAddress(c.asset.chain, c.source.address, c.target.address))
+        throw new Error('Withdrawal destination is the hot source');
+    }
     const principal = BigInt(c.principalUnits),
       fee = BigInt(c.maxFeeUnits);
     const minimum = { ethereum: 1_000_000_000_000_000n, bitcoin: 10_000n, solana: 1_000_000n }[
@@ -120,9 +131,14 @@ export class CustodySigningPolicy {
     const feeCap = { ethereum: 5_000_000_000_000_000n, bitcoin: 10_000n, solana: 100_000n }[
       c.asset.chain
     ];
-    if (principal < minimum || fee > feeCap || fee * 100n > principal)
+    if (
+      (c.purpose === 'native_sweep'
+        ? principal < minimum || fee * 100n > principal
+        : principal < (c.asset.chain === 'bitcoin' ? 546n : 1n)) ||
+      fee > feeCap
+    )
       throw new Error('Execution exceeds native sweep economics');
-    this.validateOutputs(r, c.target.address, principal, fee);
+    this.validateOutputs(r, c.target.address, principal, fee, c.purpose);
   }
 
   private sameAddress(chain: string, a: string, b: string): boolean {
@@ -134,6 +150,7 @@ export class CustodySigningPolicy {
     hotAddress: string,
     principal: bigint,
     maxFee: bigint,
+    purpose: 'native_sweep' | 'native_withdrawal',
   ): void {
     const tx = r.transaction;
     if (tx.chain === 'ethereum') {
@@ -153,7 +170,9 @@ export class CustodySigningPolicy {
     }
     if (tx.chain === 'bitcoin') {
       if (
-        tx.sweepAll !== true ||
+        (purpose === 'native_sweep'
+          ? tx.sweepAll !== true || tx.changeAmount !== undefined
+          : tx.sweepAll === true || tx.changeAmount === undefined) ||
         tx.outputs.length !== 1 ||
         tx.outputs[0].address !== hotAddress ||
         BigInt(tx.outputs[0].amount) !== principal ||
@@ -162,7 +181,7 @@ export class CustodySigningPolicy {
       )
         throw new Error('Bitcoin native sweep policy rejected');
       const total = tx.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n),
-        fee = total - principal;
+        fee = total - principal - BigInt(tx.changeAmount ?? '0');
       if (fee <= 0n || fee > maxFee) throw new Error('Bitcoin native sweep fee policy rejected');
       return;
     }

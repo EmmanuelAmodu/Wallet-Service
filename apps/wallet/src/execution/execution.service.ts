@@ -36,8 +36,14 @@ import { CustodyService } from '../custody/custody.service.js';
 import { walletConfig, WalletConfig } from '../config/wallet.config.js';
 import { executionConfig, ExecutionSettings } from '../config/execution.config.js';
 
-type Plan = Extract<ExchangeEvent, { type: 'sweep.plan.requested.v1' }>;
-type Execute = Extract<ExchangeEvent, { type: 'sweep.execute.requested.v1' }>;
+type Plan = Extract<
+  ExchangeEvent,
+  { type: 'sweep.plan.requested.v1' | 'withdrawal.plan.requested.v1' }
+>;
+type Execute = Extract<
+  ExchangeEvent,
+  { type: 'sweep.execute.requested.v1' | 'withdrawal.execute.requested.v1' }
+>;
 type Result = Extract<
   Message,
   { type: 'transaction.custody.signed' | 'transaction.custody.rejected' }
@@ -87,11 +93,17 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
   }
 
   async handle(message: Message): Promise<boolean> {
-    if (message.type === 'sweep.plan.requested.v1') {
+    if (
+      message.type === 'sweep.plan.requested.v1' ||
+      message.type === 'withdrawal.plan.requested.v1'
+    ) {
       await this.plan(message);
       return true;
     }
-    if (message.type === 'sweep.execute.requested.v1') {
+    if (
+      message.type === 'sweep.execute.requested.v1' ||
+      message.type === 'withdrawal.execute.requested.v1'
+    ) {
       await this.execute(message);
       return true;
     }
@@ -112,7 +124,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       });
       if (!execution) return false;
       await this.ledgerResult(message, execution);
-      return true;
+      return (execution.plan as unknown as Plan).type !== 'withdrawal.plan.requested.v1';
     }
     if (message.type === 'broadcast.updated') {
       const execution = await this.db.custodyExecution.findUnique({
@@ -191,7 +203,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       policyVersion: event.policyVersion,
       data: event.data,
     });
-    if (event.requestDigest !== expected)
+    if (event.type === 'sweep.plan.requested.v1' && event.requestDigest !== expected)
       throw new ActionRejectedError('Sweep planning digest mismatch');
   }
 
@@ -199,7 +211,13 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     tx: Prisma.TransactionClient,
     plan: Plan,
   ): Promise<{ source: Wallet; hot: Wallet }> {
-    if (!this.config.enabled || !this.config.authorityPrivateKey || !this.config.signerPublicKey)
+    if (plan.type === 'withdrawal.plan.requested.v1') return this.withdrawalAuthority(tx, plan);
+    if (
+      !this.config.enabled ||
+      this.config.sweepsEnabled === false ||
+      !this.config.authorityPrivateKey ||
+      !this.config.signerPublicKey
+    )
       throw new SweepDeferral('disabled', 'Native sweep execution is disabled');
     // Policy writers use PostgreSQL updates. Lock their rows through authorization/outbox commit.
     await tx.$queryRaw`SELECT id FROM custody_domains WHERE id=${plan.domainId} FOR UPDATE`;
@@ -296,6 +314,124 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     return { source, hot };
   }
 
+  private async withdrawalAuthority(
+    tx: Prisma.TransactionClient,
+    plan: Extract<Plan, { type: 'withdrawal.plan.requested.v1' }>,
+  ): Promise<{ source: Wallet; hot: Wallet }> {
+    if (
+      !this.config.withdrawalsEnabled ||
+      !this.config.authorityPrivateKey ||
+      !this.config.signerPublicKey
+    )
+      throw new SweepDeferral('disabled', 'Native withdrawals are disabled');
+    // Block address publication changes while checking external destination ownership.
+    await tx.$executeRaw`LOCK TABLE wallets IN SHARE MODE`;
+    await tx.$queryRaw`SELECT id FROM custody_domains WHERE id=${plan.domainId} FOR UPDATE`;
+    await tx.$queryRaw`SELECT customer_id FROM exchange_customers WHERE customer_id=${plan.customerId}::uuid FOR UPDATE`;
+    await tx.$queryRaw`SELECT id FROM withdrawals WHERE id=${plan.operationId}::uuid FOR UPDATE`;
+    const withdrawal = await tx.withdrawal.findUnique({ where: { id: plan.operationId } });
+    if (
+      !withdrawal ||
+      withdrawal.cancel_requested ||
+      withdrawal.customer_id !== plan.customerId ||
+      withdrawal.domain_id !== plan.domainId ||
+      withdrawal.reset_epoch !== plan.resetEpoch ||
+      withdrawal.request_digest !== plan.requestDigest ||
+      withdrawal.reservation_id !== plan.data.reservationId ||
+      withdrawal.attempt_id !== plan.attemptId ||
+      withdrawal.destination !== plan.data.destination ||
+      withdrawal.principal_units !== plan.data.amount ||
+      withdrawal.hot_wallet_id !== plan.data.sourceWalletId ||
+      plan.data.destinationWalletId !== plan.data.sourceWalletId ||
+      withdrawal.hot_registry_revision !== plan.data.hotRegistryRevision ||
+      plan.data.hotRegistryRevision !== plan.data.sourceRegistryRevision
+    )
+      throw new SweepDeferral(
+        'paused_review',
+        'Withdrawal intent, hold or hot identity is not ready',
+      );
+    await tx.$queryRaw`SELECT id FROM wallets WHERE id=${withdrawal.hot_wallet_id}::uuid FOR UPDATE`;
+    await tx.$queryRaw`SELECT wallet_id FROM exchange_wallet_registry WHERE wallet_id=${withdrawal.hot_wallet_id}::uuid FOR UPDATE`;
+    await tx.$queryRaw`SELECT domain_id FROM asset_configurations WHERE domain_id=${plan.domainId} AND chain=${plan.data.asset.chain} AND network=${plan.data.asset.network} AND asset_id=${plan.data.asset.assetId} FOR UPDATE`;
+    const hot = await tx.wallet.findUnique({ where: { id: withdrawal.hot_wallet_id } });
+    const customer = await tx.exchangeCustomer.findUnique({
+      where: { customer_id: plan.customerId },
+    });
+    const registry = await tx.exchangeWalletRegistry.findUnique({
+      where: { wallet_id: withdrawal.hot_wallet_id },
+    });
+    const asset = await tx.assetConfiguration.findUnique({
+      where: {
+        domain_id_chain_network_asset_id: {
+          domain_id: plan.domainId,
+          ...{
+            chain: plan.data.asset.chain,
+            network: plan.data.asset.network,
+            asset_id: plan.data.asset.assetId,
+          },
+        },
+      },
+    });
+    if (
+      !hot ||
+      hot.custody_role !== 'hot' ||
+      hot.account !== 0 ||
+      hot.customer_id !== null ||
+      !hot.address ||
+      !hot.published_at ||
+      hot.registry_revision !== withdrawal.hot_registry_revision ||
+      hot.chain !== plan.data.asset.chain ||
+      hot.network !== plan.data.asset.network ||
+      !(await this.custody.publicationAllowed(tx, hot)) ||
+      customer?.state !== 'active' ||
+      customer.ledger_status !== 'ready' ||
+      customer.domain_id !== plan.domainId ||
+      customer.reset_epoch !== plan.resetEpoch ||
+      registry?.role !== 'hot' ||
+      registry.address !== hot.address ||
+      registry.reset_epoch !== plan.resetEpoch ||
+      registry.domain_id !== plan.domainId ||
+      registry.registry_revision !== hot.registry_revision ||
+      registry.ledger_ack_revision !== hot.registry_revision ||
+      registry.ledger_status !== 'ready' ||
+      !asset?.withdrawal_enabled ||
+      asset.policy_version !== plan.policyVersion ||
+      plan.data.asset.assetId !== `token:${hot.chain}:native`
+    )
+      throw new SweepDeferral(
+        'paused_review',
+        'Customer, hot custody or withdrawal capability is not ready',
+      );
+    const owned = await tx.wallet.findFirst({
+      where: {
+        chain: hot.chain,
+        network: hot.network,
+        address:
+          hot.chain === 'solana'
+            ? withdrawal.destination
+            : { equals: withdrawal.destination, mode: 'insensitive' },
+      },
+    });
+    if (
+      owned ||
+      (await tx.exchangeWalletRegistry.findFirst({
+        where: {
+          chain: hot.chain,
+          network: hot.network,
+          address:
+            hot.chain === 'solana'
+              ? withdrawal.destination
+              : { equals: withdrawal.destination, mode: 'insensitive' },
+        },
+      }))
+    )
+      throw new SweepDeferral(
+        'paused_review',
+        'Exchange-owned destinations require an internal transfer',
+      );
+    return { source: hot, hot };
+  }
+
   private output(
     execution: CustodyExecution,
     type: string,
@@ -317,8 +453,14 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
   private async deferred(plan: Plan, code: string, reason: string, tx: Prisma.TransactionClient) {
     const response = exchangeEventSchema.parse({
       ...plan,
-      type: 'sweep.plan.deferred.v1',
-      eventId: eventId([plan.attemptId, 'deferred']),
+      type:
+        plan.type === 'withdrawal.plan.requested.v1'
+          ? 'withdrawal.plan.deferred.v1'
+          : 'sweep.plan.deferred.v1',
+      eventId:
+        plan.type === 'withdrawal.plan.requested.v1'
+          ? randomUUID()
+          : eventId([plan.attemptId, 'deferred']),
       causationId: plan.eventId,
       revision: 1,
       data: {
@@ -329,7 +471,9 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         ).toISOString(),
       },
     });
-    await enqueueFanOut(tx, response, [QUEUES.sweep]);
+    await enqueueFanOut(tx, response, [
+      plan.type === 'withdrawal.plan.requested.v1' ? QUEUES.wallet : QUEUES.sweep,
+    ]);
   }
 
   private async plan(plan: Plan) {
@@ -343,7 +487,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
             dedupe_key: `exchange-${eventId([plan.attemptId, 'deferred'])}-${QUEUES.sweep}`,
           },
         });
-        if (retired) {
+        if (retired && plan.type !== 'withdrawal.plan.requested.v1') {
           const response = exchangeEventSchema.parse(retired.payload);
           if (
             response.operationId !== plan.operationId ||
@@ -438,7 +582,8 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
               dedupe_key: `exchange-${eventId([plan.attemptId, 'deferred'])}-${QUEUES.sweep}`,
             },
           });
-          if (!existing) await this.deferred(plan, error.code, error.message, tx);
+          if (!existing || plan.type === 'withdrawal.plan.requested.v1')
+            await this.deferred(plan, error.code, error.message, tx);
           return null;
         });
       } else {
@@ -456,7 +601,11 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         chain: plan.data.asset.chain,
         network: plan.data.asset.network,
         sourceAddress: wallets.source.address!,
-        hotAddress: wallets.hot.address!,
+        hotAddress:
+          plan.type === 'withdrawal.plan.requested.v1'
+            ? plan.data.destination
+            : wallets.hot.address!,
+        ...(plan.type === 'withdrawal.plan.requested.v1' ? { amount: plan.data.amount } : {}),
       });
       const request = signSchema.parse({
         wallet: {
@@ -515,19 +664,47 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         });
         await enqueueFanOut(
           tx,
-          this.output(updated, 'sweep.plan.prepared.v1', {
-            sourceWalletId: current.source_wallet_id,
-            destinationWalletId: current.hot_wallet_id,
-            amount: { asset: plan.data.asset, amount: prepared.amount },
-            preparationDigest: updated.preparation_digest,
-            maxFeeUnits: prepared.maxFeeUnits,
-            expiresAt: prepared.expiresAt,
-          }),
-          [QUEUES.sweep],
+          this.output(
+            updated,
+            plan.type === 'withdrawal.plan.requested.v1'
+              ? 'withdrawal.plan.prepared.v1'
+              : 'sweep.plan.prepared.v1',
+            {
+              sourceWalletId: current.source_wallet_id,
+              destinationWalletId: current.hot_wallet_id,
+              amount: { asset: plan.data.asset, amount: prepared.amount },
+              preparationDigest: updated.preparation_digest,
+              maxFeeUnits: prepared.maxFeeUnits,
+              expiresAt: prepared.expiresAt,
+            },
+          ),
+          [plan.type === 'withdrawal.plan.requested.v1' ? QUEUES.wallet : QUEUES.sweep],
         );
       });
     } catch (error) {
       if (error instanceof ActionRejectedError) throw error;
+      if (plan.type === 'withdrawal.plan.requested.v1') {
+        await this.db.$transaction(async (tx) => {
+          await lock(tx, `custody-source:${execution.source_wallet_id}`);
+          const current = await tx.custodyExecution.findUniqueOrThrow({
+            where: { id: execution.id },
+          });
+          if (current.state !== 'planning' || current.authorization || current.retired_at) return;
+          const updated = await tx.custodyExecution.update({
+            where: { id: current.id },
+            data: {
+              last_error:
+                error instanceof SweepDeferral
+                  ? error.message
+                  : 'Canonical preparation unavailable; hold retained',
+              next_check_at: new Date(Date.now() + this.config.pollIntervalMs),
+              revision: { increment: 1 },
+            },
+          });
+          await this.emitAttempt(tx, updated, false);
+        });
+        return;
+      }
       await this.unsignedFailure(
         execution,
         error instanceof SweepDeferral ? error.code : 'preparation_failed',
@@ -563,8 +740,14 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       const plan = current.plan as unknown as Plan;
       const response = exchangeEventSchema.parse({
         ...plan,
-        type: 'sweep.plan.deferred.v1',
-        eventId: eventId([plan.attemptId, 'deferred']),
+        type:
+          plan.type === 'withdrawal.plan.requested.v1'
+            ? 'withdrawal.plan.deferred.v1'
+            : 'sweep.plan.deferred.v1',
+        eventId:
+          plan.type === 'withdrawal.plan.requested.v1'
+            ? randomUUID()
+            : eventId([plan.attemptId, 'deferred']),
         causationId: plan.eventId,
         revision: 1,
         data: {
@@ -577,7 +760,9 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
           ).toISOString(),
         },
       });
-      await enqueueFanOut(tx, response, [QUEUES.sweep]);
+      await enqueueFanOut(tx, response, [
+        plan.type === 'withdrawal.plan.requested.v1' ? QUEUES.wallet : QUEUES.sweep,
+      ]);
     });
   }
 
@@ -590,7 +775,10 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     const plan = execution.plan as unknown as Plan;
     if (
       event.data.sourceWalletId !== execution.source_wallet_id ||
-      event.data.destinationWalletId !== execution.hot_wallet_id ||
+      (event.type === 'sweep.execute.requested.v1'
+        ? event.data.destinationWalletId !== execution.hot_wallet_id
+        : plan.type !== 'withdrawal.plan.requested.v1' ||
+          event.data.destination !== plan.data.destination) ||
       event.data.amount.amount !== execution.principal_units ||
       canonical(event.data.amount.asset) !== canonical(plan.data.asset) ||
       event.data.preparationDigest !== execution.preparation_digest ||
@@ -615,29 +803,45 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         const authorization = signExecutionAuthorization(
           {
             version: 1,
-            purpose: 'native_sweep',
+            ...(plan.type === 'withdrawal.plan.requested.v1'
+              ? {
+                  purpose: 'native_withdrawal' as const,
+                  reservationId: plan.data.reservationId,
+                  source: {
+                    walletId: source.id,
+                    role: 'hot' as const,
+                    account: 0 as const,
+                    path: source.path,
+                    address: source.address!,
+                    registryRevision: source.registry_revision,
+                  },
+                  target: { role: 'external' as const, address: plan.data.destination },
+                }
+              : {
+                  purpose: 'native_sweep' as const,
+                  source: {
+                    walletId: source.id,
+                    role: 'customer_deposit' as const,
+                    account: source.account,
+                    path: source.path,
+                    address: source.address!,
+                    registryRevision: source.registry_revision,
+                  },
+                  target: {
+                    walletId: hot.id,
+                    role: 'hot' as const,
+                    account: 0 as const,
+                    path: hot.path,
+                    address: hot.address!,
+                    seedId: hot.seed_id,
+                    domainId: plan.domainId,
+                    registryRevision: hot.registry_revision,
+                  },
+                }),
             domainId: plan.domainId,
             resetEpoch: plan.resetEpoch,
             seedId: source.seed_id,
             customerId: plan.customerId,
-            source: {
-              walletId: source.id,
-              role: 'customer_deposit',
-              account: source.account,
-              path: source.path,
-              address: source.address!,
-              registryRevision: source.registry_revision,
-            },
-            target: {
-              walletId: hot.id,
-              role: 'hot',
-              account: 0,
-              path: hot.path,
-              address: hot.address!,
-              seedId: hot.seed_id,
-              domainId: plan.domainId,
-              registryRevision: hot.registry_revision,
-            },
             asset: plan.data.asset,
             policyVersion: 'exchange-financial-v1',
             operationId: current.operation_id,
@@ -664,6 +868,13 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
           where: { id: current.transaction_id },
           data: { status: 'signing' },
         });
+        if (event.type === 'withdrawal.execute.requested.v1') {
+          await enqueueFanOut(tx, event, [QUEUES.ledger, QUEUES.activity]);
+          await tx.withdrawal.update({
+            where: { id: current.operation_id },
+            data: { state: 'executing', revision: { increment: 1 } },
+          });
+        }
         await enqueue(
           tx,
           QUEUES.signer,
@@ -725,7 +936,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         execution,
         'execution.attempt.updated.v1',
         {
-          state: execution.state,
+          state: execution.state === 'planning' ? 'preparing' : execution.state,
           ...(transaction.tx_hash ? { transactionHash: transaction.tx_hash } : {}),
           ...(execution.last_error ? { reason: execution.last_error } : {}),
           terminalSafe,
@@ -733,7 +944,13 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         },
         execution.revision,
       ),
-      [QUEUES.ledger, QUEUES.activity, QUEUES.sweep],
+      [
+        QUEUES.ledger,
+        QUEUES.activity,
+        (execution.plan as unknown as Plan).type === 'withdrawal.plan.requested.v1'
+          ? QUEUES.wallet
+          : QUEUES.sweep,
+      ],
     );
   }
 
@@ -1158,11 +1375,15 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         updated.ledger_ack_revision === updated.settlement_revision &&
         updated.ledger_ack_revision > 0 &&
         !updated.reversed &&
-        !updated.retired_at
+        updated.terminal_proof_revision < updated.settlement_revision
       ) {
         const retired = await tx.custodyExecution.update({
           where: { id: updated.id },
-          data: { retired_at: new Date(), revision: { increment: 1 } },
+          data: {
+            retired_at: updated.retired_at ?? new Date(),
+            terminal_proof_revision: updated.settlement_revision,
+            revision: { increment: 1 },
+          },
         });
         await tx.executionResourceClaim.updateMany({
           where: { execution_id: updated.id, active: true },

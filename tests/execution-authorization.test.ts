@@ -34,7 +34,7 @@ const request: SignRequest = {
   },
 };
 
-function claims(): ExecutionAuthorizationClaims {
+function claims(): Extract<ExecutionAuthorizationClaims, { purpose: 'native_sweep' }> {
   const requestHash = executionRequestDigest(request);
   return {
     version: 1,

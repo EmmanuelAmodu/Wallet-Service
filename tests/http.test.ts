@@ -53,7 +53,7 @@ async function stop(child: ChildProcess) {
 }
 
 test(
-  'HTTP + Redis + Prisma: offline workers, async signing, retries, lost response reconciliation, replicas and confirmations',
+  'Legacy HTTP transport fixture: offline workers, async signing, retries, lost response reconciliation, replicas and confirmations',
   {
     skip:
       !process.env.TEST_DATABASE_URL ||
@@ -166,13 +166,20 @@ test(
     let logs = '';
 
     function start(name: string, overrides: Record<string, string> = {}) {
-      const child = spawn(process.execPath, [resolve(`dist/apps/${name}/src/main.js`)], {
+      // Keep legacy transport coverage in a test-only signing fixture; production
+      // custody workers must never regain legacy signing via a feature switch.
+      const entry =
+        name === 'signer'
+          ? 'dist/tests/helpers/legacy-signer-worker.js'
+          : `dist/apps/${name}/src/main.js`;
+      const child = spawn(process.execPath, [resolve(entry)], {
         env: {
           ...env,
           DATABASE_URL: undefined,
           WALLET_DATABASE_URL: name === 'wallet' ? walletFixture.url : undefined,
           BROADCAST_DATABASE_URL:
             name === 'broadcast' ? process.env.TEST_BROADCAST_DATABASE_URL : undefined,
+          ...(name === 'broadcast' ? { EXCHANGE_DOMAIN_ID: undefined } : {}),
           ...overrides,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
