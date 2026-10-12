@@ -67,3 +67,7 @@ Bounded fair repair scans replay missing reservation commands with the original 
 The build and targeted PostgreSQL/RPC/signature tests verify hot0 payments, exact native amounts and Bitcoin hot change, JWT ownership, strict input, idempotency, concurrent customer holds, low liquidity, cancellation races, frozen/changed destination authority, lost results, failed transaction fees, outgoing reorg restoration and same-attempt recovery. The final 11 October whole-repository run passed all 343 tests with no failures or skips using six dedicated PostgreSQL databases and Redis. Application/tooling build, ESLint, formatting, Compose configuration and diff checks passed. See the TODO checklist for local and live acceptance gates.
 
 Live chain submission, external provider certification, application-image startup, deployment migrations and real fund movements have not been performed. Keep both native execution flags and broadcast disabled until the outstanding deployment and chain acceptance gates are complete.
+
+## Recipient policy update — 11 October
+
+Native Ethereum recipients now reject deployed/delegated code at finalized and pending RPC checks during planning/revalidation and immediately before dispatch. Reserved/precompile addresses are rejected. Native Solana recipients must be on-curve ordinary System accounts; dispatch rechecks program ownership. Phase 6 uses the same recipient-owner policy for token payouts. ERC-20 transfer calldata is generated internally; arbitrary contract calls and approvals are excluded.

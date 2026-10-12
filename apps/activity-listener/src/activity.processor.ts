@@ -3,6 +3,7 @@ import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job, UnrecoverableError } from 'bullmq';
 import { ActionRejectedError } from '../../../packages/shared/src/action-rejected.error.js';
 import { Message, MessageAuth, QUEUES } from '../../../packages/queue/src/messages.js';
+import { TokenRegistryService } from './registry/token-registry.service.js';
 import { ActivityWorkflowService } from './activity-workflow.service.js';
 import { ActivityRegistryService } from './registry/registry.service.js';
 import { ActivityExchangeService } from './exchange/exchange.service.js';
@@ -14,6 +15,7 @@ export class ActivityProcessor extends WorkerHost implements BeforeApplicationSh
     private readonly auth: MessageAuth,
     @Optional() private readonly registry?: ActivityRegistryService,
     @Optional() private readonly exchange?: ActivityExchangeService,
+    @Optional() private readonly tokens?: TokenRegistryService,
   ) {
     super();
   }
@@ -31,7 +33,10 @@ export class ActivityProcessor extends WorkerHost implements BeforeApplicationSh
     }
     try {
       const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
-      if (
+      if(message.type==='asset.transfer.registry.requested.v1') {
+        if(!this.tokens)throw new ActionRejectedError('Token registry unavailable');
+        await this.tokens.register(message);
+      } else if (
         message.type === 'customer-wallet.registry.requested.v1' ||
         message.type === 'custody-wallet.registry.requested.v1'
       ) {

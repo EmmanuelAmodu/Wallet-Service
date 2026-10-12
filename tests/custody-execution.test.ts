@@ -8,6 +8,10 @@ import { SweepPrismaService } from '../apps/sweep/src/prisma/prisma.service.js';
 import { CustodyService } from '../apps/wallet/src/custody/custody.service.js';
 import { ExchangeCustomersService } from '../apps/wallet/src/customers/customers.service.js';
 import { ExchangeMessagingService } from '../apps/wallet/src/exchange-messaging/exchange-messaging.service.js';
+import {
+  TokenFeesService,
+  TokenFeeRequest,
+} from '../apps/wallet/src/execution/token-fees.service.js';
 import { CustodyExecutionService } from '../apps/wallet/src/execution/execution.service.js';
 import { WalletWorkflowService } from '../apps/wallet/src/messaging/wallet-workflow.service.js';
 import {
@@ -1612,5 +1616,228 @@ test(
     next.rpc.signed = signed.signed;
     await next.service.handle(signed);
     await next.settle(b.id);
+  },
+);
+
+async function fundingFixture() {
+  // The preceding recovery test deliberately pauses this isolated fixture domain.
+  await db.custodyDomain.update({ where: { id: settings.domainId }, data: { status: 'active' } });
+  const f = await fixture();
+  const management = await db.wallet.findFirstOrThrow({
+    where: {
+      custody_domain_id: settings.domainId,
+      chain: 'ethereum',
+      custody_role: 'management',
+      account: 1,
+    },
+  });
+  const certificate = {
+    standard: 'erc20',
+    chain: 'ethereum',
+    network: '11155111',
+    contract: '0x' + 'ae'.repeat(20),
+    decimals: 6,
+    certificateId: 'budget-fixture',
+    semantics: 'exact-transfer',
+    runtimeCodeHash: '0x' + 'ab'.repeat(32),
+    upgradePolicy: 'immutable',
+  } as const;
+  const identity = {
+    domain_id: settings.domainId,
+    chain: 'ethereum',
+    network: '11155111',
+    asset_id: `token:ethereum:erc20:${certificate.contract}`,
+  };
+  await db.assetConfiguration.upsert({
+    where: { domain_id_chain_network_asset_id: identity },
+    update: {},
+    create: {
+      ...identity,
+      standard: 'erc20',
+      decimals: 6,
+      symbol: 'TEST',
+      name: 'Test transfer asset',
+      contract_address: certificate.contract,
+      minimum_credit_units: '1',
+      minimum_sweep_units: '1',
+      maximum_fee_units: '5000000000000000',
+      policy_version: 'exchange-financial-v1',
+      transfer_certificate: certificate,
+      sweep_enabled: true,
+    },
+  });
+  const request: TokenFeeRequest = {
+    domainId: settings.domainId,
+    resetEpoch: auth.resetEpoch,
+    customerId: f.customerId,
+    sourceWalletId: f.source.id,
+    managementWalletId: management.id,
+    sourceRegistryRevision: f.source.registry_revision,
+    managementRegistryRevision: management.registry_revision,
+    operationId: randomUUID(),
+    attemptId: randomUUID(),
+    generation: 1,
+    certificate,
+    kind: 'gas_funding',
+    principalUnits: '1000000000000000',
+    maximumFeeUnits: '100000000000000',
+    maximumRentUnits: '0',
+  };
+  return { ...f, request, fees: new TokenFeesService(db, f.rpc) };
+}
+
+test(
+  'token fee reservations are atomic and idempotent, and conflicting dependency payloads cannot replace an intent',
+  { skip: !enabled },
+  async () => {
+    const f = await fundingFixture();
+    const rows = await Promise.all([f.fees.reserve(f.request), f.fees.reserve(f.request)]);
+    assert.equal(rows[0].id, rows[1].id);
+    assert.equal(rows[0].reserved_units, '1100000000000000');
+    await assert.rejects(
+      f.fees.reserve({ ...f.request, principalUnits: '2000000000000000' }),
+      /immutable/,
+    );
+    await assert.rejects(
+      f.fees.reserve({
+        ...f.request,
+        generation: 2,
+        operationId: randomUUID(),
+        attemptId: randomUUID(),
+      }),
+      /outstanding/,
+    );
+    await assert.rejects(
+      db.tokenFeeReservation.update({ where: { id: rows[0].id }, data: { principal_units: '2' } }),
+      /immutable/,
+    );
+    await db.tokenFeeReservation.update({
+      where: { id: rows[0].id },
+      data: { state: 'uncertain' },
+    });
+    await assert.rejects(
+      db.tokenFeeReservation.update({ where: { id: rows[0].id }, data: { state: 'released' } }),
+      /cannot be released/,
+    );
+  },
+);
+
+test(
+  'token fee liquidity includes other wallets pending claims even when each quote individually fits',
+  { skip: !enabled },
+  async () => {
+    const a = await fundingFixture(),
+      b = await fundingFixture();
+    const left = await a.fees.reserve(a.request);
+    b.rpc.balance =
+      BigInt(left.reserved_units) +
+      BigInt(b.request.principalUnits) +
+      BigInt(b.request.maximumFeeUnits) -
+      1n;
+    await assert.rejects(b.fees.reserve(b.request), /liquidity/);
+    assert.equal(
+      await db.tokenFeeReservation.count({ where: { source_wallet_id: b.source.id } }),
+      0,
+    );
+  },
+);
+
+test(
+  'token funding fails closed for an unready registry, changed certificate and operation caps',
+  { skip: !enabled },
+  async () => {
+    const f = await fundingFixture();
+    await assert.rejects(f.fees.reserve({ ...f.request, sourceRegistryRevision: 2 }), /authority/);
+    await assert.rejects(
+      f.fees.reserve({
+        ...f.request,
+        certificate: { ...f.request.certificate, certificateId: 'changed' },
+      }),
+      /authority/,
+    );
+    await assert.rejects(
+      f.fees.reserve({ ...f.request, principalUnits: '5000000000000001' }),
+      /per-operation/,
+    );
+    f.rpc.balance = 1n;
+    await assert.rejects(f.fees.reserve(f.request), /liquidity/);
+  },
+);
+
+test(
+  'rolling token funding budget counts settled actual costs and excludes only settlements older than 24 hours',
+  { skip: !enabled },
+  async () => {
+    const recent = await fundingFixture();
+    const held = await recent.fees.reserve({
+      ...recent.request,
+      principalUnits: '4900000000000000',
+    });
+    await db.tokenFeeReservation.update({
+      where: { id: held.id },
+      data: { state: 'settled', actual_units: held.reserved_units, settled_at: new Date() },
+    });
+    await assert.rejects(
+      recent.fees.reserve({
+        ...recent.request,
+        generation: 2,
+        operationId: randomUUID(),
+        attemptId: randomUUID(),
+        principalUnits: '5000000000000000',
+      }),
+      /Rolling fee budget/,
+    );
+    await assert.rejects(
+      db.tokenFeeReservation.update({ where: { id: held.id }, data: { actual_units: '0' } }),
+      /settlement is immutable/,
+    );
+    await assert.rejects(
+      db.tokenFeeReservation.update({
+        where: { id: held.id },
+        data: { state: 'released', actual_units: null, settled_at: null },
+      }),
+      /Invalid fee dependency transition/,
+    );
+    const old = await fundingFixture(),
+      r = old.request;
+    await db.tokenFeeReservation.create({
+      data: {
+        id: randomUUID(),
+        domain_id: r.domainId,
+        reset_epoch: r.resetEpoch,
+        customer_id: r.customerId,
+        source_wallet_id: r.sourceWalletId,
+        management_wallet_id: r.managementWalletId,
+        chain: r.certificate.chain,
+        network: r.certificate.network,
+        dependency_key: executionDigest([
+          r.domainId,
+          r.resetEpoch,
+          r.sourceWalletId,
+          `token:ethereum:erc20:${r.certificate.standard === 'erc20' ? r.certificate.contract : ''}`,
+          r.generation,
+          r.kind,
+        ]),
+        request_digest: executionDigest(r),
+        kind: r.kind,
+        principal_units: '4900000000000000',
+        maximum_fee_units: '100000000000000',
+        maximum_rent_units: '0',
+        reserved_units: '5000000000000000',
+        state: 'settled',
+        actual_units: '5000000000000000',
+        created_at: new Date(Date.now() - 26 * 3600000),
+        settled_at: new Date(Date.now() - 25 * 3600000),
+        request: { ...r, principalUnits: '4900000000000000' },
+      },
+    });
+    const next = await old.fees.reserve({
+      ...r,
+      generation: 2,
+      operationId: randomUUID(),
+      attemptId: randomUUID(),
+      principalUnits: '5000000000000000',
+    });
+    assert.equal(next.state, 'reserved');
   },
 );

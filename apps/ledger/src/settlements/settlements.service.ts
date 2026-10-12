@@ -9,6 +9,7 @@ import {
 } from '../../../../packages/queue/src/exchange-contracts.js';
 import { canonical, QUEUES } from '../../../../packages/queue/src/messages.js';
 import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
+import { tokenAsset } from '../../../../packages/shared/src/token-contracts.js';
 import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import {
   canonicalTransactionHash,
@@ -134,6 +135,7 @@ export class SettlementsService {
         throw new ActionRejectedError(
           'Execution operation identity and approved request are immutable',
         );
+      await this.acknowledgeExecution(tx,event);
       return;
     }
     const source = await this.wallet(tx, event.data.sourceWalletId, event, event.data.amount.asset);
@@ -207,12 +209,20 @@ export class SettlementsService {
         );
       if (
         event.type === 'funding.execute.requested.v1' &&
-        (source.role !== 'management' || destination.role !== 'customer')
+        (source.role !== 'management' ||
+          source.account !== 1 ||
+          destination.role !== 'customer' ||
+          (event.customerId && destination.customer_id !== event.customerId) ||
+          event.data.amount.asset.assetId !== `token:${source.chain}:native` ||
+          !['ethereum', 'solana'].includes(source.chain) ||
+          BigInt(event.data.amount.amount) >
+            (source.chain === 'ethereum' ? 5_000_000_000_000_000n : 10_000_000n))
       )
         throw new ActionRejectedError(
           'Funding must move management custody to registered customer custody',
         );
     }
+    await this.costAuthority(tx, event, source);
     if (reversals.some((row) => row.customer_id && row.customer_id !== customerId))
       throw new ActionRejectedError('Reversed execution customer identity is immutable');
     await tx.exchangeOperation.create({
@@ -239,6 +249,76 @@ export class SettlementsService {
         reset_epoch: event.resetEpoch,
       },
     });
+    await this.acknowledgeExecution(tx,event);
+  }
+
+  private async acknowledgeExecution(tx: Prisma.TransactionClient, event: ExecuteEvent) {
+    if(event.type!=='funding.execute.requested.v1' && !('tokenCosts' in event.data && event.data.tokenCosts)) return;
+    await enqueue(tx,QUEUES.wallet,exchangeEventSchema.parse({...resultIdentity(event),type:'execution.registry.acknowledged.v1',operationId:event.operationId,attemptId:event.attemptId,requestDigest:event.requestDigest,data:{consumer:'ledger'}}),`execution-registry:${event.operationId}:ledger`);
+  }
+
+  private async costAuthority(
+    tx: Prisma.TransactionClient,
+    execution: ExecuteEvent,
+    source: ExchangeWallet,
+    checkRevision = true,
+  ) {
+    if (execution.type === 'funding.execute.requested.v1') return { payer: source };
+    if (!execution.data.tokenCosts) {
+      if (execution.data.amount.asset.assetId !== `token:${source.chain}:native`)
+        throw new ActionRejectedError('Token execution requires a certified fee and rent binding');
+      return { payer: source };
+    }
+    const costs = execution.data.tokenCosts;
+    if (
+      BigInt(costs.maximumFeeUnits) >
+        (costs.certificate.standard === 'erc20' ? 5_000_000_000_000_000n : 100_000n) ||
+      BigInt(costs.maximumRentUnits) > (costs.certificate.standard === 'erc20' ? 0n : 10_000_000n)
+    )
+      throw new ActionRejectedError('Token cost authorization exceeds fee/rent policy');
+    if (assetKey(tokenAsset(costs.certificate)) !== assetKey(execution.data.amount.asset))
+      throw new ActionRejectedError('Token cost certificate does not match principal');
+    const payer = await this.wallet(
+      tx,
+      costs.feePayerWalletId,
+      execution,
+      execution.data.amount.asset,
+    );
+    if (checkRevision && payer.registry_revision !== costs.feePayerRegistryRevision)
+      throw new ActionRejectedError('Token fee payer registry revision changed');
+    if (costs.certificate.standard === 'erc20') {
+      if (
+        payer.wallet_id !== source.wallet_id ||
+        costs.maximumRentUnits !== '0' ||
+        costs.rentCustodyWalletId
+      )
+        throw new ActionRejectedError('ERC-20 fees must use the source; rent is unsupported');
+    } else if (execution.type === 'sweep.execute.requested.v1') {
+      if (
+        source.role !== 'customer' ||
+        payer.role !== 'management' ||
+        payer.account !== 1 ||
+        costs.rentCustodyWalletId !== execution.data.destinationWalletId
+      )
+        throw new ActionRejectedError('SPL sweep requires management1 fees and hot-owned rent');
+      const hot = await this.wallet(
+        tx,
+        costs.rentCustodyWalletId,
+        execution,
+        execution.data.amount.asset,
+      );
+      if (hot.role !== 'hot' || hot.account !== 0 || source.hot_wallet_id !== hot.wallet_id)
+        throw new ActionRejectedError('SPL rent beneficiary must be the registered hot wallet');
+    } else if (
+      payer.wallet_id !== source.wallet_id ||
+      source.role !== 'hot' ||
+      costs.rentCustodyWalletId
+    ) {
+      throw new ActionRejectedError(
+        'SPL withdrawal pays from hot custody; external rent is expense',
+      );
+    }
+    return { payer };
   }
 
   private async reversals(
@@ -325,6 +405,15 @@ export class SettlementsService {
       event,
       execution.data.amount.asset,
     );
+    const { payer } = await this.costAuthority(tx, execution, source, false);
+    const costs =
+      execution.type === 'funding.execute.requested.v1' ? undefined : execution.data.tokenCosts;
+    const rent = BigInt(event.data.actualRentUnits ?? '0');
+    if (
+      rent > 0n &&
+      (!costs || costs.certificate.standard !== 'spl' || event.data.outcome !== 'confirmed')
+    )
+      throw new ActionRejectedError('Rent requires an approved successful SPL account creation');
     const hash = canonicalTransactionHash(
       execution.data.amount.asset.chain,
       event.data.transactionHash,
@@ -334,6 +423,7 @@ export class SettlementsService {
       identity,
       outcome: event.data.outcome,
       actualFees: event.data.actualFees,
+      ...(rent > 0n ? { actualRentUnits: rent.toString() } : {}),
     });
     if (operation.settlement_identity && operation.settlement_identity !== identity)
       throw new ActionRejectedError('An immutable attempt cannot settle a different transaction');
@@ -465,10 +555,27 @@ export class SettlementsService {
           amount: BigInt(fee.amount),
         },
         {
-          account: this.custody(event.domainId, fee.asset, source),
+          account: this.custody(event.domainId, fee.asset, payer),
           side: 'credit',
           amount: BigInt(fee.amount),
         },
+      );
+    }
+    if (rent > 0n) {
+      const native: CanonicalAsset = {
+        chain: source.chain as CanonicalAsset['chain'],
+        network: source.network,
+        assetId: `token:${source.chain}:native`,
+      };
+      postings.push(
+        {
+          account: costs!.rentCustodyWalletId
+            ? this.account(event.domainId, native, 'custody_rent', costs!.rentCustodyWalletId)
+            : this.account(event.domainId, native, 'fee_expense', event.domainId),
+          side: 'debit',
+          amount: rent,
+        },
+        { account: this.custody(event.domainId, native, payer), side: 'credit', amount: rent },
       );
     }
     const batch = await this.journal.post(tx, {
@@ -501,7 +608,11 @@ export class SettlementsService {
             ? 100000n
             : undefined;
     const actualFee = event.data.actualFees.reduce((sum, fee) => sum + BigInt(fee.amount), 0n);
-    if (feeCap !== undefined && actualFee > feeCap)
+    if (
+      (feeCap !== undefined && actualFee > feeCap) ||
+      (costs &&
+        (actualFee > BigInt(costs.maximumFeeUnits) || rent > BigInt(costs.maximumRentUnits)))
+    )
       await this.incident(
         tx,
         event,

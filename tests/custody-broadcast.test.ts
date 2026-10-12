@@ -1,3 +1,4 @@
+import { signSchema } from '../packages/shared/src/contracts.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
@@ -544,7 +545,7 @@ test(
     const f = fixture();
     const execution = f.snapshot.execution!;
     execution.preparedRequest.wallet.account = 0;
-    execution.preparationDigest = executionRequestDigest(execution.preparedRequest);
+    execution.preparationDigest = executionRequestDigest(signSchema.parse(execution.preparedRequest));
     const body = {
       type: 'transaction.custody.signed',
       transactionId: f.transactionId,

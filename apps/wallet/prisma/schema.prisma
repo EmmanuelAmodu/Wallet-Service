@@ -149,6 +149,7 @@ model AssetConfiguration {
   maximum_fee_units      String
   policy_version         String
   configuration_revision Int            @default(1)
+  transfer_certificate   Json?
   custody_network        CustodyNetwork @relation(fields: [domain_id, chain, network], references: [domain_id, chain, network], onDelete: NoAction, onUpdate: NoAction)
   created_at             DateTime       @default(now()) @db.Timestamptz
 
@@ -196,6 +197,8 @@ model CustodyExecution {
   plan                Json
   prepared_request    Json?
   preparation_digest  String?
+  ledger_intent_ack Boolean @default(false)
+  listener_intent_ack Boolean @default(false)
   authorization       Json?
   signer_result       Json?
   principal_units     String?
@@ -409,4 +412,50 @@ model Withdrawal {
   @@index([state, next_check_at, id])
   @@index([customer_id, created_at, id])
   @@map("withdrawals")
+}
+
+// Pending and uncertain exposure never expires out of the rolling budget.
+model TokenFeeReservation {
+  id                    String @id @db.Uuid
+  domain_id             String
+  reset_epoch           String
+  customer_id           String @db.Uuid
+  source_wallet_id      String @db.Uuid
+  management_wallet_id  String @db.Uuid
+  chain                 String
+  network               String
+  dependency_key        String @unique
+  request_digest        String
+  kind                  String
+  principal_units       String
+  maximum_fee_units     String
+  maximum_rent_units    String
+  reserved_units        String
+  actual_units          String?
+  state                 String
+  request               Json
+  settled_at            DateTime? @db.Timestamptz
+  created_at            DateTime @default(now()) @db.Timestamptz
+  updated_at            DateTime @default(now()) @updatedAt @db.Timestamptz
+
+  @@unique([domain_id, reset_epoch, source_wallet_id, chain, network], where: raw("\"state\" IN ('reserved','uncertain')"), map: "one_pending_token_fee_dependency")
+  @@index([domain_id, reset_epoch, chain, network, settled_at])
+  @@map("token_fee_reservations")
+}
+
+model TokenWalletCoverage {
+ readiness_revision Int @default(0)
+ wallet_id String @db.Uuid
+ asset_id String
+ domain_id String
+ reset_epoch String
+ certificate_digest String
+ configuration_revision Int
+ registry_revision Int
+ generation String @db.Uuid
+ ready Boolean @default(false)
+ cursor String?
+ updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+ @@id([wallet_id,asset_id])
+ @@map("token_wallet_coverage")
 }

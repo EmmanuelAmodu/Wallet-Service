@@ -31,6 +31,10 @@ export const signerConfig = registerAs('signer', () => {
   const withdrawals = process.env.ENABLE_NATIVE_WITHDRAWALS ?? 'false';
   if (!['true', 'false'].includes(withdrawals))
     throw new Error('ENABLE_NATIVE_WITHDRAWALS must be true or false');
+  const tokens = process.env.ENABLE_TOKEN_SIGNING ?? 'false';
+  if (!['true', 'false'].includes(tokens))
+    throw new Error('ENABLE_TOKEN_SIGNING must be true or false');
+  const tokenSigningEnabled = tokens === 'true';
   const nativeWithdrawalsEnabled = withdrawals === 'true';
   const nativeSweepsEnabled = enable === 'true';
   const ethereumChainId = required('ETH_CHAIN_ID');
@@ -49,8 +53,9 @@ export const signerConfig = registerAs('signer', () => {
     ethereumChainIds: chainIds,
     domainId: required('EXCHANGE_DOMAIN_ID'),
     nativeSweepsEnabled,
+    tokenSigningEnabled,
     nativeWithdrawalsEnabled,
-    ...(nativeSweepsEnabled || nativeWithdrawalsEnabled
+    ...(nativeSweepsEnabled || nativeWithdrawalsEnabled || tokenSigningEnabled
       ? {
           executionAuthorityPublicKey: executionKey('EXECUTION_AUTHORITY_PUBLIC_KEY_FILE', false),
           executionSignerPrivateKey: executionKey('EXECUTION_SIGNER_PRIVATE_KEY_FILE', true),

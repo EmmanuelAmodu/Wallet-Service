@@ -28,7 +28,10 @@ export class SignerProcessor extends WorkerHost implements BeforeApplicationShut
     }
     let result: Message;
     try {
-      result = this.service.execute(action);
+      result =
+        action.type === 'transaction.token.sign'
+          ? await this.service.executeToken(action)
+          : this.service.execute(action);
     } catch (error) {
       if (error instanceof ActionRejectedError) throw new UnrecoverableError(error.message);
       throw error;

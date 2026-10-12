@@ -10,9 +10,11 @@ import { exchangeEventSchema, ExchangeEvent } from './exchange-contracts.js';
 import { exchangeDiscoverySchema } from '../../shared/src/exchange-discovery.js';
 import {
   custodySignSchema,
+  tokenCustodySignSchema,
   custodySignedSchema,
   custodyRejectedSchema,
 } from '../../shared/src/execution-contracts.js';
+import { tokenPreparationSchema, tokenSignRequestSchema } from '../../shared/src/token-contracts.js';
 import { signerAttestationSchema } from '../../shared/src/execution-authorization.js';
 
 export const QUEUES = {
@@ -101,7 +103,8 @@ export const broadcastSnapshotSchema = z
       .extend({
         domainId: z.string().min(1).max(128),
         resetEpoch: z.string().min(1).max(128),
-        preparedRequest: signSchema,
+        preparedRequest: z.union([signSchema,tokenSignRequestSchema]),
+        tokenPreparation: tokenPreparationSchema.optional(),
         signerAttestation: signerAttestationSchema,
       })
       .strict()
@@ -151,6 +154,7 @@ const legacyMessageSchema = z.discriminatedUnion('type', [
   walletDerivedSchema,
   walletRejectedSchema,
   custodySignSchema,
+  tokenCustodySignSchema,
   custodySignedSchema,
   custodyRejectedSchema,
   z.object({ type: z.literal('execution.reconcile'), transactionId: z.uuid() }).strict(),

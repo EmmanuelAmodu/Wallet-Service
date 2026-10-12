@@ -12,6 +12,7 @@ import {
 import { ChainRpcService, RpcFailure } from './chain-rpc.service.js';
 import { getWalletCore } from './coin-metadata.js';
 import { regtestWitnessAddress } from './bitcoin-address.js';
+import { assertEvmExternalAddress, assertSolanaExternalAddress } from './recipient-policy.js';
 
 export type NativeSweepChain = 'ethereum' | 'bitcoin' | 'solana';
 export interface NativeSweepPlan {
@@ -173,6 +174,7 @@ export class NativeSweepPlanner {
   }
 
   private async ethereum(input: { sourceAddress: string; hotAddress: string; amount?: string }) {
+    assertEvmExternalAddress(input.hotAddress);
     const source = z
       .string()
       .regex(/^0x[0-9a-f]{40}$/)
@@ -191,8 +193,9 @@ export class NativeSweepPlanner {
         this.rpc.call('ethereum', 'eth_maxPriorityFeePerGas', []),
         this.rpc.call('ethereum', 'eth_getCode', [hot, 'finalized']),
       ]);
-    if (input.amount === undefined && code !== '0x')
-      defer('attention', 'Native hot wallet must be an externally owned account');
+    const pendingCode = await this.rpc.call('ethereum', 'eth_getCode', [hot, 'pending']);
+    if (code !== '0x' || pendingCode !== '0x')
+      defer('attention', 'Native Ethereum recipient must have no contract or delegated code');
     const latestNonce = BigInt(hexQuantity.parse(latestNonceRaw));
     const pendingNonce = BigInt(hexQuantity.parse(pendingNonceRaw));
     if (latestNonce !== pendingNonce)
@@ -416,6 +419,7 @@ export class NativeSweepPlanner {
     rent: bigint,
     floor: number,
   ) {
+    await assertSolanaExternalAddress(address);
     const result = z
       .object({
         context: z.object({ slot: safeInteger }),
@@ -521,13 +525,12 @@ export class NativeSweepPlanner {
     if (available < amount + rent + fee)
       defer('waiting_funds', 'Hot liquidity cannot cover principal, fees and rent');
     budget(amount, fee, 1_000_000n, 100_000n, input.amount !== undefined);
-    if (input.amount !== undefined)
-      await this.withdrawalSolanaRecipient(
-        input.hotAddress,
-        amount,
-        rent,
-        Math.max(balance.context.slot, account.context.slot),
-      );
+    await this.withdrawalSolanaRecipient(
+      input.hotAddress,
+      amount,
+      rent,
+      Math.max(balance.context.slot, account.context.slot),
+    );
     if ((await feeFor(amount)) !== fee)
       defer('unavailable', 'Solana fee changed for the exact sweep message');
     const currentHeight = safeInteger.parse(
@@ -583,6 +586,7 @@ export class NativeSweepPlanner {
   private async revalidateEthereum(input: SignRequest, fee: bigint) {
     const request = input.transaction as EvmRequest;
     const source = input.wallet.address;
+    assertEvmExternalAddress(request.to);
     if (source === request.to || request.chainId !== '11155111')
       defer('attention', 'Invalid native Ethereum sweep destination or chain');
     const amount = BigInt(request.amount);
@@ -624,8 +628,9 @@ export class NativeSweepPlanner {
         },
       ]),
     ]);
-    if (input.wallet.account !== 0 && codeRaw !== '0x')
-      defer('attention', 'Native hot wallet is no longer an externally owned account');
+    const pendingCode = await this.rpc.call('ethereum', 'eth_getCode', [request.to, 'pending']);
+    if (codeRaw !== '0x' || pendingCode !== '0x')
+      defer('attention', 'Native Ethereum recipient must have no contract or delegated code');
     if (
       BigInt(hexQuantity.parse(latestNonceRaw)) !== BigInt(request.nonce) ||
       BigInt(hexQuantity.parse(pendingNonceRaw)) !== BigInt(request.nonce)
@@ -761,8 +766,7 @@ export class NativeSweepPlanner {
       ),
     );
     if (rent > 5_000_000n) defer('fee_budget', 'Solana retained rent exceeds the pinned budget');
-    if (input.wallet.account === 0)
-      await this.withdrawalSolanaRecipient(request.outputs[0].address, amount, rent, floor);
+    await this.withdrawalSolanaRecipient(request.outputs[0].address, amount, rent, floor);
     if (
       BigInt(balance.value) < amount + fee + rent ||
       BigInt(account.value.lamports) < amount + fee + rent

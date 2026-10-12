@@ -26,7 +26,7 @@ Current audit: [Phases 1–3 review](exchange-wallet-phases1-3-review.md), 5 Oct
 | 3     | Deposit detection, credit, and customer APIs   | 2            | Local implementation/tested; Phase 1 and P3-02 external gate pending |
 | 4     | Safe execution and native sweeps               | 3            | Implemented/tested locally; live execution acceptance pending         |
 | 5     | Hot-wallet withdrawals                         | 4            | Native implementation verified; live acceptance pending     |
-| 6     | ERC-20 and SPL lifecycle support               | 5            | Pending                                                              |
+| 6     | ERC-20 and SPL lifecycle support               | 5            | In progress: transfer adapters verified; financial integration pending |
 | 7     | Operational recovery and controls              | 6            | Pending                                                              |
 | 8     | End-to-end acceptance and rollout              | 7            | Pending                                                              |
 | 9     | Optional throughput and domain expansion       | 8            | Backlog                                                              |
@@ -149,17 +149,23 @@ See [architecture](architecture.md) for current boundaries and [implementation p
 
 ## Phase 6 — ERC-20, SPL, and fee management
 
-- [ ] **P6-01** Verify installed Wallet Core/protobuf capabilities with signed fixtures for ERC-20 and sponsored/multisigner SPL transactions. Choose an explicit compatible implementation where required before enabling either adapter.
+- [x] **P6-01** Verify installed Wallet Core 4.8.4/protobuf capabilities with actual ERC-20 signatures, sponsored two-signature SPL, optional associated-account creation and hot0 one-signature SPL fixtures. Independently decode recipient/amount/instructions and verify both SPL signatures. No additional signing implementation is needed for these fixtures.
 - [ ] **P6-02** Implement typed ERC-20 preparation/signing and decoded recipient validation against the registered hot address for sweeps; distinguish the token contract from the asset recipient.
-- [ ] **P6-03** Implement capped, idempotent management-account-1 gas funding with balance/resource reservations, confirmation dependencies, and budget limits. Internal funding must be identifiable before its event reaches Ledger.
-- [ ] **P6-04** Order token sweeps before remaining native drain; account for actual gas and repair residual native/token balances. Avoid repeated funding of the same pending sweep.
+- [ ] **P6-03** **Budget/liquidity reservation component implemented; funding dispatch and confirmation integration remain.** Implement capped, idempotent management-account-1 gas funding with balance/resource reservations, confirmation dependencies, and budget limits. Internal funding must be identifiable before its event reaches Ledger.
+- [ ] **P6-04** **Known-accounted-token scheduling barrier implemented; canonical inventory and token residual repair remain.** Order token sweeps before remaining native drain; account for actual gas and repair residual native/token balances. Avoid repeated funding of the same pending sweep.
 - [ ] **P6-05** Implement SPL owned-account discovery, checked mint/program/precision validation, transfers to hot-owned token accounts, and hot account creation/rent handling.
 - [ ] **P6-06** Implement authorized separate Solana fee payer/multiple signatures and explicit account-closure policy; independently verify signatures and decoded instructions.
 - [ ] **P6-07** Implement hot-wallet ERC-20/SPL withdrawals, native fee liquidity checks, and token/native resource holds using the existing reservation/settlement saga.
-- [ ] **P6-08** Certify allowlisted token semantics; leave fee-on-transfer, rebasing, frozen/delegated, NFTs, and unsupported Token-2022 extensions in visible exception states until individually supported.
+- [ ] **P6-08** Certify supported asset transfer semantics without permitting arbitrary contract calls or approvals; leave fee-on-transfer, rebasing, frozen/delegated, NFTs, and unsupported Token-2022 extensions in visible exception states until individually supported.
 - [ ] **P6-09** Verify each enabled token end to end: deposit identity/credit, gas sponsorship, sweep recipient, hot ownership, withdrawal, actual-fee postings, expiry/reorg recovery, and unsupported behavior.
 
-**Gate:** each enabled asset can be deposited, credited, swept, and withdrawn. Native-only delivery does not complete the supported-token scope.
+**Progress (11 October):** typed transfer-only ERC-20/SPL contracts, canonical preparation/revalidation, owned SPL discovery, management1 sponsorship signing, independent token authorizations and canonical outcome/fee/rent verification are implemented as components. EVM recipients must have no contract/delegated code; SPL recipient owners must be on-curve ordinary System accounts, with tokens sent to their derived token accounts. See [Phase 6 implementation notes](exchange-wallet-phase6.md). P6-02/P6-05/P6-06 have component coverage but stay open until their queue/resource integration is complete. Native queues/customer withdrawal APIs still reject tokens. A separate disabled-by-default private Signer token command is wired with independent attestations. Wallet now has durable fee-budget/liquidity reservations; Ledger has sponsor fee, hot recoverable-rent, external-rent expense and reversal postings with token-hold fixture coverage.
+
+**Verification (11 October):** the whole-repository run passed all 367 tests with zero failures/skips using six dedicated PostgreSQL databases and Redis; all 24 new token/recipient component tests also passed after the final quote/decoder refinements. Application/tooling build, ESLint, formatting and diff checks passed. No deployment data or real funds were changed.
+
+**Next implementation:** connect P6-03 reservations to funding dispatch, Listener/Ledger identity acknowledgments and confirmation dependencies; persist token/native/sponsor execution holds; extend P6-04 ordering to canonical inventory/residuals; finish token registry/provider/deposit and Wallet/Broadcast withdrawal/settlement integration. Ledger financial postings and private Signer queue handling are implemented but not fed by production token execution. Do not enable tokens before these are integrated and verified.
+
+**Gate — open:** each enabled asset can be deposited, credited, swept, and withdrawn. Native-only delivery and signed component fixtures do not complete the supported-token scope.
 
 ## Phase 7 — Operational recovery and controls
 
@@ -190,7 +196,7 @@ These tasks increase throughput or scope after the core exchange flow is accepte
 - [ ] **P9-01** Add bounded EVM nonce windows plus native/token liquidity reservations; remove serialization only after concurrent execution and replacement tests pass.
 - [ ] **P9-02** Add Bitcoin withdrawal batches with immutable output-to-withdrawal mappings, fee attribution, reserved UTXOs, and hot-owned change. Certify multi-source/multi-key sweep aggregation separately.
 - [ ] **P9-03** Add supported Solana withdrawal batching/concurrency with source/token/fee reservations, account-contention limits, instruction-size limits, expiry, and per-withdrawal attribution.
-- [ ] **P9-04** Evaluate an EVM batch-contract/smart-account adapter with independent approval and certification before enabling it.
+- **P9-04 — removed from scope:** EVM batch contracts/smart-account adapters conflict with the approved transfer-only, EOA-recipient policy. Keep independent EOA transfers; no arbitrary contract calls or approvals.
 - [ ] **P9-05** Add multiple technical custody domains/seeds with isolated signing routes, and safe generation rotation that continues monitoring funded older addresses. Keep the single-exchange ownership model.
 - [ ] **P9-06** Add an explicit internal-transfer API with atomic liability transfers if exchange-owned destinations should be supported.
 - [ ] **P9-07** Extract Treasury into a separate NestJS application/database if operational load warrants it; preserve queue contracts and database ownership.

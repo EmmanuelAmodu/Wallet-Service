@@ -42,6 +42,8 @@ test('EVM and Bitcoin-family preparation use the configured chain RPC', async (t
         return '0x5208';
       case 'eth_getBalance':
         return '0xffffffffffffffff';
+      case 'eth_getCode':
+        return '0x';
       case 'getblockchaininfo':
         return { chain: 'main' };
       case 'gettxout':
@@ -76,8 +78,10 @@ test('EVM and Bitcoin-family preparation use the configured chain RPC', async (t
   };
   const preparedEvm = await rpc.prepare(address, evmTransfer);
   assert.equal(preparedEvm.chain, 'polygon');
-  assert.deepEqual(customCalls.slice(0, 4), [
+  assert.deepEqual(customCalls.slice(0, 6), [
     'eth_chainId',
+    'eth_getCode',
+    'eth_getCode',
     'eth_getTransactionCount',
     'eth_estimateGas',
     'eth_getBalance',
@@ -92,7 +96,7 @@ test('EVM and Bitcoin-family preparation use the configured chain RPC', async (t
   };
   const preparedBitcoin = await rpc.prepare(address, bitcoinTransfer);
   assert.equal(preparedBitcoin.chain, 'litecoin');
-  assert.deepEqual(customCalls.slice(4), ['getblockchaininfo', 'gettxout']);
+  assert.deepEqual(customCalls.slice(6), ['getblockchaininfo', 'gettxout']);
   assert.deepEqual(fallbackCalls, []);
 });
 

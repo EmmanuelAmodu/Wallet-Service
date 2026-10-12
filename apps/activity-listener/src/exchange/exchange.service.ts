@@ -707,6 +707,10 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
             },
           });
       }
+      if(event.type==='funding.execute.requested.v1' || ('tokenCosts' in event.data && event.data.tokenCosts)) {
+        await enqueue(tx,QUEUES.wallet,exchangeEventSchema.parse({...event,type:'execution.registry.acknowledged.v1',eventId:stableUuid([event.operationId,'registry','activity-listener']),causationId:event.eventId,
+          data:{consumer:'activity-listener'}}),`execution-registry:${event.operationId}:activity-listener`);
+      }
       await tx.inbox.create({ data: { id: inboxId, payload_hash: hash } });
     });
   }

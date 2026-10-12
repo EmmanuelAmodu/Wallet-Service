@@ -728,3 +728,45 @@ test(
     );
   },
 );
+
+test(
+  'accounted token work blocks native drain, duplicate credits preserve the dependency and reversal resumes scheduling',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture();
+    const token = { ...asset, assetId: 'token:ethereum:erc20:0x' + 'ab'.repeat(20) };
+    const credit = f.event('deposit.credited.v1', {
+      depositId: randomUUID(),
+      ledgerBatchId: randomUUID(),
+      walletId: f.walletId,
+      asset: token,
+      amount: '500',
+    });
+    await f.service.handle(credit);
+    await f.service.handle(credit);
+    await f.credit();
+    assert.equal(await f.service.scheduleEligible(), 0);
+    const nativeWork = await db!.sweepWork.findFirstOrThrow({
+      where: { domain_id: f.domainId, asset_id: asset.assetId },
+    });
+    assert.equal(nativeWork.state, 'waiting_token_sweeps');
+    assert.equal((await f.plans()).length, 0);
+    assert.equal(credit.type, 'deposit.credited.v1');
+    if (credit.type !== 'deposit.credited.v1') return;
+    await f.service.handle(
+      f.event(
+        'deposit.reversed.v1',
+        {
+          depositId: credit.data.depositId,
+          ledgerBatchId: randomUUID(),
+          asset: token,
+          amount: '500',
+          reason: 'canonical reversal',
+        },
+        { revision: 2 },
+      ),
+    );
+    assert.equal(await f.service.scheduleEligible(), 1);
+    assert.equal((await f.plans()).length, 1);
+  },
+);

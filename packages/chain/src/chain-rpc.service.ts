@@ -17,6 +17,10 @@ import {
 
 import { ChainNetworkMap, ChainNetworkSettings, networkConfig } from './config.js';
 import { regtestWitnessAddress } from './bitcoin-address.js';
+import { assertEvmExternalAddress, assertSolanaExternalAddress } from './recipient-policy.js';
+import { Transaction } from 'ethers';
+import { getWalletCore } from './coin-metadata.js';
+import { decodeLegacySolanaTransaction } from './token-encoding.js';
 
 const hex = z.string().regex(/^0x[0-9a-fA-F]+$/);
 type EvmTransfer = Extract<Transfer, { chain: EvmChain }>;
@@ -252,6 +256,7 @@ export class ChainRpcService {
   }
 
   private async prepareEvm(address: string, transfer: EvmTransfer): Promise<EvmTransaction> {
+    await this.assertExternalEvmRecipient(transfer.chain, transfer.to);
     const nonce = hex.parse(
       await this.call(transfer.chain, 'eth_getTransactionCount', [address, 'pending']),
     );
@@ -268,7 +273,7 @@ export class ChainRpcService {
         },
       ]),
     );
-    // Bounded headroom for recipient contracts; no arbitrary calldata in v1.
+    // Bounded headroom; recipients with deployed or delegated code are excluded.
     const gasLimit = ((BigInt(gas) * 120n) / 100n).toString();
     const balance = hex.parse(
       await this.call(transfer.chain, 'eth_getBalance', [address, 'pending']),
@@ -328,6 +333,7 @@ export class ChainRpcService {
   }
 
   private async prepareSolana(transfer: SolanaTransfer): Promise<SolanaTransaction> {
+    for (const output of transfer.outputs) await this.assertExternalSolanaRecipient(output.address);
     const result = await this.call('solana', 'getLatestBlockhash', [{ commitment: 'finalized' }]);
     const blockhash = z
       .object({
@@ -342,7 +348,45 @@ export class ChainRpcService {
   }
 
   async preflight(chain: Chain, signed: SignedTransaction) {
+    if (isEvmChain(chain)) {
+      const transaction = Transaction.from(signed.raw);
+      if (
+        signed.encoding !== 'hex' ||
+        !transaction.isSigned() ||
+        transaction.hash !== signed.txHash ||
+        transaction.data !== '0x' ||
+        !transaction.to
+      )
+        throw new BadRequestException(
+          'Only native transfers to external wallets may use this preflight',
+        );
+      await this.assertExternalEvmRecipient(chain, transaction.to);
+      return;
+    }
     if (!isSolanaChain(chain)) return;
+    if (signed.encoding !== 'base64')
+      throw new BadRequestException('Invalid native Solana encoding');
+    const packet = decodeLegacySolanaTransaction(signed.raw, 20),
+      core = await getWalletCore();
+    if (
+      packet.requiredSignatures !== 1 ||
+      core.Base58.encodeNoCheck(packet.signatures[0]) !== signed.txHash
+    )
+      throw new BadRequestException('Invalid native Solana signature identity');
+    for (const instruction of packet.instructions) {
+      if (
+        core.Base58.encodeNoCheck(packet.keys[instruction.program]) !==
+          '11111111111111111111111111111111' ||
+        instruction.accounts.length !== 2 ||
+        instruction.accounts[0] !== 0 ||
+        instruction.data.length !== 12 ||
+        instruction.data.readUInt32LE(0) !== 2
+      )
+        throw new BadRequestException('Only native System transfers may use this preflight');
+      await this.assertExternalSolanaRecipient(
+        core.Base58.encodeNoCheck(packet.keys[instruction.accounts[1]]),
+      );
+    }
     const result = z
       .object({ value: z.object({ err: z.unknown() }) })
       .parse(
@@ -353,5 +397,41 @@ export class ChainRpcService {
       );
     if (result.value.err !== null)
       throw new BadRequestException('Solana transfer simulation failed');
+  }
+
+  private async assertExternalEvmRecipient(chain: EvmChain, address: string) {
+    assertEvmExternalAddress(address);
+    const codes = await Promise.all(
+      ['finalized', 'pending'].map((tag) => this.call(chain, 'eth_getCode', [address, tag])),
+    );
+    if (codes.some((code) => code !== '0x'))
+      throw new BadRequestException('Recipient must have no contract or delegated code');
+  }
+
+  private async assertExternalSolanaRecipient(address: string) {
+    await assertSolanaExternalAddress(address);
+    const account = z
+      .object({
+        value: z
+          .object({
+            owner: z.string(),
+            executable: z.boolean(),
+            data: z.tuple([z.string(), z.literal('base64')]),
+          })
+          .nullable(),
+      })
+      .parse(
+        await this.call('solana', 'getAccountInfo', [
+          address,
+          { commitment: 'finalized', encoding: 'base64' },
+        ]),
+      );
+    if (
+      account.value &&
+      (account.value.owner !== '11111111111111111111111111111111' ||
+        account.value.executable ||
+        account.value.data[0] !== '')
+    )
+      throw new BadRequestException('Solana recipient must be an ordinary System account');
   }
 }

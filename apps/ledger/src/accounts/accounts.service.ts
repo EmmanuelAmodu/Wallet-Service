@@ -29,6 +29,7 @@ export const accountNormalSides: Record<LedgerAccountType, LedgerEntrySide> = {
   custody_hot: 'debit',
   custody_management: 'debit',
   custody_in_transit: 'debit',
+  custody_rent: 'debit',
   customer_available: 'credit',
   customer_reserved: 'credit',
   customer_frozen: 'credit',
@@ -79,7 +80,9 @@ export function canonicalAccount(spec: AccountSpec): AccountSpec {
   }
   const expectedOwner = account.type.startsWith('customer_')
     ? 'customer'
-    : ['custody_deposit', 'custody_hot', 'custody_management'].includes(account.type)
+    : ['custody_deposit', 'custody_hot', 'custody_management', 'custody_rent'].includes(
+          account.type,
+        )
       ? 'wallet'
       : ['fee_expense', 'fee_revenue', 'equity'].includes(account.type)
         ? 'exchange'

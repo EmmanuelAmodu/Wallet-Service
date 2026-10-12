@@ -5,6 +5,7 @@ import { MessagingModule } from '../../../../packages/queue/src/messaging.module
 import { CustodyModule } from '../custody/custody.module.js';
 import { WalletPrismaModule } from '../prisma/prisma.module.js';
 import { executionConfig } from '../config/execution.config.js';
+import { TokenFeesService } from './token-fees.service.js';
 import { CustodyExecutionService } from './execution.service.js';
 @Module({
   imports: [
@@ -14,7 +15,7 @@ import { CustodyExecutionService } from './execution.service.js';
     MessagingModule,
     ConfigModule.forFeature(executionConfig),
   ],
-  providers: [CustodyExecutionService],
-  exports: [CustodyExecutionService],
+  providers: [CustodyExecutionService, TokenFeesService],
+  exports: [CustodyExecutionService, TokenFeesService],
 })
 export class ExecutionModule {}

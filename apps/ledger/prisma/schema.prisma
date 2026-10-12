@@ -46,6 +46,7 @@ enum LedgerAccountType {
   custody_hot
   custody_management
   custody_in_transit
+  custody_rent
   customer_available
   customer_reserved
   customer_frozen

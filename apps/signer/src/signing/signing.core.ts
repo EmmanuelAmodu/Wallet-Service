@@ -5,6 +5,20 @@ import { walletCoreMetadata } from '../../../../packages/chain/src/coin-metadata
 import { ChainNetworkMap, networkFor } from '../../../../packages/chain/src/config.js';
 import { regtestWitnessAddress } from '../../../../packages/chain/src/bitcoin-address.js';
 import {
+  assertEvmExternalAddress,
+  assertSolanaExternalAddress,
+  assertSolanaExternalKey,
+} from '../../../../packages/chain/src/recipient-policy.js';
+import {
+  TokenSignRequest,
+  tokenSignRequestSchema,
+} from '../../../../packages/shared/src/token-contracts.js';
+import {
+  associatedTokenAddress,
+  verifySignedErc20Transfer,
+  verifySignedSplTransfer,
+} from '../../../../packages/chain/src/token-encoding.js';
+import {
   DeriveRequest,
   BitcoinChain,
   EvmChain,
@@ -215,11 +229,133 @@ export class SigningCore {
     });
   }
 
+  /** Typed token primitive. Queue admission requires a separate token execution authorization. */
+  async signToken(request: TokenSignRequest): Promise<SignedTransaction> {
+    request = tokenSignRequestSchema.parse(request);
+    const tx = request.transaction;
+    if (request.wallet.network !== this.network(request.wallet.chain))
+      throw new BadRequestException('Token signing network mismatch');
+    this.assertValidAddress(tx.kind === 'erc20' ? tx.recipient : tx.recipientOwner, tx.chain);
+    if (tx.kind === 'spl') {
+      await assertSolanaExternalAddress(tx.recipientOwner);
+      if (tx.recipientTokenAccount !== (await associatedTokenAddress(tx.recipientOwner, tx.mint)))
+        throw new BadRequestException('Token destination is not the recipient associated account');
+      this.assertValidAddress(tx.sourceTokenAccount, 'solana');
+    }
+    const signed = this.withKey(
+      {
+        chain: request.wallet.chain,
+        account: request.wallet.account,
+        seedId: request.wallet.seedId,
+      },
+      (key, address) => {
+        if (
+          (tx.kind === 'erc20' ? address.toLowerCase() : address) !==
+          (tx.kind === 'erc20' ? request.wallet.address.toLowerCase() : request.wallet.address)
+        )
+          throw new BadRequestException('Token source does not match derivation');
+        const privateKey = key.data();
+        try {
+          if (tx.kind === 'erc20') {
+            assertEvmExternalAddress(tx.recipient);
+            this.assertValidAddress(tx.contract, 'ethereum');
+            if (tx.chainId !== this.ethereumChainIds.ethereum)
+              throw new BadRequestException('Token EVM chain ID not permitted');
+            const proto = TW.Ethereum.Proto;
+            const input = proto.SigningInput.encode({
+              privateKey,
+              chainId: bytes(tx.chainId),
+              nonce: bytes(tx.nonce),
+              txMode: proto.TransactionMode.Enveloped,
+              gasLimit: bytes(tx.gasLimit),
+              maxFeePerGas: bytes(tx.maxFeePerGas),
+              maxInclusionFeePerGas: bytes(tx.maxPriorityFeePerGas),
+              toAddress: tx.contract,
+              transaction: { erc20Transfer: { to: tx.recipient, amount: bytes(tx.amount) } },
+            }).finish();
+            try {
+              const out = proto.SigningOutput.decode(
+                this.core.AnySigner.sign(input, this.coin('ethereum')),
+              );
+              this.check(out.error, out.encoded.length);
+              return {
+                raw: '0x' + Buffer.from(out.encoded).toString('hex'),
+                txHash: '0x' + Buffer.from(this.core.Hash.keccak256(out.encoded)).toString('hex'),
+                encoding: 'hex' as const,
+              };
+            } finally {
+              input.fill(0);
+            }
+          }
+          return this.withKey(
+            { chain: tx.feePayer.chain, account: tx.feePayer.account, seedId: tx.feePayer.seedId },
+            (payerKey, payerAddress) => {
+              if (payerAddress !== tx.feePayer.address)
+                throw new BadRequestException('Token fee payer does not match derivation');
+              const payerPrivateKey = payerKey.data();
+              const proto = TW.Solana.Proto;
+              const common = {
+                privateKey,
+                recentBlockhash: tx.recentBlockhash,
+                txEncoding: proto.Encoding.Base64,
+                ...(payerAddress !== address
+                  ? { feePayer: payerAddress, feePayerPrivateKey: payerPrivateKey }
+                  : {}),
+              };
+              const transfer = {
+                tokenMintAddress: tx.mint,
+                senderTokenAddress: tx.sourceTokenAccount,
+                recipientTokenAddress: tx.recipientTokenAccount,
+                amount: tx.amount,
+                decimals: tx.decimals,
+                tokenProgramId: proto.TokenProgramId.TokenProgram,
+              };
+              const input = proto.SigningInput.encode(
+                proto.SigningInput.fromObject({
+                  ...common,
+                  ...(tx.createRecipientAccount
+                    ? {
+                        createAndTransferTokenTransaction: {
+                          ...transfer,
+                          recipientMainAddress: tx.recipientOwner,
+                        },
+                      }
+                    : { tokenTransferTransaction: transfer }),
+                }),
+              ).finish();
+              try {
+                const out = proto.SigningOutput.decode(
+                  this.core.AnySigner.sign(input, this.coin('solana')),
+                );
+                this.check(out.error, out.encoded.length);
+                const raw = Buffer.from(out.encoded, 'base64');
+                return {
+                  raw: out.encoded,
+                  txHash: this.core.Base58.encodeNoCheck(raw.subarray(1, 65)),
+                  encoding: 'base64' as const,
+                };
+              } finally {
+                input.fill(0);
+                payerPrivateKey.fill(0);
+              }
+            },
+          );
+        } finally {
+          privateKey.fill(0);
+        }
+      },
+    );
+    if (tx.kind === 'erc20') verifySignedErc20Transfer(request, signed);
+    else await verifySignedSplTransfer(request, signed);
+    return signed;
+  }
+
   private signEthereum(
     tx: Extract<SignRequest['transaction'], { chain: EvmChain }>,
     privateKey: Uint8Array,
   ): SignedTransaction {
     this.assertValidAddress(tx.to, tx.chain);
+    assertEvmExternalAddress(tx.to);
     if (tx.chainId !== this.ethereumChainIds[tx.chain])
       throw new BadRequestException('EVM chain ID not permitted');
     if (BigInt(tx.maxPriorityFeePerGas) > BigInt(tx.maxFeePerGas))
@@ -377,6 +513,9 @@ export class SigningCore {
     privateKey: Uint8Array,
   ): SignedTransaction {
     tx.outputs.forEach((output) => this.assertValidAddress(output.address, 'solana'));
+    tx.outputs.forEach((output) =>
+      assertSolanaExternalKey(this.core.Base58.decodeNoCheck(output.address)),
+    );
     if (this.core.Base58.decodeNoCheck(tx.recentBlockhash).length !== 32)
       throw new BadRequestException('Invalid Solana blockhash');
 

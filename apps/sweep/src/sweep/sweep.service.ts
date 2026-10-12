@@ -48,7 +48,7 @@ type SweepSettings = Pick<ConfigType<typeof sweepConfig>, 'domainId'> &
   Partial<
     Pick<
       ConfigType<typeof sweepConfig>,
-      'enableNativeSweeps' | 'policyVersion' | 'retryDelayMs' | 'reconciliationIntervalMs'
+      'enableNativeSweeps' | 'enableTokenSweeps' | 'policyVersion' | 'retryDelayMs' | 'reconciliationIntervalMs'
     >
   >;
 
@@ -137,7 +137,7 @@ export class SweepService {
 
   /** Bounded, restart-safe reconciliation catches missed triggers and residual balances. */
   async scheduleEligible(limit = 100) {
-    if (!this.config.enableNativeSweeps) return 0;
+    if (!this.config.enableNativeSweeps && !this.config.enableTokenSweeps) return 0;
     const page = await this.db.sweepWork.findMany({
       where: {
         domain_id: this.config.domainId,
@@ -151,6 +151,7 @@ export class SweepService {
             'blocked_execution_not_implemented',
             'awaiting_registry',
             'awaiting_hot_wallet',
+            'waiting_token_sweeps',
           ],
         },
         OR: [{ next_attempt_at: null }, { next_attempt_at: { lte: new Date() } }],
@@ -224,8 +225,21 @@ export class SweepService {
         state: 'paused_review',
         reason: domain?.reason ?? customer?.pause_reason ?? 'Customer custody review required',
       };
+    if (work.asset_id === `token:${work.chain}:native` && !this.config.enableNativeSweeps) return {state:'blocked_execution_not_implemented',reason:'Native sweep execution is disabled'};
+    if (work.asset_id === `token:${work.chain}:native`) {
+      const dependencies = await tx.$queryRaw<{ id: string }[]>`
+        SELECT id FROM sweep_work WHERE domain_id=${work.domain_id} AND reset_epoch=${work.reset_epoch}
+        AND source_wallet_id=${work.source_wallet_id}::uuid AND chain=${work.chain} AND network=${work.network}
+        AND asset_id <> ${work.asset_id} AND credited_deposit_count > 0
+        AND (active_operation_id IS NOT NULL OR generation > consumed_generation) LIMIT 1`;
+      if (dependencies.length)
+        return {
+          state: 'waiting_token_sweeps',
+          reason: 'Preserve native gas/rent until accounted token work is settled or resolved',
+        };
+    }
     if (
-      work.asset_id !== `token:${work.chain}:native` ||
+      (work.asset_id !== `token:${work.chain}:native` && !this.config.enableTokenSweeps) ||
       !['ethereum', 'bitcoin', 'solana'].includes(work.chain)
     )
       return {
@@ -496,9 +510,10 @@ export class SweepService {
           destinationWalletId: operation.hot_wallet_id,
           amount: data.amount,
           preparationDigest: data.preparationDigest,
+          ...(data.tokenCosts?{tokenCosts:data.tokenCosts}:{}),
         },
       });
-      await this.publish(tx, execute, [QUEUES.wallet, QUEUES.ledger, QUEUES.activity]);
+      await this.publish(tx, execute, data.tokenCosts ? [QUEUES.wallet] : [QUEUES.wallet, QUEUES.ledger, QUEUES.activity]);
       await tx.sweepAttempt.update({
         where: { id: attempt.id },
         data: { state: 'queued', execute_event_id: executeId },
@@ -937,7 +952,7 @@ export class SweepService {
     });
     let state = 'blocked_execution_not_implemented';
     let reason = 'Phase 4 policy, chain balance, and execution reservation checks are required';
-    if (this.config.enableNativeSweeps) {
+    if (this.config.enableNativeSweeps || this.config.enableTokenSweeps) {
       state = 'eligible';
       reason = 'Awaiting authoritative Wallet balance and fee preparation';
     }
@@ -971,7 +986,7 @@ export class SweepService {
       state = 'no_credited_deposits';
       reason = 'All accounted deposits for this source and asset were reversed';
     } else if (
-      asset.assetId !== `token:${asset.chain}:native` ||
+      (asset.assetId !== `token:${asset.chain}:native` && !this.config.enableTokenSweeps) ||
       !['ethereum', 'bitcoin', 'solana'].includes(asset.chain)
     ) {
       state = 'deferred_unsupported_asset';

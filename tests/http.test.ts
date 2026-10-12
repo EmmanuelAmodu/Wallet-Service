@@ -96,6 +96,9 @@ test(
         case 'eth_chainId':
           result = '0xaa36a7';
           break;
+        case 'eth_getCode':
+          result = '0x';
+          break;
         case 'eth_getTransactionCount':
           result = '0x0';
           break;

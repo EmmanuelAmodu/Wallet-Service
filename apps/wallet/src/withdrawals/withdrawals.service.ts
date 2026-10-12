@@ -21,20 +21,25 @@ import { enqueueFanOut } from '../../../../packages/queue/src/outbox.service.js'
 import {
   executionDigest,
   executionUnitsSchema,
-  nativeExecutionAssetSchema,
 } from '../../../../packages/shared/src/execution-authorization.js';
 import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { getWalletCore } from '../../../../packages/chain/src/coin-metadata.js';
+import {
+  assertEvmExternalAddress,
+  assertSolanaExternalAddress,
+} from '../../../../packages/chain/src/recipient-policy.js';
 import { regtestWitnessAddress } from '../../../../packages/chain/src/bitcoin-address.js';
 import { WalletPrismaService } from '../prisma/prisma.service.js';
 import { CustodyService } from '../custody/custody.service.js';
 import { ExchangeMessagingService } from '../exchange-messaging/exchange-messaging.service.js';
+import { executionAssetSchema } from '../../../../packages/shared/src/execution-contracts.js';
+import { tokenCertificateSchema, tokenAsset } from '../../../../packages/shared/src/token-contracts.js';
 import { executionConfig, ExecutionSettings } from '../config/execution.config.js';
 import { walletConfig, WalletConfig } from '../config/wallet.config.js';
 
 export const withdrawalRequestSchema = z
   .object({
-    asset: nativeExecutionAssetSchema,
+    asset: executionAssetSchema,
     destination: z.string().min(1).max(256),
     amount: executionUnitsSchema.refine((n) => BigInt(n) > 0n),
     idempotencyKey: z.string().min(1).max(128),
@@ -69,11 +74,13 @@ export async function canonicalWithdrawalDestination(
   if (!core.AnyAddress.isValid(address, coin))
     throw new BadRequestException('Invalid withdrawal destination');
   if (chain === 'ethereum') {
+    assertEvmExternalAddress(address);
     if (/^0x0{40}$/i.test(address)) throw new BadRequestException('Invalid withdrawal destination');
     return address.toLowerCase();
   }
   if (address === '11111111111111111111111111111111')
     throw new BadRequestException('Invalid withdrawal destination');
+  await assertSolanaExternalAddress(address);
   return address;
 }
 
@@ -91,7 +98,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
   ) {}
 
   onModuleInit() {
-    if (!this.execution.withdrawalsEnabled) return;
+    if (!this.execution.withdrawalsEnabled && !this.execution.tokensEnabled) return;
     this.timer = setInterval(() => this.tick(), this.execution.pollIntervalMs);
     this.tick();
   }
@@ -197,8 +204,8 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
           throw new ConflictException('Idempotency key was used for a different withdrawal');
         return previous;
       }
-      if (!this.execution.withdrawalsEnabled)
-        throw new ServiceUnavailableException('Native withdrawals are disabled');
+      if (!(parsed.asset.assetId.endsWith(':native') ? this.execution.withdrawalsEnabled : this.execution.tokensEnabled))
+        throw new ServiceUnavailableException('Withdrawal execution is disabled');
       const customer = await tx.exchangeCustomer.findUnique({ where: { customer_id: customerId } });
       if (
         !customer ||
@@ -242,6 +249,10 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
         !asset?.withdrawal_enabled
       )
         throw new ConflictException('Hot custody or withdrawal asset is not ready');
+      if (!parsed.asset.assetId.endsWith(':native')) {
+        const certificate=tokenCertificateSchema.parse(asset!.transfer_certificate);
+        if(canonicalAsset(tokenAsset(certificate))!==canonicalAsset(parsed.asset) || asset!.decimals!==certificate.decimals) throw new ConflictException('Token transfer certificate mismatch');
+      }
       if (parsed.asset.chain === 'bitcoin' && BigInt(parsed.amount) < 546n)
         throw new BadRequestException('Bitcoin withdrawal is below the conservative dust floor');
       if (
@@ -516,6 +527,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
           destination: w.destination,
           amount: { asset: event.data.amount.asset, amount: w.principal_units },
           preparationDigest: event.data.preparationDigest,
+          ...(event.data.tokenCosts?{tokenCosts:event.data.tokenCosts}:{}),
         });
         await enqueueFanOut(tx, execute, [QUEUES.wallet]);
       } else if (event.type === 'withdrawal.plan.deferred.v1') {
@@ -633,7 +645,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
   }
 
   async repairDue() {
-    if (!this.execution.withdrawalsEnabled) return;
+    if (!this.execution.withdrawalsEnabled && !this.execution.tokensEnabled) return;
     const rows = await this.db.withdrawal.findMany({
       where: {
         domain_id: this.settings.domainId,

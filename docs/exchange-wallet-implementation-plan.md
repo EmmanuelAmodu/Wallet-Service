@@ -286,7 +286,7 @@ After correctness is established, replace this restriction deliberately with:
 - Bitcoin UTXO reservations and immutable batch-output-to-withdrawal mappings; change remains hot-owned.
 - Solana source/token balance and fee reservations, account contention limits, and expiry handling.
 
-Bitcoin and Solana withdrawal batching can reuse family-specific capabilities after allocation/fee attribution tests. EVM batching requires a separately approved batch contract/smart-account adapter; independent EOA transfers are the initial approach.
+Bitcoin and Solana withdrawal batching can reuse family-specific capabilities after allocation/fee attribution tests. EVM batch contracts/smart-account adapters are excluded by the 11 October transfer-only, EOA-recipient decision; EVM payouts use independent transfers. ERC-20 transfers necessarily invoke the token contract with fixed `transfer` calldata, but their payout recipients must have no contract/delegated code. No approval or arbitrary-call interface is permitted. SPL recipients are on-curve ordinary System-owned wallets; derive their associated token accounts for the actual token instruction.
 
 A replacement shares the existing logical operation and customer hold. Fee bumps and new blockhash attempts must not create another principal debit. Persist replacement lineage and prove that an older attempt cannot also pay before issuing a new spend.
 
@@ -455,3 +455,7 @@ The recommendations above combine the current repository implementation with the
 - [Solana token transfer reference](https://github.com/solana-foundation/solana-com/blob/main/apps/docs/content/docs/en/tokens/basics/transfer-tokens.mdx): token-account transfers and checked mint/precision handling.
 
 Validate the exact installed Wallet Core protobuf/signing capabilities before implementing token and multisigner adapters. Protocol support does not establish support in the current signer implementation.
+
+## Phase 6 implementation progress — 11 October
+
+Wallet Core capability verification and transfer-only token preparation, signing authorization and canonical observation components are implemented. Native Ethereum and Solana execution now enforce the external-wallet recipient policy during preparation/revalidation and dispatch preflight. Token components are not yet admitted by the existing native execution queues or public withdrawal API. Private token signing, durable fee-budget reservations, the known-accounted-token/native ordering barrier and sponsored-fee/rent Ledger postings are implemented. Management funding dispatch/confirmation, canonical token inventory/residuals, provider/token registry coverage and Wallet/Broadcast token holds/outcomes must still be connected before token deposits/withdrawals are enabled. See [Phase 6 implementation notes](exchange-wallet-phase6.md) and the task checklist for the remaining work.

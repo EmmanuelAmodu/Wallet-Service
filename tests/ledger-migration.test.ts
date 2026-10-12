@@ -17,7 +17,14 @@ test(
         FROM _prisma_migrations
         WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL
       `;
-      assert.equal(migrations.length, 5);
+      assert(migrations.some((migration) => /token_rent_account/.test(migration.migration_name)));
+      assert(
+        migrations.some((migration) => /token_rent_constraints/.test(migration.migration_name)),
+      );
+      const rentType = await db.$queryRaw<{ enumlabel: string }[]>`
+        SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid=e.enumtypid
+        WHERE t.typname='LedgerAccountType' AND e.enumlabel='custody_rent'`;
+      assert.equal(rentType.length, 1);
       assert(migrations.some((migration) => /fresh_baseline/.test(migration.migration_name)));
       assert(migrations.some((migration) => /exchange_accounting/.test(migration.migration_name)));
       assert(migrations.some((migration) => /single_owner/.test(migration.migration_name)));

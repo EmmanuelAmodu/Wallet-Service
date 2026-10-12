@@ -22,6 +22,13 @@ import {
 } from '../packages/queue/src/exchange-contracts.js';
 import { queueConfig } from '../packages/queue/src/queue.config.js';
 import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
+import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
+import {
+  CLASSIC_TOKEN_PROGRAM,
+  SOLANA_DEVNET,
+  tokenAsset,
+} from '../packages/shared/src/token-contracts.js';
+import { testMnemonic } from './helpers/custody-fixture.js';
 import { SafeErrorsFilter } from '../packages/shared/src/http/safe-errors.filter.js';
 import { migrate } from '../scripts/migrate.js';
 
@@ -910,5 +917,341 @@ test(
     } finally {
       await app.close();
     }
+  },
+);
+
+async function splFinancialFixture() {
+  const domainId = `spl-financial-${randomUUID()}`;
+  domains.add(domainId);
+  const core = await SigningCore.create(testMnemonic, 'ledger-spl', '11155111');
+  const customerId = randomUUID(),
+    sourceId = randomUUID(),
+    hotId = randomUUID(),
+    payerId = randomUUID();
+  const owners = [sourceId, hotId, payerId];
+  const accounts = [10, 0, 1];
+  const addresses = accounts.map(
+    (account) => core.derive({ chain: 'solana', seedId: core.seedId, account }).address,
+  );
+  const mint = core.derive({ chain: 'solana', seedId: core.seedId, account: 20 }).address;
+  const external = core.derive({ chain: 'solana', seedId: core.seedId, account: 21 }).address;
+  core.close();
+  const native: CanonicalAsset = {
+    chain: 'solana',
+    network: SOLANA_DEVNET,
+    assetId: 'token:solana:native',
+  };
+  const certificate = {
+    standard: 'spl',
+    chain: 'solana',
+    network: SOLANA_DEVNET,
+    mint,
+    programId: CLASSIC_TOKEN_PROGRAM,
+    decimals: 6,
+    certificateId: 'classic-exact-transfer',
+    semantics: 'exact-transfer',
+    accountClosure: 'retain',
+  } as const;
+  const asset = tokenAsset(certificate);
+  for (const index of [1, 2])
+    await registry!.handle(
+      exchangeEventSchema.parse({
+        ...base(domainId),
+        type: 'custody-wallet.registry.requested.v1',
+        data: {
+          walletId: owners[index],
+          chain: 'solana',
+          network: SOLANA_DEVNET,
+          address: addresses[index],
+          role: index === 1 ? 'hot' : 'management',
+          account: accounts[index],
+          registryRevision: 1,
+        },
+      }),
+    );
+  await registry!.handle(
+    exchangeEventSchema.parse({
+      ...base(domainId),
+      type: 'customer-wallet.registry.requested.v1',
+      customerId,
+      data: {
+        walletId: sourceId,
+        hotWalletId: hotId,
+        chain: 'solana',
+        network: SOLANA_DEVNET,
+        address: addresses[0],
+        account: 10,
+        registryRevision: 1,
+      },
+    }),
+  );
+  const spec = (
+    type: AccountSpec['type'],
+    ownerId: string,
+    asset: CanonicalAsset,
+  ): AccountSpec => ({
+    domainId,
+    ...asset,
+    type,
+    ownerId,
+    ownerKind: type.startsWith('customer_')
+      ? 'customer'
+      : type.startsWith('custody_')
+        ? 'wallet'
+        : 'exchange',
+    normalSide: type.startsWith('customer_') || type === 'equity' ? 'credit' : 'debit',
+  });
+  const balance = (type: AccountSpec['type'], ownerId: string, a: CanonicalAsset = asset) =>
+    db!.$transaction((tx) => journal.balance(tx, spec(type, ownerId, a)));
+  await db!.$transaction((tx) =>
+    journal.post(tx, {
+      key: `fixture-capital:${domainId}`,
+      domainId,
+      revision: 0,
+      kind: 'fixture',
+      postings: [
+        {
+          account: spec('custody_management', payerId, native),
+          side: 'debit',
+          amount: 10_000_000n,
+        },
+        { account: spec('equity', domainId, native), side: 'credit', amount: 10_000_000n },
+      ],
+    }),
+  );
+  await deposits!.handle(
+    exchangeEventSchema.parse({
+      ...base(domainId),
+      type: 'deposit.finalized.v1',
+      customerId,
+      data: {
+        depositId: randomUUID(),
+        walletId: sourceId,
+        asset,
+        amount: '500',
+        transactionHash: '3'.repeat(87),
+        blockHash: '4'.repeat(44),
+        transferIdentity: { kind: 'solana.instruction', id: '0:0:' + mint },
+      },
+    }),
+  );
+  const execution = exchangeEventSchema.parse({
+    ...base(domainId),
+    type: 'sweep.execute.requested.v1',
+    customerId,
+    operationId: randomUUID(),
+    attemptId: randomUUID(),
+    requestDigest: 'a'.repeat(64),
+    data: {
+      sourceWalletId: sourceId,
+      destinationWalletId: hotId,
+      amount: { asset, amount: '500' },
+      tokenCosts: {
+        certificate,
+        feePayerWalletId: payerId,
+        feePayerRegistryRevision: 1,
+        maximumFeeUnits: '10000',
+        maximumRentUnits: '2039280',
+        rentCustodyWalletId: hotId,
+      },
+    },
+  });
+  const outcome = (revision = 1, rent = '2039280', state = 'confirmed') =>
+    exchangeEventSchema.parse({
+      ...base(domainId, revision),
+      type: 'settlement.requested.v1',
+      operationId: execution.operationId,
+      attemptId: execution.attemptId,
+      requestDigest: execution.requestDigest,
+      data: {
+        transactionHash: '5'.repeat(87),
+        outcome: state,
+        actualFees: [{ asset: native, amount: '10000' }],
+        actualRentUnits: rent,
+      },
+    });
+  return {
+    domainId,
+    customerId,
+    sourceId,
+    hotId,
+    payerId,
+    native,
+    asset,
+    certificate,
+    external,
+    spec,
+    execution,
+    balance,
+    outcome,
+  };
+}
+
+test(
+  'SPL settlement attributes sponsor fees and retained hot ATA rent without changing customer liability; reversal compensates once',
+  { skip: !db },
+  async () => {
+    const f = await splFinancialFixture();
+    await settlements!.handle(f.execution);
+    const result = f.outcome();
+    await settlements!.handle(result);
+    await settlements!.handle({ ...result, eventId: randomUUID() });
+    assert.equal(await f.balance('customer_available', f.customerId), 500n);
+    assert.equal(await f.balance('custody_deposit', f.sourceId), 0n);
+    assert.equal(await f.balance('custody_deposit', f.sourceId, f.native), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 500n);
+    assert.equal(await f.balance('custody_management', f.payerId, f.native), 7_950_720n);
+    assert.equal(await f.balance('custody_rent', f.hotId, f.native), 2_039_280n);
+    assert.equal(await f.balance('fee_expense', f.domainId, f.native), 10_000n);
+    const undo = reversal(f.execution);
+    await settlements!.handle(undo);
+    await settlements!.handle({ ...undo, eventId: randomUUID() });
+    assert.equal(await f.balance('custody_management', f.payerId, f.native), 10_000_000n);
+    assert.equal(await f.balance('custody_rent', f.hotId, f.native), 0n);
+    assert.equal(await f.balance('custody_deposit', f.sourceId), 500n);
+    assert.equal(await f.balance('customer_available', f.customerId), 500n);
+    await settlements!.handle(f.outcome(3));
+    assert.equal(await f.balance('custody_management', f.payerId, f.native), 7_950_720n);
+    assert.equal(await f.balance('custody_rent', f.hotId, f.native), 2_039_280n);
+  },
+);
+
+test(
+  'SPL cost binding rejects a customer fee payer, wrong mint, changed registry revision and rent beneficiary',
+  { skip: !db },
+  async () => {
+    const f = await splFinancialFixture();
+    assert.equal(f.execution.type, 'sweep.execute.requested.v1');
+    if (f.execution.type !== 'sweep.execute.requested.v1') return;
+    const costs = f.execution.data.tokenCosts!;
+    for (const changed of [
+      { feePayerWalletId: f.sourceId },
+      { feePayerRegistryRevision: 2 },
+      { rentCustodyWalletId: f.payerId },
+      { certificate: { ...f.certificate, mint: '6'.repeat(44) } },
+    ]) {
+      await assert.rejects(
+        settlements!.handle(
+          exchangeEventSchema.parse({
+            ...f.execution,
+            eventId: randomUUID(),
+            data: { ...f.execution.data, tokenCosts: { ...costs, ...changed } },
+          }),
+        ),
+      );
+    }
+    assert.equal(await db!.exchangeOperation.count({ where: { domain_id: f.domainId } }), 0);
+  },
+);
+
+test(
+  'failed SPL execution pays only sponsor fees and never books account creation rent or moves tokens',
+  { skip: !db },
+  async () => {
+    const f = await splFinancialFixture();
+    await settlements!.handle(f.execution);
+    await assert.rejects(
+      settlements!.handle(f.outcome(1, '2039280', 'failed')),
+      /approved successful SPL/,
+    );
+    await settlements!.handle(f.outcome(1, '0', 'failed'));
+    assert.equal(await f.balance('custody_management', f.payerId, f.native), 9_990_000n);
+    assert.equal(await f.balance('custody_rent', f.hotId, f.native), 0n);
+    assert.equal(await f.balance('custody_deposit', f.sourceId), 500n);
+    assert.equal(await f.balance('customer_available', f.customerId), 500n);
+  },
+);
+
+test(
+  'SPL hot withdrawal consumes its original token hold, pays native fees and external ATA rent as exchange expense, and restores the same hold on reorg',
+  { skip: !db },
+  async () => {
+    const f = await splFinancialFixture();
+    await settlements!.handle(f.execution);
+    await settlements!.handle(f.outcome());
+    await db!.$transaction((tx) =>
+      journal.post(tx, {
+        key: `hot-fees:${f.domainId}`,
+        domainId: f.domainId,
+        revision: 0,
+        kind: 'fixture',
+        postings: [
+          { account: f.spec('custody_hot', f.hotId, f.native), side: 'debit', amount: 10_000_000n },
+          { account: f.spec('equity', f.domainId, f.native), side: 'credit', amount: 10_000_000n },
+        ],
+      }),
+    );
+    const operationId = randomUUID(),
+      attemptId = randomUUID(),
+      requestDigest = 'b'.repeat(64);
+    const reservation = exchangeEventSchema.parse({
+      ...base(f.domainId),
+      type: 'withdrawal.reserve.requested.v1',
+      customerId: f.customerId,
+      operationId,
+      requestDigest,
+      policyVersion: 'exchange-financial-v1',
+      data: {
+        amounts: [{ asset: f.asset, amount: '300' }],
+        principal: { asset: f.asset, amount: '300' },
+        hotWalletId: f.hotId,
+        destination: f.external,
+        quoteExpiresAt: new Date(Date.now() + 300000).toISOString(),
+      },
+    });
+    await reservations!.handle(reservation);
+    const execution = exchangeEventSchema.parse({
+      ...base(f.domainId),
+      type: 'withdrawal.execute.requested.v1',
+      customerId: f.customerId,
+      operationId,
+      attemptId,
+      requestDigest,
+      data: {
+        sourceWalletId: f.hotId,
+        destination: f.external,
+        amount: { asset: f.asset, amount: '300' },
+        tokenCosts: {
+          certificate: f.certificate,
+          feePayerWalletId: f.hotId,
+          feePayerRegistryRevision: 1,
+          maximumFeeUnits: '5000',
+          maximumRentUnits: '2039280',
+        },
+      },
+    });
+    await settlements!.handle(execution);
+    const outcome = exchangeEventSchema.parse({
+      ...base(f.domainId),
+      type: 'settlement.requested.v1',
+      operationId,
+      attemptId,
+      requestDigest,
+      data: {
+        transactionHash: '7'.repeat(87),
+        outcome: 'confirmed',
+        actualFees: [{ asset: f.native, amount: '5000' }],
+        actualRentUnits: '2039280',
+      },
+    });
+    await settlements!.handle(outcome);
+    await settlements!.handle({ ...outcome, eventId: randomUUID() });
+    assert.equal(await f.balance('customer_available', f.customerId), 200n);
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 200n);
+    assert.equal(await f.balance('custody_hot', f.hotId, f.native), 7_955_720n);
+    assert.equal(await f.balance('custody_rent', f.hotId, f.native), 2_039_280n);
+    assert.equal(await f.balance('fee_expense', f.domainId, f.native), 2_054_280n);
+    const undo = reversal(execution);
+    await settlements!.handle(undo);
+    await settlements!.handle({ ...undo, eventId: randomUUID() });
+    assert.equal(await f.balance('customer_available', f.customerId), 200n);
+    assert.equal(await f.balance('customer_reserved', f.customerId), 300n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 500n);
+    assert.equal(await f.balance('custody_hot', f.hotId, f.native), 10_000_000n);
+    assert.equal(await f.balance('fee_expense', f.domainId, f.native), 10_000n);
+    await settlements!.handle({ ...outcome, eventId: randomUUID(), revision: 3 });
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 200n);
   },
 );

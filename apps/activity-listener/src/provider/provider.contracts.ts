@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { tokenCertificateSchema, CLASSIC_TOKEN_PROGRAM } from '../../../../packages/shared/src/token-contracts.js';
 import { chainSchema } from '../../../../packages/shared/src/contracts.js';
 
 // This is the exchange provider gateway protocol, not the upstream QuickNode Streams API.
@@ -9,7 +10,7 @@ export const providerCertificationSchema = z
     provider: providerNameSchema,
     chain: chainSchema,
     network: z.string().min(1).max(128),
-    assetScope: z.literal('native'),
+    assetScope: z.enum(['native','native-and-transfer-tokens']),
     watchInstall: z.literal(true),
     watchRemove: z.literal(true),
     backfill: z.literal(true),
@@ -17,9 +18,13 @@ export const providerCertificationSchema = z
     rawUnits: z.literal(true),
     resetEpochDelivery: z.literal(true),
     nativeTraceCoverage: z.literal(true).optional(),
+    tokenTransferCoverage:z.literal(true).optional(),
+    tokenHistoryCoverage:z.literal(true).optional(),
+    ownedTokenAccountCoverage:z.literal(true).optional(),
   })
   .strict()
   .superRefine((certificate, ctx) => {
+    if(certificate.assetScope==='native-and-transfer-tokens' && (!certificate.tokenTransferCoverage || !certificate.tokenHistoryCoverage || (certificate.chain==='solana'&&!certificate.ownedTokenAccountCoverage))) ctx.addIssue({code:'custom',message:'Token scope requires certified transfer/history/owned-account coverage'});
     if (certificate.chain === 'ethereum' && !certificate.nativeTraceCoverage)
       ctx.addIssue({
         code: 'custom',
@@ -40,7 +45,9 @@ export const providerWatchIdentitySchema = z
     chain: chainSchema,
     network: z.string().min(1).max(128),
     address: z.string().min(1).max(256),
-    assetScope: z.literal('native'),
+    assetScope: z.enum(['native','native-and-transfer-tokens']),
+    tokenAssets:z.array(tokenCertificateSchema).min(1).max(32).optional(),
+    tokenAccounts:z.array(z.object({address:z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),owner:z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),mint:z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/),programId:z.literal(CLASSIC_TOKEN_PROGRAM)}).strict()).max(100).optional(),
   })
   .strict();
 export type ProviderWatchIdentity = z.infer<typeof providerWatchIdentitySchema>;
@@ -83,6 +90,7 @@ export interface ExchangeWatchProvider {
   readonly name: z.infer<typeof providerNameSchema>;
   providerFor?(chain: string, network: string): z.infer<typeof providerNameSchema> | undefined;
   certified(chain: string, network: string): boolean;
+  tokenCertified?(chain:string,network:string):boolean;
   install(request: ProviderInstallRequest): Promise<ProviderInstallAcknowledgment>;
   backfill(request: ProviderBackfillRequest): Promise<ProviderBackfillPage>;
   remove(request: ProviderRemoveRequest): Promise<ProviderRemoveAcknowledgment>;

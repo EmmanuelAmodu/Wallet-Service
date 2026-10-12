@@ -3,6 +3,9 @@ import { ActionRejectedError } from '../../../../packages/shared/src/action-reje
 import { Message, walletDeriveSchema } from '../../../../packages/queue/src/messages.js';
 import { isEvmChain } from '../../../../packages/shared/src/contracts.js';
 import { SigningCore } from './signing.core.js';
+import { TokenSigningPolicy } from './token-signing.policy.js';
+import { TokenPreparation } from '../../../../packages/chain/src/token-planner.js';
+import { tokenCustodySignSchema } from '../../../../packages/shared/src/execution-contracts.js';
 import { CustodySigningPolicy } from './custody-signing.policy.js';
 import { custodySignSchema } from '../../../../packages/shared/src/execution-contracts.js';
 import {
@@ -15,6 +18,7 @@ export class SigningService implements OnApplicationShutdown {
   constructor(
     private readonly core: SigningCore,
     @Optional() private readonly custodyPolicy?: CustodySigningPolicy,
+    @Optional() private readonly tokenPolicy?: TokenSigningPolicy,
   ) {}
 
   execute(action: Message): Message {
@@ -97,6 +101,53 @@ export class SigningService implements OnApplicationShutdown {
       } as Message;
     } else throw new ActionRejectedError('Unsupported signer action');
     return result;
+  }
+
+  async executeToken(
+    action: Extract<Message, { type: 'transaction.token.sign' }>,
+  ): Promise<Message> {
+    const command = tokenCustodySignSchema.parse(action),
+      policy = this.tokenPolicy;
+    const settings = this.custodyPolicy?.settings;
+    if (!policy || !settings?.attestationPrivateKey)
+      throw new ActionRejectedError('Token signing is not configured');
+    const binding = {
+      transactionId: command.transactionId,
+      operationId: command.operationId,
+      attemptId: command.attemptId,
+      requestDigest: command.requestDigest,
+      preparationDigest: command.preparationDigest,
+    };
+    let unsigned:
+      | Omit<Extract<Message, { type: 'transaction.custody.signed' }>, 'signerAttestation'>
+      | Omit<Extract<Message, { type: 'transaction.custody.rejected' }>, 'signerAttestation'>;
+    try {
+      unsigned = {
+        ...binding,
+        type: 'transaction.custody.signed',
+        signed: await policy.sign(command.prepared as TokenPreparation, command.authorization),
+      };
+    } catch {
+      unsigned = {
+        ...binding,
+        type: 'transaction.custody.rejected',
+        reason: 'Token signing policy rejected',
+      };
+    }
+    return {
+      ...unsigned,
+      signerAttestation: signSignerAttestation(
+        {
+          version: 1,
+          domainId: settings.domainId,
+          resetEpoch: settings.resetEpoch,
+          ...binding,
+          status: unsigned.type === 'transaction.custody.signed' ? 'signed' : 'rejected',
+          resultDigest: executionDigest(unsigned),
+        },
+        settings.attestationPrivateKey,
+      ),
+    } as Message;
   }
 
   onApplicationShutdown() {

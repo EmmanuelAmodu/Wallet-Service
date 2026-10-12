@@ -170,3 +170,44 @@ model ExchangeCustodyIncident {
 
   @@map("exchange_custody_incidents")
 }
+
+model ExchangeTokenAsset {
+ domain_id String
+ reset_epoch String
+ chain String
+ network String
+ asset_id String
+ certificate Json
+ certificate_digest String
+ configuration_revision Int
+ observation_enabled Boolean @default(false)
+ credit_enabled Boolean @default(false)
+ request Json
+ updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+ @@id([domain_id,reset_epoch,chain,network,asset_id])
+ @@map("exchange_token_assets")
+}
+model ExchangeTokenWatch {
+ id String @id @db.Uuid
+ wallet_id String @db.Uuid
+ domain_id String
+ reset_epoch String
+ asset_id String
+ configuration_revision Int
+ registry_revision Int
+ generation String @unique @db.Uuid
+ identity Json
+ watch_id String?
+ start_cursor String?
+ through_cursor String?
+ cursor String?
+ state String
+ revision Int @default(0)
+ lease_until DateTime? @db.Timestamptz
+ next_check_at DateTime @default(now()) @db.Timestamptz
+ last_error String?
+ updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+ @@unique([wallet_id,asset_id])
+ @@index([next_check_at])
+ @@map("exchange_token_watches")
+}

@@ -23,6 +23,9 @@ import {
   verifySignerAttestation,
 } from '../../../../packages/shared/src/execution-authorization.js';
 import { z } from 'zod';
+import { signSchema } from '../../../../packages/shared/src/contracts.js';
+import { TokenPlanner, TokenPreparation, validateTokenPreparation } from '../../../../packages/chain/src/token-planner.js';
+import { TokenObserver } from '../../../../packages/chain/src/token-observer.js';
 
 type Action = Extract<Message, { type: 'broadcast.requested' | 'broadcast.confirm' }>;
 const active = ['queued', 'broadcasting', 'submitted', 'attention'];
@@ -270,7 +273,7 @@ export class BroadcastService {
       if (
         this.config.custodyMode ||
         this.config.nativeSweepsEnabled ||
-        this.config.nativeWithdrawalsEnabled
+        this.config.nativeWithdrawalsEnabled || this.config.tokenExecutionEnabled
       )
         throw new ActionRejectedError(
           'Native custody mode requires an independently attested execution',
@@ -278,20 +281,24 @@ export class BroadcastService {
       return;
     }
     if (
-      !(execution.preparedRequest.wallet.account === 0
+      !(execution.tokenPreparation || execution.preparedRequest.wallet.account === 1 ? this.config.tokenExecutionEnabled : execution.preparedRequest.wallet.account === 0
         ? this.config.nativeWithdrawalsEnabled
         : this.config.nativeSweepsEnabled) ||
       !this.config.executionSignerPublicKey
     )
       throw new ActionRejectedError('Native custody broadcasting is disabled');
     try {
+      if (execution.tokenPreparation) {
+        validateTokenPreparation(execution.tokenPreparation as TokenPreparation);
+        if (canonical(execution.preparedRequest) !== canonical(execution.tokenPreparation.request)) throw new Error('Token preparation snapshot mismatch');
+      }
       if (
         execution.domainId !== this.config.domainId ||
         execution.resetEpoch !== this.config.resetEpoch ||
         execution.preparedRequest.wallet.chain !== snapshot.chain ||
         execution.preparedRequest.transaction.chain !== snapshot.chain ||
         execution.preparedRequest.wallet.network !== snapshot.network ||
-        executionRequestDigest(execution.preparedRequest) !== execution.preparationDigest
+        (execution.tokenPreparation ? execution.tokenPreparation.preparedDigest : executionRequestDigest(signSchema.parse(execution.preparedRequest))) !== execution.preparationDigest
       )
         throw new Error('Execution snapshot binding mismatch');
       if (
@@ -341,11 +348,13 @@ export class BroadcastService {
       await this.change(action, { status: 'broadcasting', broadcast_attempts: { increment: 1 } });
     }
     const planner = this.planner ?? new NativeSweepPlanner(this.rpc);
-    const observed = await planner.observe({
+    const token=execution.tokenPreparation as TokenPreparation | undefined;
+    const observed = token ? await new TokenObserver(this.rpc).observe(token,snapshot.signed,
+      tx.observed_block_hash && tx.observed_block_height ? {blockHash:tx.observed_block_hash,blockHeight:tx.observed_block_height} : undefined) : await planner.observe({
       chain: snapshot.chain as 'ethereum' | 'bitcoin' | 'solana',
       network: snapshot.network,
       hash: snapshot.signed.txHash,
-      request: execution.preparedRequest,
+      request: signSchema.parse(execution.preparedRequest),
       signed: snapshot.signed,
       ...(tx.observed_block_hash && tx.observed_block_height
         ? {
@@ -386,7 +395,13 @@ export class BroadcastService {
           'Solana blockhash expired; hold the signed attempt for canonical reconciliation',
         );
     }
-    await this.rpc.preflight(snapshot.chain, snapshot.signed);
+    if (token) {
+      await new TokenPlanner(this.rpc).revalidate(token);
+      if (snapshot.chain==='solana') {
+        const simulation=z.object({value:z.object({err:z.null()})}).parse(await this.rpc.call('solana','simulateTransaction',[snapshot.signed.raw,{encoding:'base64',sigVerify:true,commitment:'finalized'}]));
+        if (simulation.value.err !== null) throw new ActionRejectedError('Token simulation failed');
+      }
+    } else await this.rpc.preflight(snapshot.chain, snapshot.signed);
     await this.rpc.broadcast(snapshot.chain, snapshot.signed);
     await this.record(action, 'submitted', 0, observed);
   }

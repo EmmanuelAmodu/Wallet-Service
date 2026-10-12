@@ -71,6 +71,10 @@ export class HttpExchangeWatchProvider implements ExchangeWatchProvider {
     );
   }
 
+  tokenCertified(chain:string,network:string) {
+    return this.certified(chain,network) && this.config.certifications.some(c=>c.chain===chain&&c.network===network&&c.assetScope==='native-and-transfer-tokens'&&c.tokenTransferCoverage&&c.tokenHistoryCoverage&&(chain!=='solana'||c.ownedTokenAccountCoverage));
+  }
+
   async install(request: ProviderInstallRequest) {
     return providerInstallAcknowledgmentSchema.parse(await this.call('install', request));
   }
@@ -138,6 +142,8 @@ export class RoutingExchangeWatchProvider implements ExchangeWatchProvider {
   certified(chain: string, network: string) {
     return this.route(chain, network)?.certified(chain, network) ?? false;
   }
+
+  tokenCertified(chain:string,network:string) { return this.route(chain,network)?.tokenCertified(chain,network) ?? false; }
 
   async install(request: ProviderInstallRequest) {
     return this.forRequest(request).install(request);

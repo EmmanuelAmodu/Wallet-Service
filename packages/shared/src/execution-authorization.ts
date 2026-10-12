@@ -83,6 +83,12 @@ export const executionAuthorizationClaimsSchema = z.discriminatedUnion('purpose'
       reservationId: z.uuid(),
     })
     .strict(),
+  z.object({
+    ...commonAuthorization,purpose:z.literal('native_funding'),
+    source:z.object({...walletIdentity,role:z.literal('management'),account:z.literal(1)}).strict(),
+    target:z.object({...walletIdentity,role:z.literal('customer_deposit'),account:z.number().int().min(10),seedId:identity,domainId:identity}).strict(),
+    fundingReservationId:z.uuid(),fundedAssetId:z.string().regex(/^token:ethereum:erc20:0x[0-9a-f]{40}$/),certificateDigest:digest,
+  }).strict(),
 ]);
 export type ExecutionAuthorizationClaims = z.infer<typeof executionAuthorizationClaimsSchema>;
 export const signedExecutionAuthorizationSchema = z

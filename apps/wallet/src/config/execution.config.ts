@@ -5,6 +5,7 @@ import { integerSetting, required } from '../../../../packages/shared/src/config
 
 export interface ExecutionSettings {
   enabled: boolean;
+  tokensEnabled?: boolean;
   sweepsEnabled?: boolean;
   withdrawalsEnabled?: boolean;
   authorityPrivateKey?: KeyObject;
@@ -18,11 +19,14 @@ export const executionConfig = registerAs('custodyExecution', (): ExecutionSetti
   const withdrawalFlag = process.env.ENABLE_NATIVE_WITHDRAWALS ?? 'false';
   if (!['true', 'false'].includes(withdrawalFlag))
     throw new Error('Invalid configuration: ENABLE_NATIVE_WITHDRAWALS');
+  const tokenFlag = process.env.ENABLE_TOKEN_EXECUTION ?? 'false';
+  if (!['true','false'].includes(tokenFlag)) throw new Error('Invalid configuration: ENABLE_TOKEN_EXECUTION');
+  const tokensEnabled = tokenFlag === 'true';
   const withdrawalsEnabled = withdrawalFlag === 'true';
   const sweepsEnabled = flag === 'true';
-  const enabled = sweepsEnabled || withdrawalsEnabled;
+  const enabled = sweepsEnabled || withdrawalsEnabled || tokensEnabled;
   const pollIntervalMs = integerSetting('EXECUTION_RECONCILIATION_MS', 30000, 100, 86400000);
-  if (!enabled) return { enabled, sweepsEnabled, withdrawalsEnabled, pollIntervalMs };
+  if (!enabled) return { enabled, sweepsEnabled, withdrawalsEnabled, tokensEnabled, pollIntervalMs };
   const path = required('EXECUTION_AUTHORITY_PRIVATE_KEY_FILE');
   const stat = statSync(path);
   if (!stat.isFile() || stat.mode & 0o077 || (process.getuid && stat.uid !== process.getuid()))
@@ -44,6 +48,7 @@ export const executionConfig = registerAs('custodyExecution', (): ExecutionSetti
     throw new Error('Execution authority and Signer attestation need independent keys');
   return {
     enabled,
+    tokensEnabled,
     sweepsEnabled,
     withdrawalsEnabled,
     authorityPrivateKey,
