@@ -1,3 +1,4 @@
+import { assertManagementFundingEnabled } from '../operations/funding-gate.js';
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -72,6 +73,9 @@ export class TokenFeesService {
       where: { id: request.managementWalletId },
     });
     const reserve = async (tx: Prisma.TransactionClient) => {
+      // All execution paths acquire domain, funding gate, then budget locks in that order.
+      await tx.$queryRaw`SELECT id FROM custody_domains WHERE id=${request.domainId} FOR UPDATE`;
+      await assertManagementFundingEnabled(tx, request.domainId, request.resetEpoch);
       // All workers reserve against the same network balance and rolling budget.
       await lock(
         tx,

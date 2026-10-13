@@ -1,3 +1,4 @@
+import { OperationsService } from '../operations/operations.service.js';
 import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import { BeforeApplicationShutdown, Optional } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
@@ -17,6 +18,7 @@ export class WalletProcessor extends WorkerHost implements BeforeApplicationShut
     @Optional() private readonly exchange?: ExchangeMessagingService,
     @Optional() private readonly execution?: CustodyExecutionService,
     @Optional() private readonly withdrawals?: WithdrawalsService,
+    @Optional() private readonly operations?: OperationsService,
   ) {
     super();
   }
@@ -34,6 +36,7 @@ export class WalletProcessor extends WorkerHost implements BeforeApplicationShut
     }
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     try {
+      if (this.operations && (await this.operations.handle(message))) return;
       if (this.execution && (await this.execution.handle(message))) return;
       await this.withdrawals?.handle(message);
       if (isExchangeEvent(message)) {

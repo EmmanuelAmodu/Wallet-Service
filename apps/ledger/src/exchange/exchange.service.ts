@@ -1,3 +1,4 @@
+import { ReconciliationService } from '../operations/reconciliation.service.js';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   ExchangeEvent,
@@ -20,12 +21,21 @@ export class LedgerExchangeService {
     private readonly settlements: SettlementsService,
     @Inject(queueConfig.KEY) private readonly config: Pick<QueueConfig, 'resetEpoch'>,
     @Optional() private readonly incidents?: IncidentsService,
+    @Optional() private readonly operations?: ReconciliationService,
   ) {}
 
   async handle(input: ExchangeEvent) {
     const event = exchangeEventSchema.parse(input);
     if (event.resetEpoch !== this.config.resetEpoch)
       throw new ActionRejectedError('Stale reset epoch');
+    if (
+      event.type === 'operations.custody.observed.v1' ||
+      event.type === 'operations.repair.requested.v1' ||
+      event.type === 'operations.domain.resume.requested.v1'
+    ) {
+      if (!this.operations) throw new Error('Operational reconciliation unavailable');
+      return this.operations.handle(event);
+    }
     if (
       event.type === 'custody.loss.detected.v1' ||
       event.type === 'custody.loss.reverted.v1' ||

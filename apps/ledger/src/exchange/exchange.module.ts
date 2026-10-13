@@ -1,3 +1,4 @@
+import { LedgerOperationsModule } from '../operations/operations.module.js';
 import { Module } from '@nestjs/common';
 import { LedgerPrismaModule } from '../prisma/prisma.module.js';
 import { DepositsModule } from '../deposits/deposits.module.js';
@@ -12,6 +13,7 @@ import { IncidentsModule } from '../incidents/incidents.module.js';
 @Module({
   imports: [
     LedgerPrismaModule,
+    LedgerOperationsModule,
     DepositsModule,
     ReservationsModule,
     SettlementsModule,

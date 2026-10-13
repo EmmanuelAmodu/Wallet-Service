@@ -1,3 +1,4 @@
+import { operationsMetrics, ageMetric } from '../../../../packages/queue/src/operations-metrics.js';
 import { BroadcastPrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '.prisma/broadcast-client';
 import { Inject, Injectable, Optional } from '@nestjs/common';
@@ -43,6 +44,50 @@ export class BroadcastService {
   ) {}
 
   async execute(message: Message, finalAttempt: boolean) {
+    if (message.type === 'operations.repair.requested.v1') {
+      if (
+        message.domainId !== this.config.domainId ||
+        (this.config.resetEpoch && message.resetEpoch !== this.config.resetEpoch)
+      )
+        throw new ActionRejectedError('Broadcast recovery scope mismatch');
+      const rows = await this.db.transaction.findMany({
+        where: {
+          domain_id: message.domainId,
+          reset_epoch: message.resetEpoch,
+          status: { in: ['queued', 'broadcasting', 'submitted', 'attention'] },
+        },
+        orderBy: { updated_at: 'asc' },
+        take: 100,
+      });
+      for (const row of rows) {
+        try {
+          await this.execute(
+            {
+              type: 'broadcast.confirm',
+              transactionId: row.id,
+              generation: row.broadcast_generation,
+              poll: 0,
+            },
+            false,
+          );
+        } catch {
+          /* Keep uncertain outcomes; do not submit replacement bytes. */
+        }
+      }
+      const metrics = [
+        { name: 'broadcast_uncertain', value: String(rows.length), labels: {} },
+        ageMetric('broadcast_oldest_age_ms', rows),
+      ];
+      await this.db.$transaction((tx) =>
+        enqueue(
+          tx,
+          QUEUES.wallet,
+          operationsMetrics(message, 'broadcast', metrics),
+          `operations-broadcast:${message.eventId}`,
+        ),
+      );
+      return;
+    }
     if (message.type !== 'broadcast.requested' && message.type !== 'broadcast.confirm')
       throw new ActionRejectedError('Unsupported broadcast action');
     try {

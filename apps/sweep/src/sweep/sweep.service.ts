@@ -1,3 +1,5 @@
+import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
+import { operationsMetrics, ageMetric } from '../../../../packages/queue/src/operations-metrics.js';
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { createHash, randomUUID } from 'node:crypto';
@@ -73,6 +75,75 @@ export class SweepService {
       throw new ActionRejectedError('Stale reset epoch');
     if (event.domainId !== this.config.domainId)
       throw new ActionRejectedError('Event belongs to a different exchange custody domain');
+    if (event.type === 'operations.domain.resume.requested.v1') {
+      await this.db.$transaction(async (tx) => {
+        await lock(tx, `sweep-domain:${event.domainId}:${event.resetEpoch}`);
+        await tx.sweepDomainGate.deleteMany({
+          where: { domain_id: event.domainId, reset_epoch: event.resetEpoch },
+        });
+        const work = await tx.sweepWork.findMany({
+          where: {
+            domain_id: event.domainId,
+            reset_epoch: event.resetEpoch,
+            state: 'paused_review',
+            active_operation_id: null,
+          },
+        });
+        for (const w of work) {
+          const customer = await tx.sweepCustomer.findUnique({
+            where: { customer_id: w.customer_id },
+          });
+          if (!customer?.paused)
+            await tx.sweepWork.update({
+              where: { id: w.id },
+              data: {
+                state: 'eligible',
+                reason: 'Verified operator domain recovery',
+                next_attempt_at: new Date(),
+              },
+            });
+        }
+      });
+      return;
+    }
+    if (event.type === 'operations.repair.requested.v1') {
+      await this.scheduleEligible();
+      const rows = await this.db.sweepWork.findMany({
+        where: { domain_id: event.domainId, reset_epoch: event.resetEpoch },
+      });
+      const unfinished = rows.filter(
+        (w) => w.active_operation_id || w.generation > w.consumed_generation,
+      );
+      const metrics = [
+        { name: 'unswept_work', value: String(unfinished.length), labels: {} },
+        ageMetric('unswept_oldest_age_ms', unfinished),
+        {
+          name: 'dust_work',
+          value: String(
+            rows.filter(
+              (w) => w.reason?.toLowerCase().includes('dust') || w.reason?.includes('minimum'),
+            ).length,
+          ),
+          labels: {},
+        },
+        {
+          name: 'gas_backlog',
+          value: String(
+            rows.filter((w) => w.reason?.includes('fund') || w.state === 'waiting_funds').length,
+          ),
+          labels: {},
+        },
+      ];
+      await this.db.$transaction((tx) =>
+        enqueue(
+          tx,
+          QUEUES.wallet,
+          operationsMetrics(event, 'sweep', metrics),
+          `operations-sweep:${event.eventId}`,
+        ),
+      );
+      return;
+    }
     await this.db.$transaction(async (tx) => {
       // Serializes local registry and work projection so late hot/customer deliveries cannot race credits.
       await lock(tx, `sweep-domain:${event.domainId}:${event.resetEpoch}`);

@@ -1,3 +1,7 @@
+import { IncidentsService } from '../apps/ledger/src/incidents/incidents.service.js';
+import { OperationsService } from '../apps/wallet/src/operations/operations.service.js';
+import { ReconciliationService } from '../apps/ledger/src/operations/reconciliation.service.js';
+import { assertManagementFundingEnabled } from '../apps/wallet/src/operations/funding-gate.js';
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -109,6 +113,7 @@ let execution: CustodyExecutionService,
 let ethereumFixture: Awaited<ReturnType<typeof fixture>>,
   solanaFixture: Awaited<ReturnType<typeof fixture>>,
   solanaWithdrawalId: string;
+let operations: OperationsService, reconciliation: ReconciliationService;
 const rpc = new TokenChainFixture(),
   verified = new Map<string, VerifiedExchangeTransaction>(),
   seen = new Set<string>();
@@ -169,7 +174,16 @@ async function pump() {
           id = randomUUID(),
           message = auth.open(auth.seal(parsed, id), id, parsed.type);
         let handled = true;
-        if (row.queue === QUEUES.signer) {
+        if (row.queue === QUEUES.wallet && message.type.startsWith('operations.'))
+          await operations.handle(message);
+        else if (
+          row.queue === QUEUES.ledger &&
+          (message.type === 'operations.custody.observed.v1' ||
+            message.type === 'operations.repair.requested.v1' ||
+            message.type === 'operations.domain.resume.requested.v1')
+        )
+          await reconciliation.handle(message);
+        else if (row.queue === QUEUES.signer) {
           const result =
             message.type === 'transaction.token.sign'
               ? await signer.executeToken(message)
@@ -193,6 +207,12 @@ async function pump() {
           }
         } else if (row.queue === QUEUES.ledger) {
           const e = exchangeEventSchema.parse(message);
+          if (e.type === 'custody.incident.opened.v1') {
+            await new IncidentsService(ledger, journal).handle(e);
+            seen.add(key);
+            progress++;
+            continue;
+          }
           if (
             [
               'customer.registry.requested.v1',
@@ -363,6 +383,23 @@ before(async () => {
     },
     new NativeSweepPlanner(rpc),
   );
+  operations = new OperationsService(
+    db,
+    rpc,
+    auth,
+    config,
+    {
+      enabled: false,
+      apiKey: 'o'.repeat(64),
+      actor: 'fixture-operator',
+      intervalMs: 1000,
+      freshnessMs: 300000,
+      batchSize: 100,
+    },
+    execution,
+    withdrawals,
+  );
+  reconciliation = new ReconciliationService(ledger, reservations);
   await custody.bootstrap();
   await pump();
 });
@@ -876,6 +913,226 @@ test(
       ).configuration_revision,
       3,
     );
+  },
+);
+
+test(
+  'Phase 7 samples all custody roles with queue reconciliation, preserves books and reports funded hot fee/rent custody',
+  { skip: !enabled },
+  async () => {
+    const journals = await ledger.journalBatch.count();
+    await operations.schedule(true);
+    await pump();
+    const run = await db.operationsRun.findFirstOrThrow({
+      where: { wallet_id: solanaFixture.hot.id },
+      orderBy: { sequence: 'desc' },
+    });
+    assert.equal(run.state, 'matched', JSON.stringify(run.report));
+    assert.equal(
+      await ledger.journalBatch.count(),
+      journals,
+      'Reconciliation must never alter a financial journal',
+    );
+    assert.equal(await db.operationsRun.count({ where: { state: 'queued' } }), 0);
+    const report = run.report as { report: { totals: { bookEquation: string }[] } };
+    assert.ok(report.report.totals.every((t) => t.bookEquation === '0'));
+    const status = await operations.status();
+    assert.doesNotThrow(() => JSON.stringify(status));
+    const request = await db.outbox.findFirstOrThrow({
+      where: { dedupe_key: `operations-sample:${run.id}` },
+    });
+    await reconciliation.handle(exchangeEventSchema.parse(request.payload));
+    await pump();
+    assert.equal(await ledger.custodyReconciliation.count({ where: { run_id: run.id } }), 1);
+    assert.equal(await ledger.journalBatch.count(), journals);
+  },
+);
+
+test(
+  'Phase 7 operator commands are scoped, audited and idempotent; funding pause fences sponsorship and resume preserves feature flags',
+  { skip: !enabled },
+  async () => {
+    const commandId = randomUUID(),
+      request = { commandId, reason: 'Inspect native liquidity', action: 'pause-funding' as const };
+    await operations.command(request);
+    await operations.command(request);
+    assert.equal(await db.operationsCommand.count({ where: { id: commandId } }), 1);
+    await assert.rejects(
+      () => operations.command({ ...request, reason: 'Changed reason' }),
+      /conflict/i,
+    );
+    await assert.rejects(
+      () => db.$transaction((tx) => assertManagementFundingEnabled(tx, domainId, auth.resetEpoch)),
+      /paused/i,
+    );
+    await operations.command({
+      commandId: randomUUID(),
+      reason: 'Liquidity inspection complete',
+      action: 'resume-funding',
+    });
+    await db.$transaction((tx) => assertManagementFundingEnabled(tx, domainId, auth.resetEpoch));
+    const stored = await db.operationsCommand.findUniqueOrThrow({ where: { id: commandId } });
+    assert.equal(stored.actor, 'fixture-operator');
+    assert.equal(stored.state, 'completed');
+    await assert.rejects(
+      () => db.operationsCommand.delete({ where: { id: commandId } }),
+      /retained/i,
+    );
+    await assert.rejects(
+      () =>
+        operations.command({
+          commandId: randomUUID(),
+          reason: 'Wrong scope',
+          action: 'retry-execution',
+          transactionId: randomUUID(),
+        }),
+      /not found/i,
+    );
+  },
+);
+
+test(
+  'Phase 7 identifies a hot nonce advance outside canonical application execution and retains the alert across later matched samples',
+  { skip: !enabled },
+  async () => {
+    const hot = ethereumFixture.hot;
+    rpc.nonces.set(
+      hot.address!.toLowerCase(),
+      (rpc.nonces.get(hot.address!.toLowerCase()) ?? 0) + 1,
+    );
+    await operations.schedule(true);
+    await pump();
+    const alerts = await db.operationsAlert.findMany({
+      where: { evidence: { path: ['consumer'], equals: `nonce:${hot.id}` }, state: 'open' },
+    });
+    assert.equal(alerts.length, 1);
+    assert.equal(alerts[0].severity, 'critical');
+    await operations.schedule(true);
+    await pump();
+    assert.equal(
+      (await db.operationsAlert.findUniqueOrThrow({ where: { id: alerts[0].id } })).state,
+      'open',
+    );
+    const journals = await ledger.journalBatch.count();
+    await operations.command({
+      commandId: randomUUID(),
+      action: 'review-incident',
+      alertId: alerts[0].id,
+      reason: 'Investigate signing access; retain quarantine evidence',
+    });
+    const reviewed = await db.operationsAlert.findUniqueOrThrow({ where: { id: alerts[0].id } });
+    assert.ok(reviewed.review);
+    assert.equal(reviewed.state, 'open');
+    assert.equal(await ledger.journalBatch.count(), journals);
+  },
+);
+
+test(
+  'Phase 7 domain activation requires reviewed critical evidence and Ledger approval; a newer quarantine defeats an old approval',
+  { skip: !enabled },
+  async () => {
+    await assert.rejects(
+      () =>
+        operations.command({
+          commandId: randomUUID(),
+          action: 'resume-domain',
+          reason: 'Attempt recovery without review',
+        }),
+      /Review critical alerts/i,
+    );
+    for (const alert of await db.operationsAlert.findMany({
+      where: { state: 'open', severity: 'critical' },
+    }))
+      await operations.command({
+        commandId: randomUUID(),
+        action: 'review-incident',
+        alertId: alert.id,
+        reason: 'Reviewed retained chain evidence and nonnegative custody surplus',
+      });
+    await operations.command({
+      commandId: randomUUID(),
+      action: 'pause-domain',
+      reason: 'Controlled recovery rehearsal',
+    });
+    await pump();
+    assert.equal(
+      (await db.custodyDomain.findUniqueOrThrow({ where: { id: domainId } })).status,
+      'paused',
+    );
+    await operations.schedule(true);
+    await pump();
+    const resumeId = randomUUID();
+    await operations.command({
+      commandId: resumeId,
+      action: 'resume-domain',
+      reason: 'Fresh custody proof and incident review complete',
+    });
+    await pump();
+    assert.equal(
+      (await db.operationsCommand.findUniqueOrThrow({ where: { id: resumeId } })).state,
+      'completed',
+    );
+    assert.equal(
+      (await db.custodyDomain.findUniqueOrThrow({ where: { id: domainId } })).status,
+      'active',
+    );
+    const oldId = randomUUID();
+    await operations.command({
+      commandId: oldId,
+      action: 'resume-domain',
+      reason: 'Older approval',
+    });
+    await operations.command({
+      commandId: randomUUID(),
+      action: 'pause-domain',
+      reason: 'New quarantine wins',
+    });
+    const source = await db.outbox.findFirstOrThrow({
+      where: { dedupe_key: `operations-domain-resume:${oldId}` },
+    });
+    await reconciliation.handle(exchangeEventSchema.parse(source.payload));
+    const response = await ledger.outbox.findFirstOrThrow({
+      where: { dedupe_key: `operations-domain-resume-result:${oldId}` },
+    });
+    await operations.handle(exchangeEventSchema.parse(response.payload));
+    assert.equal(
+      (await db.operationsCommand.findUniqueOrThrow({ where: { id: oldId } })).state,
+      'failed',
+    );
+    assert.equal(
+      (await db.custodyDomain.findUniqueOrThrow({ where: { id: domainId } })).status,
+      'paused',
+    );
+  },
+);
+
+test(
+  'Phase 7 customer freeze preserves liability and journals the available-to-frozen transfer once',
+  { skip: !enabled },
+  async () => {
+    const customer = ethereumFixture.customerId,
+      before = await registry.balances(domainId, customer),
+      request = {
+        commandId: randomUUID(),
+        action: 'freeze-customer' as const,
+        customerId: customer,
+        reason: 'Investigate this customer custody flow',
+      };
+    await operations.command(request);
+    await operations.command(request);
+    await pump();
+    assert.equal(
+      (await db.exchangeCustomer.findUniqueOrThrow({ where: { customer_id: customer } })).state,
+      'frozen',
+    );
+    const after = await registry.balances(domainId, customer);
+    assert.equal(after.state, 'frozen');
+    const old = before.balances.find((b) => b.assetId === ethereumFixture.asset.assetId)!,
+      current = after.balances.find((b) => b.assetId === ethereumFixture.asset.assetId)!;
+    assert.equal(current.available, '0');
+    assert.equal(BigInt(current.frozen), BigInt(old.available) + BigInt(old.frozen));
+    assert.equal(await ledger.ledgerIncident.count({ where: { id: request.commandId } }), 1);
+    assert.equal(await db.operationsCommand.count({ where: { id: request.commandId } }), 1);
   },
 );
 

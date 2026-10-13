@@ -1,3 +1,4 @@
+import { assertManagementFundingEnabled } from '../operations/funding-gate.js';
 import { TokenFeesService } from './token-fees.service.js';
 import { Inject, Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { CustodyExecution, Prisma, Wallet } from '@prisma/client';
@@ -122,6 +123,8 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     )
       throw new ActionRejectedError('Token certificate metadata mismatch');
     if (plan.type === 'sweep.plan.requested.v1') {
+      if (certificate.standard === 'spl')
+        await assertManagementFundingEnabled(tx, plan.domainId, plan.resetEpoch);
       const coverage = await tx.tokenWalletCoverage.findUnique({
         where: {
           wallet_id_asset_id: {
@@ -572,6 +575,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     )
       throw new SweepDeferral('disabled', 'Management funding is disabled');
     await tx.$queryRaw`SELECT id FROM custody_domains WHERE id=${plan.domainId} FOR UPDATE`;
+    await assertManagementFundingEnabled(tx, plan.domainId, plan.resetEpoch);
     await tx.$queryRaw`SELECT customer_id FROM exchange_customers WHERE customer_id=${plan.customerId}::uuid FOR UPDATE`;
     await tx.$queryRaw`SELECT id FROM wallets WHERE id IN (${plan.data.sourceWalletId}::uuid,${plan.data.destinationWalletId}::uuid) ORDER BY id FOR UPDATE`;
     const reservation = await tx.tokenFeeReservation.findUnique({
@@ -2261,6 +2265,47 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       }
     });
     if (observation.state === 'pending') await this.resumeSigned(execution);
+  }
+
+  async retrySigned(transactionId: string, commandId: string) {
+    await this.reconcile(transactionId);
+    const snapshot = await this.db.custodyExecution.findUnique({
+      where: { transaction_id: transactionId },
+    });
+    if (
+      !snapshot ||
+      snapshot.domain_id !== this.walletConfig.domainId ||
+      snapshot.reset_epoch !== this.auth.resetEpoch
+    )
+      throw new ActionRejectedError('Execution recovery scope mismatch');
+    if (snapshot.retired_at && !snapshot.reversed) return;
+    await this.db.$transaction(async (tx) => {
+      await lock(tx, `custody-source:${snapshot.source_wallet_id}`);
+      const current = await tx.custodyExecution.findUniqueOrThrow({ where: { id: snapshot.id } });
+      if (current.retired_at && !current.reversed) return;
+      if (!current.signer_result) return; // Reconciliation preserves uncertain signing; this command never signs again.
+      // Quarantine stops new authorizations. An operator may only replay already signed bytes under their retained claims.
+      const other = await tx.custodyExecution.findFirst({
+        where: {
+          source_wallet_id: current.source_wallet_id,
+          retired_at: null,
+          id: { not: current.id },
+        },
+      });
+      if (other) throw new ActionRejectedError('Another execution owns this source fence');
+      const claims = await tx.executionResourceClaim.findMany({
+        where: { execution_id: current.id },
+      });
+      if (!claims.length || claims.some((c) => !c.active))
+        throw new ActionRejectedError('Original resource claims are not held');
+      const original = await tx.outbox.findUniqueOrThrow({
+        where: { dedupe_key: `custody-broadcast:${current.attempt_id}` },
+      });
+      const action = messageSchema.parse(original.payload);
+      if (action.type !== 'broadcast.requested' || action.transactionId !== transactionId)
+        throw new ActionRejectedError('Original signed dispatch evidence missing');
+      await enqueue(tx, QUEUES.broadcast, action, `custody-operator-retry:${commandId}`);
+    });
   }
 
   async repairDue() {

@@ -33,7 +33,10 @@ export class ActivityProcessor extends WorkerHost implements BeforeApplicationSh
     }
     try {
       const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
-      if (message.type === 'asset.transfer.registry.requested.v1') {
+      if (message.type === 'operations.repair.requested.v1') {
+        if (!this.exchange) throw new Error('Operations observer unavailable');
+        await this.exchange.repairOperations(message);
+      } else if (message.type === 'asset.transfer.registry.requested.v1') {
         if (!this.tokens) throw new ActionRejectedError('Token registry unavailable');
         await this.tokens.register(message);
       } else if (

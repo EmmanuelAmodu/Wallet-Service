@@ -411,3 +411,16 @@ model Inbox {
 
   @@map("inbox")
 }
+
+model CustodyReconciliation {
+ run_id String @id @db.Uuid
+ domain_id String
+ reset_epoch String
+ wallet_id String @db.Uuid
+ digest String
+ evidence Json
+ report Json
+ created_at DateTime @default(now()) @db.Timestamptz
+ @@index([domain_id,reset_epoch,wallet_id,created_at])
+ @@map("custody_reconciliations")
+}

@@ -561,8 +561,137 @@ const custodyLossReverted = event(
   { customerId: z.uuid() },
 );
 
+export const operationMetricSchema = z
+  .object({
+    name: z.string().regex(/^[a-z][a-z0-9_]{0,79}$/),
+    value: z.string().regex(/^(0|[1-9][0-9]{0,77})$/),
+    labels: z.record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/), z.string().max(256)).default({}),
+    alert: z.enum(['warning', 'critical']).optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .strict();
+export const custodyObservationSchema = z
+  .object({
+    asset: canonicalAssetSchema,
+    state: z.enum(['observed', 'unavailable']),
+    units: executionUnitsSchema.optional(),
+    rentUnits: executionUnitsSchema.optional(),
+    nonce: executionUnitsSchema.optional(),
+    resourceDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    recentTransactions: z.array(z.string().min(1).max(256)).max(100).optional(),
+    blockHash: z.string().min(1).max(256).optional(),
+    blockHeight: executionUnitsSchema.optional(),
+    reason: z.string().max(500).optional(),
+  })
+  .strict()
+  .superRefine((r, ctx) => {
+    if (
+      r.state === 'observed' &&
+      (r.units === undefined || !r.blockHash || r.blockHeight === undefined)
+    )
+      ctx.addIssue({
+        code: 'custom',
+        message: 'Observed custody requires amount and canonical block evidence',
+      });
+  });
+const custodySampleRequested = event(
+  'operations.wallet.sample.requested.v1',
+  z.object({ runId: z.uuid(), walletId: z.uuid() }).strict(),
+);
+const custodySampleObserved = event(
+  'operations.custody.observed.v1',
+  z
+    .object({
+      runId: z.uuid(),
+      sampleSequence: executionUnitsSchema,
+      walletId: z.uuid(),
+      registryRevision: z.number().int().positive(),
+      address: z.string().min(1).max(256),
+      role: z.enum(['hot', 'management', 'customer_deposit']),
+      observations: z.array(custodyObservationSchema).min(1).max(64),
+    })
+    .strict(),
+);
+const custodyReconciled = event(
+  'operations.custody.reconciled.v1',
+  z
+    .object({
+      runId: z.uuid(),
+      walletId: z.uuid(),
+      status: z.enum(['matched', 'difference', 'unavailable']),
+      report: z
+        .object({
+          wallets: z
+            .array(
+              z
+                .object({
+                  asset: canonicalAssetSchema,
+                  status: z.enum(['matched', 'difference', 'unavailable']),
+                  observed: z.string().optional(),
+                  book: z.string(),
+                  difference: z.string().optional(),
+                  reason: z.string(),
+                  inFlight: z.number().int().nonnegative(),
+                })
+                .strict(),
+            )
+            .max(128),
+          totals: z
+            .array(
+              z
+                .object({
+                  asset: canonicalAssetSchema,
+                  accounts: z.record(z.string(), z.string()),
+                  bookEquation: z.string(),
+                  physicalCustody: z.string(),
+                  liabilities: z.string(),
+                })
+                .strict(),
+            )
+            .max(128),
+          journalWatermark: z.string(),
+          openIncidents: z.number().int().nonnegative(),
+        })
+        .strict(),
+    })
+    .strict(),
+);
+const operationsResume = event(
+  'operations.domain.resume.requested.v1',
+  z.object({ commandId: z.uuid(), runIds: z.array(z.uuid()).min(1).max(10000) }).strict(),
+);
+const operationsResumed = event(
+  'operations.domain.resume.responded.v1',
+  z
+    .object({ commandId: z.uuid(), accepted: z.boolean(), reason: z.string().min(1).max(500) })
+    .strict(),
+);
+const operationsRepair = event(
+  'operations.repair.requested.v1',
+  z.object({ commandId: z.uuid() }).strict(),
+);
+const operationsMetrics = event(
+  'operations.metrics.reported.v1',
+  z
+    .object({
+      commandId: z.uuid(),
+      consumer: z.enum(['ledger', 'sweep', 'activity-listener', 'broadcast']),
+      metrics: z.array(operationMetricSchema).max(1000),
+    })
+    .strict(),
+);
 export const exchangeEventSchema = z.discriminatedUnion('type', [
   ...executionEventSchemas,
+  custodySampleRequested,
+  custodySampleObserved,
+  custodyReconciled,
+  operationsResume,
+  operationsResumed,
+  operationsRepair,
+  operationsMetrics,
   userRegistered,
   customerRegistryRequested,
   customerRegistryAcknowledged,

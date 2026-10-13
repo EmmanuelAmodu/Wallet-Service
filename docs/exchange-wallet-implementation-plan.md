@@ -461,3 +461,10 @@ Validate the exact installed Wallet Core protobuf/signing capabilities before im
 Transfer-only ERC-20/SPL custody is integrated across Wallet, Sweep, Signer, Broadcast, Listener and Ledger. Management1 funding/sponsorship, durable token/native resource claims, token-specific historical watches, owned-account residual repair, hot0 withdrawals against original holds, fee/rent accounting and canonical reversal are implemented. Deterministic PostgreSQL lifecycle tests supplement adapter/signature and recovery coverage. See [Phase 6 implementation and acceptance notes](exchange-wallet-phase6.md) and the completed P6 task checklist.
 
 Live activation still requires the separate QuickNode gateway deployment/certification, actual asset certificates, native fee capital recorded in Ledger, application migrations and deployment canaries. No real token is enabled; all token feature flags default to false. General contract calls, approvals, token account closure and EVM batch contracts are excluded. Automatic treasury replenishment and signed replacements remain later work.
+
+
+## Phase 7 implementation — 13 October
+
+Wallet now schedules canonical custody samples and owns audited private recovery commands, management funding gates, alerts and metric projections. Ledger retains immutable per-wallet custody comparisons, per-asset liability/equity/fee/deficit explanations and journal watermarks. Repair requests travel through the existing private queues to Ledger, Sweep, Listener and Broadcast; original holds, resource claims and signed bytes remain authoritative. Provider subscriptions remain customer-only. Domain recovery requires complete fresh evidence and Ledger approval, and a later quarantine defeats stale approvals. See [Phase 7 controls and runbooks](exchange-wallet-phase7.md).
+
+Monitoring is opt-in and no financial execution flag is enabled by this change. Deploy Wallet/Ledger migrations and provision a distinct operations credential before using the new private controls. Customer thawing, arbitrary financial adjustments, automatic replacements and treasury replenishment are not implicit recovery actions.

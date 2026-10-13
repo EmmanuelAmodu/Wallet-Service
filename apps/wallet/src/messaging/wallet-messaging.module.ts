@@ -1,3 +1,4 @@
+import { OperationsModule } from '../operations/operations.module.js';
 import { Module } from '@nestjs/common';
 import { MessagingModule } from '../../../../packages/queue/src/messaging.module.js';
 import { ChainModule } from '../../../../packages/chain/src/chain.module.js';
@@ -12,6 +13,7 @@ import { WithdrawalsModule } from '../withdrawals/withdrawals.module.js';
 @Module({
   imports: [
     MessagingModule,
+    OperationsModule,
     WalletPrismaModule,
     ChainModule,
     ExchangeMessagingModule,

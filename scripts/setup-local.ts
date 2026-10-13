@@ -42,6 +42,7 @@ async function setup() {
         .replace('REPLACE_WITH_A_DIFFERENT_RANDOM_TOKEN', randomBytes(32).toString('hex'))
         .replace('REPLACE_WITH_A_THIRD_RANDOM_TOKEN', randomBytes(32).toString('hex'))
         .replace('REPLACE_WITH_A_FOURTH_RANDOM_TOKEN', randomBytes(32).toString('hex'))
+        .replace('REPLACE_WITH_OPERATIONS_TOKEN', randomBytes(32).toString('hex'))
         .replace('REPLACE_WITH_RESET_EPOCH', resetEpoch)
         .replaceAll('REPLACE_WITH_EPOCH_SUFFIX', resetEpoch.slice(0, 8)),
       { mode: 0o600, flag: 'wx' },

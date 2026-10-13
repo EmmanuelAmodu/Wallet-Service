@@ -376,7 +376,10 @@ export class TokenChainFixture extends BroadcastRpcService {
           value: await Promise.all(
             [...this.accounts]
               .filter(
-                ([, a]) => a.owner === hash && a.mint === (params[1] as { mint: string }).mint,
+                ([, a]) =>
+                  a.owner === hash &&
+                  (!(params[1] as { mint?: string }).mint ||
+                    a.mint === (params[1] as { mint: string }).mint),
               )
               .map(async ([pubkey]) => ({ pubkey, account: await this.solAccount(pubkey) })),
           ),
@@ -395,6 +398,25 @@ export class TokenChainFixture extends BroadcastRpcService {
         const raw = Buffer.from(hash, 'base64');
         return { context: { slot: this.head }, value: raw[0] * 5000 };
       }
+      case 'getSignaturesForAddress':
+        return [...this.entries.values()]
+          .filter(
+            (e) =>
+              e.included &&
+              e.request.wallet.chain === 'solana' &&
+              (e.request.wallet.address === hash ||
+                ('feePayer' in e.request.transaction &&
+                  e.request.transaction.feePayer.address === hash)),
+          )
+          .map((e) => ({ signature: e.signed.txHash, slot: e.block }));
+      case 'getSlot':
+        return this.head;
+      case 'getblockchaininfo':
+        return { chain: 'regtest' };
+      case 'scantxoutset':
+        return { success: true, height: this.head, bestblock: 'ab'.repeat(32), unspents: [] };
+      case 'getblockhash':
+        return 'ab'.repeat(32);
       case 'getBlockHeight':
         return this.head;
       case 'isBlockhashValid':

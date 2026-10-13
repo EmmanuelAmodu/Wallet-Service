@@ -459,3 +459,66 @@ model TokenWalletCoverage {
  @@id([wallet_id,asset_id])
  @@map("token_wallet_coverage")
 }
+
+model OperationsRun {
+ id String @id @db.Uuid
+ sequence BigInt @default(autoincrement()) @unique
+ domain_id String
+ reset_epoch String
+ wallet_id String @db.Uuid
+ state String
+ evidence Json?
+ report Json?
+ created_at DateTime @default(now()) @db.Timestamptz
+ updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+ @@index([domain_id,reset_epoch,wallet_id,created_at])
+ @@map("operations_runs")
+}
+model OperationsCommand {
+ id String @id @db.Uuid
+ sequence BigInt @default(autoincrement()) @unique
+ domain_id String
+ reset_epoch String
+ actor String
+ reason String
+ digest String
+ request Json
+ state String
+ result Json?
+ created_at DateTime @default(now()) @db.Timestamptz
+ updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+ @@index([domain_id,reset_epoch,created_at])
+ @@map("operations_commands")
+}
+model OperationsAlert {
+ id String @id
+ domain_id String
+ reset_epoch String
+ severity String
+ state String
+ evidence Json
+ review Json?
+ first_seen_at DateTime @default(now()) @db.Timestamptz
+ last_seen_at DateTime @default(now()) @db.Timestamptz
+ @@index([domain_id,reset_epoch,state])
+ @@map("operations_alerts")
+}
+model OperationsMetricReport {
+ id String @id
+ domain_id String
+ reset_epoch String
+ consumer String
+ occurred_at DateTime @db.Timestamptz
+ metrics Json
+ @@map("operations_metric_reports")
+}
+
+model OperationsFundingGate {
+ domain_id String
+ reset_epoch String
+ enabled Boolean @default(true)
+ reason String
+ updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+ @@id([domain_id,reset_epoch])
+ @@map("operations_funding_gates")
+}

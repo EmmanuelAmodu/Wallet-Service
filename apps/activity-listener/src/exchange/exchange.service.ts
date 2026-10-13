@@ -1,3 +1,4 @@
+import { operationsMetrics, ageMetric } from '../../../../packages/queue/src/operations-metrics.js';
 import {
   Inject,
   Injectable,
@@ -96,6 +97,49 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     if (this.timer) clearInterval(this.timer);
     await this.running;
+  }
+
+  async repairOperations(
+    event: Extract<ExchangeEvent, { type: 'operations.repair.requested.v1' }>,
+  ) {
+    if (event.resetEpoch !== this.auth.resetEpoch)
+      throw new ActionRejectedError('Stale recovery epoch');
+    await this.registry.recoverPending(100);
+    await this.tokens?.recover();
+    await this.recover(100);
+    const discoveries = await this.db.exchangeDiscovery.findMany({
+      where: { reset_epoch: event.resetEpoch },
+    });
+    const wallets = await this.db.exchangeWalletRegistration.findMany({
+      where: { domain_id: event.domainId, reset_epoch: event.resetEpoch, role: 'customer_deposit' },
+    });
+    const scoped = discoveries.filter((d) =>
+      wallets.some((w) => w.chain === d.chain && w.network === d.network),
+    );
+    const metrics = [
+      {
+        name: 'provider_registry_lag',
+        value: String(wallets.filter((w) => w.status !== 'ready' || !w.backfill_complete).length),
+        labels: {},
+      },
+      ageMetric(
+        'credit_latency_ms',
+        scoped.filter((d) => d.state !== 'finalized'),
+      ),
+      {
+        name: 'pending_discoveries',
+        value: String(scoped.filter((d) => d.state !== 'finalized').length),
+        labels: {},
+      },
+    ];
+    await this.db.$transaction((tx) =>
+      enqueue(
+        tx,
+        QUEUES.wallet,
+        operationsMetrics(event, 'activity-listener', metrics),
+        `operations-listener:${event.eventId}`,
+      ),
+    );
   }
 
   async recover(limit = 50) {
