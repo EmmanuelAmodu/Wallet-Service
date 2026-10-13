@@ -157,11 +157,33 @@ export const tokenPreparationSchema = z
   .strict();
 
 export const tokenExecutionAssetSchema = z.discriminatedUnion('chain', [
- z.object({chain:z.literal('ethereum'),network:z.literal('11155111'),assetId:z.string().regex(/^token:ethereum:erc20:0x[0-9a-f]{40}$/)}).strict(),
- z.object({chain:z.literal('solana'),network:z.literal(SOLANA_DEVNET),assetId:z.string().regex(/^token:solana:spl:TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA:[1-9A-HJ-NP-Za-km-z]{32,44}$/)}).strict(),
+  z
+    .object({
+      chain: z.literal('ethereum'),
+      network: z.literal('11155111'),
+      assetId: z.string().regex(/^token:ethereum:erc20:0x[0-9a-f]{40}$/),
+    })
+    .strict(),
+  z
+    .object({
+      chain: z.literal('solana'),
+      network: z.literal(SOLANA_DEVNET),
+      assetId: z
+        .string()
+        .regex(
+          new RegExp(`^token:solana:spl:${CLASSIC_TOKEN_PROGRAM}:[1-9A-HJ-NP-Za-km-z]{32,44}$`),
+        ),
+    })
+    .strict(),
 ]);
 
-export const tokenCostsSchema = z.object({
- certificate:tokenCertificateSchema,feePayerWalletId:z.uuid(),feePayerRegistryRevision:z.number().int().positive(),
- maximumFeeUnits:executionUnitsSchema,maximumRentUnits:executionUnitsSchema,rentCustodyWalletId:z.uuid().optional(),
-}).strict();
+export const tokenCostsSchema = z
+  .object({
+    certificate: tokenCertificateSchema,
+    feePayerWalletId: z.uuid(),
+    feePayerRegistryRevision: z.number().int().positive(),
+    maximumFeeUnits: executionUnitsSchema,
+    maximumRentUnits: executionUnitsSchema,
+    rentCustodyWalletId: z.uuid().optional(),
+  })
+  .strict();

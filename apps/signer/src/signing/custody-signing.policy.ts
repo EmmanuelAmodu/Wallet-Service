@@ -119,10 +119,31 @@ export class CustodySigningPolicy {
       )
         throw new Error('Execution destination is not the configured hot derivation');
     } else if (c.purpose === 'native_funding') {
-      if (!this.settings.fundingEnabled || c.asset.chain!=='ethereum' || c.asset.network!=='11155111' || c.fundingReservationId!==c.operationId || c.target.seedId!==c.seedId || c.target.domainId!==c.domainId || BigInt(c.principalUnits)>5_000_000_000_000_000n) throw new Error('Management funding authority mismatch');
-      this.core.validateDerivation(c.domainId,c.asset.network,c.target.path,{seedId:c.seedId,chain:c.asset.chain,account:c.target.account});
-      const target=this.core.derive({seedId:c.seedId,chain:c.asset.chain,account:c.target.account});
-      if(!this.sameAddress(c.asset.chain,target.address,c.target.address) || c.source.walletId===c.target.walletId) throw new Error('Funding destination derivation mismatch');
+      if (
+        !this.settings.fundingEnabled ||
+        c.asset.chain !== 'ethereum' ||
+        c.asset.network !== '11155111' ||
+        c.fundingReservationId !== c.operationId ||
+        c.target.seedId !== c.seedId ||
+        c.target.domainId !== c.domainId ||
+        BigInt(c.principalUnits) > 5_000_000_000_000_000n
+      )
+        throw new Error('Management funding authority mismatch');
+      this.core.validateDerivation(c.domainId, c.asset.network, c.target.path, {
+        seedId: c.seedId,
+        chain: c.asset.chain,
+        account: c.target.account,
+      });
+      const target = this.core.derive({
+        seedId: c.seedId,
+        chain: c.asset.chain,
+        account: c.target.account,
+      });
+      if (
+        !this.sameAddress(c.asset.chain, target.address, c.target.address) ||
+        c.source.walletId === c.target.walletId
+      )
+        throw new Error('Funding destination derivation mismatch');
     } else {
       if (!this.settings.withdrawalsEnabled) throw new Error('Native withdrawals disabled');
       this.core.assertValidAddress(c.target.address, c.asset.chain);

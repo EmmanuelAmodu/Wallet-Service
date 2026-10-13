@@ -1,6 +1,7 @@
 import { executionConfig } from '../config/execution.config.js';
 import { ChainModule } from '../../../../packages/chain/src/chain.module.js';
 import { TokenAssetsService } from './token-assets.service.js';
+import { MessagingModule } from '../../../../packages/queue/src/messaging.module.js';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { exchangeApiConfig } from '../config/exchange-api.config.js';
@@ -10,8 +11,15 @@ import { CustodyCommandsService } from './custody-commands.service.js';
 import { CustodyController } from './custody.controller.js';
 
 @Module({
-  imports: [ChainModule,ConfigModule.forFeature(executionConfig),WalletPrismaModule, CustodyModule, ConfigModule.forFeature(exchangeApiConfig)],
+  imports: [
+    MessagingModule,
+    ChainModule,
+    ConfigModule.forFeature(executionConfig),
+    WalletPrismaModule,
+    CustodyModule,
+    ConfigModule.forFeature(exchangeApiConfig),
+  ],
   controllers: [CustodyController],
-  providers: [CustodyCommandsService,TokenAssetsService],
+  providers: [CustodyCommandsService, TokenAssetsService],
 })
 export class CustodyApiModule {}

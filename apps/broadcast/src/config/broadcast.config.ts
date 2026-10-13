@@ -25,7 +25,8 @@ export const broadcastConfig = registerAs('broadcast', () => {
   if (!['true', 'false'].includes(withdrawals))
     throw new Error('Invalid configuration: ENABLE_NATIVE_WITHDRAWALS');
   const tokens = process.env.ENABLE_TOKEN_EXECUTION ?? 'false';
-  if (!['true','false'].includes(tokens)) throw new Error('Invalid configuration: ENABLE_TOKEN_EXECUTION');
+  if (!['true', 'false'].includes(tokens))
+    throw new Error('Invalid configuration: ENABLE_TOKEN_EXECUTION');
   const custodyMode = process.env.EXCHANGE_DOMAIN_ID !== undefined;
   const domainId =
     custodyMode || native === 'true' || withdrawals === 'true' || tokens === 'true'

@@ -48,7 +48,11 @@ type SweepSettings = Pick<ConfigType<typeof sweepConfig>, 'domainId'> &
   Partial<
     Pick<
       ConfigType<typeof sweepConfig>,
-      'enableNativeSweeps' | 'enableTokenSweeps' | 'policyVersion' | 'retryDelayMs' | 'reconciliationIntervalMs'
+      | 'enableNativeSweeps'
+      | 'enableTokenSweeps'
+      | 'policyVersion'
+      | 'retryDelayMs'
+      | 'reconciliationIntervalMs'
     >
   >;
 
@@ -152,6 +156,7 @@ export class SweepService {
             'awaiting_registry',
             'awaiting_hot_wallet',
             'waiting_token_sweeps',
+            'waiting_resources',
           ],
         },
         OR: [{ next_attempt_at: null }, { next_attempt_at: { lte: new Date() } }],
@@ -225,19 +230,36 @@ export class SweepService {
         state: 'paused_review',
         reason: domain?.reason ?? customer?.pause_reason ?? 'Customer custody review required',
       };
-    if (work.asset_id === `token:${work.chain}:native` && !this.config.enableNativeSweeps) return {state:'blocked_execution_not_implemented',reason:'Native sweep execution is disabled'};
+    if (work.asset_id === `token:${work.chain}:native` && !this.config.enableNativeSweeps)
+      return {
+        state: 'blocked_execution_not_implemented',
+        reason: 'Native sweep execution is disabled',
+      };
     if (work.asset_id === `token:${work.chain}:native`) {
       const dependencies = await tx.$queryRaw<{ id: string }[]>`
         SELECT id FROM sweep_work WHERE domain_id=${work.domain_id} AND reset_epoch=${work.reset_epoch}
         AND source_wallet_id=${work.source_wallet_id}::uuid AND chain=${work.chain} AND network=${work.network}
         AND asset_id <> ${work.asset_id} AND credited_deposit_count > 0
-        AND (active_operation_id IS NOT NULL OR generation > consumed_generation) LIMIT 1`;
+        AND (active_operation_id IS NOT NULL OR generation > consumed_generation OR state IN ('settled_residual','waiting_resources')) LIMIT 1`;
       if (dependencies.length)
         return {
           state: 'waiting_token_sweeps',
           reason: 'Preserve native gas/rent until accounted token work is settled or resolved',
         };
     }
+    const activeSource = await tx.sweepOperation.findFirst({
+      where: {
+        domain_id: work.domain_id,
+        reset_epoch: work.reset_epoch,
+        source_wallet_id: work.source_wallet_id,
+        terminal_at: null,
+      },
+    });
+    if (activeSource && activeSource.id !== work.active_operation_id)
+      return {
+        state: 'waiting_resources',
+        reason: 'Another asset still owns this customer source execution fence',
+      };
     if (
       (work.asset_id !== `token:${work.chain}:native` && !this.config.enableTokenSweeps) ||
       !['ethereum', 'bitcoin', 'solana'].includes(work.chain)
@@ -510,10 +532,14 @@ export class SweepService {
           destinationWalletId: operation.hot_wallet_id,
           amount: data.amount,
           preparationDigest: data.preparationDigest,
-          ...(data.tokenCosts?{tokenCosts:data.tokenCosts}:{}),
+          ...(data.tokenCosts ? { tokenCosts: data.tokenCosts } : {}),
         },
       });
-      await this.publish(tx, execute, data.tokenCosts ? [QUEUES.wallet] : [QUEUES.wallet, QUEUES.ledger, QUEUES.activity]);
+      await this.publish(
+        tx,
+        execute,
+        data.tokenCosts ? [QUEUES.wallet] : [QUEUES.wallet, QUEUES.ledger, QUEUES.activity],
+      );
       await tx.sweepAttempt.update({
         where: { id: attempt.id },
         data: { state: 'queued', execute_event_id: executeId },
@@ -689,6 +715,44 @@ export class SweepService {
       where: { id: operation.id },
       data: { state: 'settled', terminal_at: new Date(), revision: { increment: 1 } },
     });
+    if (!operation.asset_id.endsWith(':native')) {
+      const identity = {
+        domain_id: work.domain_id,
+        reset_epoch: work.reset_epoch,
+        source_wallet_id: work.source_wallet_id,
+        chain: work.chain,
+        network: work.network,
+        asset_id: `token:${work.chain}:native`,
+      };
+      const existing = await tx.sweepWork.findUnique({
+        where: { domain_id_reset_epoch_source_wallet_id_chain_network_asset_id: identity },
+      });
+      await tx.sweepWork.upsert({
+        where: { domain_id_reset_epoch_source_wallet_id_chain_network_asset_id: identity },
+        create: {
+          ...identity,
+          customer_id: work.customer_id,
+          hot_wallet_id: work.hot_wallet_id,
+          observed_credit_units: '0',
+          credited_deposit_count: 0,
+          state: 'settled_residual',
+          reason: 'Reconcile native balance after token custody movement',
+          generation: 1,
+          next_attempt_at: new Date(),
+        },
+        update: {
+          generation: { increment: 1 },
+          ...(!existing?.active_operation_id
+            ? {
+                state: 'settled_residual',
+                reason: 'Reconcile native balance after token custody movement',
+                next_attempt_at: new Date(),
+              }
+            : {}),
+          revision: { increment: 1 },
+        },
+      });
+    }
     const gate = await this.executionGate(tx, work);
     await tx.sweepWork.update({
       where: { id: work.id },

@@ -135,7 +135,7 @@ export class SettlementsService {
         throw new ActionRejectedError(
           'Execution operation identity and approved request are immutable',
         );
-      await this.acknowledgeExecution(tx,event);
+      await this.acknowledgeExecution(tx, event);
       return;
     }
     const source = await this.wallet(tx, event.data.sourceWalletId, event, event.data.amount.asset);
@@ -249,12 +249,28 @@ export class SettlementsService {
         reset_epoch: event.resetEpoch,
       },
     });
-    await this.acknowledgeExecution(tx,event);
+    await this.acknowledgeExecution(tx, event);
   }
 
   private async acknowledgeExecution(tx: Prisma.TransactionClient, event: ExecuteEvent) {
-    if(event.type!=='funding.execute.requested.v1' && !('tokenCosts' in event.data && event.data.tokenCosts)) return;
-    await enqueue(tx,QUEUES.wallet,exchangeEventSchema.parse({...resultIdentity(event),type:'execution.registry.acknowledged.v1',operationId:event.operationId,attemptId:event.attemptId,requestDigest:event.requestDigest,data:{consumer:'ledger'}}),`execution-registry:${event.operationId}:ledger`);
+    if (
+      event.type !== 'funding.execute.requested.v1' &&
+      !('tokenCosts' in event.data && event.data.tokenCosts)
+    )
+      return;
+    await enqueue(
+      tx,
+      QUEUES.wallet,
+      exchangeEventSchema.parse({
+        ...resultIdentity(event),
+        type: 'execution.registry.acknowledged.v1',
+        operationId: event.operationId,
+        attemptId: event.attemptId,
+        requestDigest: event.requestDigest,
+        data: { consumer: 'ledger' },
+      }),
+      `execution-registry:${event.operationId}:ledger`,
+    );
   }
 
   private async costAuthority(
@@ -387,7 +403,13 @@ export class SettlementsService {
       confirmed: 5,
       failed: 5,
     };
-    if (event.data.state !== 'attention' && ranks[event.data.state] < (ranks[operation.state] ?? 0))
+    const resumingSigned =
+      operation.state === 'attention' && ['queued', 'submitted'].includes(event.data.state);
+    if (
+      !resumingSigned &&
+      event.data.state !== 'attention' &&
+      ranks[event.data.state] < (ranks[operation.state] ?? 0)
+    )
       throw new ActionRejectedError('Attempt state cannot regress');
     await tx.exchangeOperation.update({
       where: { id: operation.id },

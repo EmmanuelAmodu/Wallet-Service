@@ -378,16 +378,44 @@ const fundingExecuteRequested = event(
       sourceWalletId: z.uuid(),
       destinationWalletId: z.uuid(),
       amount: assetAmountSchema,
-      preparationDigest:digest.optional(),
+      preparationDigest: digest.optional(),
     })
     .strict(),
   executionIdentityFields,
 );
 
-const executionRegistryAcknowledged = event('execution.registry.acknowledged.v1',z.object({consumer:z.enum(['ledger','activity-listener'])}).strict(),executionIdentityFields);
+const executionRegistryAcknowledged = event(
+  'execution.registry.acknowledged.v1',
+  z.object({ consumer: z.enum(['ledger', 'activity-listener']) }).strict(),
+  executionIdentityFields,
+);
 
-const tokenAssetRegistryRequested = event('asset.transfer.registry.requested.v1',z.object({certificate:tokenCertificateSchema,configurationRevision:z.number().int().positive(),observationEnabled:z.boolean(),creditEnabled:z.boolean()}).strict());
-const tokenWatchAcknowledged = event('asset.transfer.watch.acknowledged.v1',z.object({walletId:z.uuid(),asset:canonicalAssetSchema,certificateDigest:digest,configurationRevision:z.number().int().positive(),registryRevision:z.number().int().positive(),generation:z.uuid(),ready:z.boolean(),cursor:z.string().min(1).max(256).optional()}).strict());
+const tokenAssetRegistryRequested = event(
+  'asset.transfer.registry.requested.v1',
+  z
+    .object({
+      certificate: tokenCertificateSchema,
+      configurationRevision: z.number().int().positive(),
+      observationEnabled: z.boolean(),
+      creditEnabled: z.boolean(),
+    })
+    .strict(),
+);
+const tokenWatchAcknowledged = event(
+  'asset.transfer.watch.acknowledged.v1',
+  z
+    .object({
+      walletId: z.uuid(),
+      asset: canonicalAssetSchema,
+      certificateDigest: digest,
+      configurationRevision: z.number().int().positive(),
+      registryRevision: z.number().int().positive(),
+      generation: z.uuid(),
+      ready: z.boolean(),
+      cursor: z.string().min(1).max(256).optional(),
+    })
+    .strict(),
+);
 
 const settlementRequested = event(
   'settlement.requested.v1',

@@ -23,6 +23,8 @@ export interface VerifiedExchangeTransfer {
   asset: CanonicalAsset;
   amount: string;
   destinationOwnerProgram?: string;
+  sourceTokenAccount?: string;
+  destinationTokenAccount?: string;
 }
 export interface VerifiedExchangeTransaction {
   state: 'pending' | 'finalized' | 'reverted' | 'failed';
@@ -38,7 +40,15 @@ export interface VerifiedExchangeTransaction {
   fee?: { asset: CanonicalAsset; amount: string; payer?: string };
   spentAddresses?: string[];
   spentInputs?: { address: string; amount: string; outpoint: string }[];
-  tokenAccounts?: { address: string; owner: string; mint: string; programId: string }[];
+  tokenAccounts?: {
+    address: string;
+    owner: string;
+    mint: string;
+    programId: string;
+    decimals?: number;
+    preAmount?: string;
+    postAmount?: string;
+  }[];
 }
 
 const evmHash = z
@@ -517,7 +527,15 @@ export class ExchangeVerifier {
     if (tx.meta.err !== null) return { ...output, transfersComplete: true };
     const tokenAccounts = new Map<
       string,
-      { address: string; owner: string; mint: string; programId: string }
+      {
+        address: string;
+        owner: string;
+        mint: string;
+        programId: string;
+        decimals?: number;
+        preAmount?: string;
+        postAmount?: string;
+      }
     >();
     for (const balance of [...tx.meta.preTokenBalances, ...tx.meta.postTokenBalances]) {
       const address = keys[balance.accountIndex];
@@ -528,16 +546,27 @@ export class ExchangeVerifier {
         owner: balance.owner,
         mint: balance.mint,
         programId: balance.programId,
+        ...(balance.uiTokenAmount ? { decimals: balance.uiTokenAmount.decimals } : {}),
       };
       const existing = tokenAccounts.get(address);
       if (
         existing &&
         (existing.owner !== entry.owner ||
           existing.mint !== entry.mint ||
-          existing.programId !== entry.programId)
+          existing.programId !== entry.programId ||
+          (existing.decimals !== undefined &&
+            entry.decimals !== undefined &&
+            existing.decimals !== entry.decimals))
       )
         mismatch('token account identity changed during transaction');
       tokenAccounts.set(address, entry);
+    }
+    for (const entry of tokenAccounts.values()) {
+      const index = keys.indexOf(entry.address);
+      const pre = tx.meta.preTokenBalances.find((b) => b.accountIndex === index),
+        post = tx.meta.postTokenBalances.find((b) => b.accountIndex === index);
+      entry.preAmount = pre?.uiTokenAmount?.amount ?? (pre ? undefined : '0');
+      entry.postAmount = post?.uiTokenAmount?.amount ?? (post ? undefined : '0');
     }
     output.tokenAccounts = [...tokenAccounts.values()];
     let transfersComplete = true;
@@ -841,6 +870,7 @@ const tokenBalance = z.object({
   mint: solAddress,
   owner: solAddress.optional(),
   programId: solAddress.optional(),
+  uiTokenAmount: z.object({ amount: uint, decimals: integer.max(18) }).optional(),
 });
 const solanaTransaction = z.object({
   slot: integer,

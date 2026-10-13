@@ -1,7 +1,15 @@
-import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  OnModuleDestroy,
+  OnModuleInit,
+  Optional,
+} from '@nestjs/common';
 import { createHash, randomUUID } from 'node:crypto';
 import type { ExchangeWalletRegistration, ExchangeTransfer, Prisma } from '.prisma/activity-client';
 import { ActivityPrismaService } from '../prisma/prisma.service.js';
+import { TokenRegistryService } from '../registry/token-registry.service.js';
 import { ActivityRegistryService } from '../registry/registry.service.js';
 import {
   ExchangeVerifier,
@@ -20,6 +28,11 @@ import { MessageAuth, canonical, QUEUES } from '../../../../packages/queue/src/m
 import { enqueue, enqueueFanOut } from '../../../../packages/queue/src/outbox.service.js';
 import { lock } from '../../../../packages/database/src/locks.js';
 import { isEvmChain, canonicalTransactionHash } from '../../../../packages/shared/src/contracts.js';
+import {
+  tokenCertificateSchema,
+  tokenAsset,
+  CLASSIC_TOKEN_PROGRAM,
+} from '../../../../packages/shared/src/token-contracts.js';
 import { ActionRejectedError } from '../../../../packages/shared/src/action-rejected.error.js';
 import {
   exchangeObservationConfig,
@@ -61,6 +74,7 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
       ExchangeObservationSettings,
       'pollMs' | 'reconciliationMs' | 'recoveryMs'
     >,
+    @Optional() private readonly tokens?: TokenRegistryService,
   ) {}
 
   onModuleInit() {
@@ -154,8 +168,61 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
     const signal = exchangeDiscoverySchema.parse(ticket.signal);
     let verified: VerifiedExchangeTransaction;
     let priorInclusionOrphaned = false;
+    const spendableTokens = new Map<string, boolean>();
     try {
       verified = await this.verifier.verify(signal);
+      if (signal.chain === 'solana') {
+        const accounts = new Map((verified.tokenAccounts ?? []).map((a) => [a.address, a]));
+        verified.transfers = verified.transfers.map((t) => {
+          if (t.asset.assetId === 'token:solana:native') return t;
+          const from = t.from ? accounts.get(t.from) : undefined,
+            to = accounts.get(t.to);
+          if (
+            !to ||
+            to.programId !== CLASSIC_TOKEN_PROGRAM ||
+            (t.from && (!from || from.programId !== CLASSIC_TOKEN_PROGRAM))
+          )
+            throw new ActionRejectedError('SPL transfer owner mapping unavailable');
+          return {
+            ...t,
+            sourceTokenAccount: t.from ?? undefined,
+            destinationTokenAccount: t.to,
+            from: from?.owner ?? null,
+            to: to.owner,
+          };
+        });
+      }
+      if (verified.state === 'finalized') {
+        const certificates = await this.db.exchangeTokenAsset.findMany({
+          where: {
+            reset_epoch: signal.resetEpoch,
+            chain: signal.chain,
+            network: signal.network,
+            credit_enabled: true,
+            observation_enabled: true,
+          },
+        });
+        for (const transfer of verified.transfers.filter(
+          (t) => !t.asset.assetId.endsWith(':native'),
+        )) {
+          const asset = certificates.find((c) => c.asset_id === transfer.asset.assetId);
+          if (!asset) continue;
+          const key = canonical([
+            transfer.asset.assetId,
+            transfer.to,
+            transfer.destinationTokenAccount ?? null,
+          ]);
+          if (!spendableTokens.has(key))
+            spendableTokens.set(
+              key,
+              (await this.tokens?.validateIncoming(
+                tokenCertificateSchema.parse(asset.certificate),
+                transfer.to,
+                transfer.destinationTokenAccount,
+              )) ?? false,
+            );
+        }
+      }
       if (
         verified.chain !== signal.chain ||
         verified.network !== signal.network ||
@@ -328,21 +395,132 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
                 ? owned.has(addressKey(signal.chain, transfer.from))
                 : bitcoinOwnedSpend);
             if (senderOwned) continue; // Owned movements are custody, never an external customer credit.
+            const canonicalKey = canonical(transfer.identity);
+            verifiedKeys.add(`${destination.wallet_id}:${canonicalKey}`);
             if (transfer.asset.assetId !== `token:${signal.chain}:native`) {
-              await this.incident(
-                tx,
-                destination,
-                signal,
-                'unsupported_asset',
-                'Asset discovery is outside the native launch scope',
-                transfer,
+              const asset = await tx.exchangeTokenAsset.findUnique({
+                where: {
+                  domain_id_reset_epoch_chain_network_asset_id: {
+                    domain_id: destination.domain_id,
+                    reset_epoch: signal.resetEpoch,
+                    chain: signal.chain,
+                    network: signal.network,
+                    asset_id: transfer.asset.assetId,
+                  },
+                },
+              });
+              const existing = prior.find(
+                (p) =>
+                  p.wallet_id === destination.wallet_id &&
+                  canonical(p.identity as unknown) === canonicalKey,
               );
-              continue;
+              if (!asset?.observation_enabled || !asset.credit_enabled) {
+                if (!existing)
+                  await this.incident(
+                    tx,
+                    destination,
+                    signal,
+                    'unsupported_asset',
+                    'Asset is outside enabled exact-transfer certification',
+                    transfer,
+                  );
+                continue;
+              }
+              const coverage = await tx.exchangeTokenWatch.findUnique({
+                where: {
+                  wallet_id_asset_id: {
+                    wallet_id: destination.wallet_id,
+                    asset_id: transfer.asset.assetId,
+                  },
+                },
+              });
+              if (
+                !existing &&
+                (!coverage ||
+                  coverage.state !== 'ready' ||
+                  coverage.registry_revision !== destination.registry_revision ||
+                  coverage.configuration_revision !== asset.configuration_revision)
+              ) {
+                await tx.exchangeDiscovery.update({
+                  where: { id },
+                  data: {
+                    state: 'awaiting_registry',
+                    last_error: 'Token-specific watch and historical coverage is not ready',
+                    lease_until: null,
+                    next_check_at: new Date(Date.now() + this.config.pollMs),
+                  },
+                });
+                return;
+              }
+              if (
+                !existing &&
+                !spendableTokens.get(
+                  canonical([
+                    transfer.asset.assetId,
+                    transfer.to,
+                    transfer.destinationTokenAccount ?? null,
+                  ]),
+                )
+              ) {
+                await this.incident(
+                  tx,
+                  destination,
+                  signal,
+                  'unsupported_asset',
+                  'Certified transfer or owned-account spendability changed',
+                  transfer,
+                );
+                continue;
+              }
+              const certificate = tokenCertificateSchema.parse(asset.certificate);
+              if (canonical(tokenAsset(certificate)) !== canonical(transfer.asset))
+                throw new ActionRejectedError('Token discovery certificate identity mismatch');
+              if (certificate.standard === 'spl') {
+                const account = (verified.tokenAccounts ?? []).find(
+                  (a) => a.address === transfer.destinationTokenAccount,
+                );
+                const incoming = verified.transfers
+                  .filter(
+                    (t) =>
+                      t.destinationTokenAccount === transfer.destinationTokenAccount &&
+                      t.asset.assetId === transfer.asset.assetId,
+                  )
+                  .reduce((sum, t) => sum + BigInt(t.amount), 0n);
+                const outgoing = verified.transfers
+                  .filter(
+                    (t) =>
+                      t.sourceTokenAccount === transfer.destinationTokenAccount &&
+                      t.asset.assetId === transfer.asset.assetId,
+                  )
+                  .reduce((sum, t) => sum + BigInt(t.amount), 0n);
+                if (
+                  !account ||
+                  account.owner !== destination.address ||
+                  account.mint !== certificate.mint ||
+                  account.programId !== certificate.programId ||
+                  account.decimals !== certificate.decimals ||
+                  account.preAmount === undefined ||
+                  account.postAmount === undefined ||
+                  BigInt(account.postAmount) - BigInt(account.preAmount) !== incoming - outgoing
+                ) {
+                  if (!existing)
+                    await this.incident(
+                      tx,
+                      destination,
+                      signal,
+                      'unsupported_asset',
+                      'SPL owner/precision/balance-delta proof is incomplete',
+                      transfer,
+                    );
+                  continue;
+                }
+              }
             }
             const key = canonical(transfer.identity);
             verifiedKeys.add(`${destination.wallet_id}:${key}`);
             if (
               signal.chain === 'solana' &&
+              transfer.asset.assetId === 'token:solana:native' &&
               verified.state === 'finalized' &&
               transfer.destinationOwnerProgram !== '11111111111111111111111111111111'
             ) {
@@ -707,9 +885,22 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
             },
           });
       }
-      if(event.type==='funding.execute.requested.v1' || ('tokenCosts' in event.data && event.data.tokenCosts)) {
-        await enqueue(tx,QUEUES.wallet,exchangeEventSchema.parse({...event,type:'execution.registry.acknowledged.v1',eventId:stableUuid([event.operationId,'registry','activity-listener']),causationId:event.eventId,
-          data:{consumer:'activity-listener'}}),`execution-registry:${event.operationId}:activity-listener`);
+      if (
+        event.type === 'funding.execute.requested.v1' ||
+        ('tokenCosts' in event.data && event.data.tokenCosts)
+      ) {
+        await enqueue(
+          tx,
+          QUEUES.wallet,
+          exchangeEventSchema.parse({
+            ...event,
+            type: 'execution.registry.acknowledged.v1',
+            eventId: stableUuid([event.operationId, 'registry', 'activity-listener']),
+            causationId: event.eventId,
+            data: { consumer: 'activity-listener' },
+          }),
+          `execution-registry:${event.operationId}:activity-listener`,
+        );
       }
       await tx.inbox.create({ data: { id: inboxId, payload_hash: hash } });
     });
@@ -721,6 +912,7 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
     rows: ExchangeWalletRegistration[],
     signal: ExchangeDiscoverySignal,
     verified: VerifiedExchangeTransaction,
+    assetFilter?: string,
   ) {
     const operations = await tx.exchangeObservedOperation.findMany({
       where: {
@@ -753,7 +945,8 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
       if (
         asset.chain !== signal.chain ||
         asset.network !== signal.network ||
-        asset.assetId !== `token:${signal.chain}:native`
+        (assetFilter !== undefined && asset.assetId !== assetFilter) ||
+        (asset.assetId !== `token:${signal.chain}:native` && !intent.data.tokenCosts)
       )
         continue;
       const transfers = verified.transfers.filter(
@@ -795,7 +988,11 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
         continue;
       if (
         signal.chain !== 'bitcoin' &&
-        (!verified.fee.payer || addressKey(signal.chain, verified.fee.payer) !== source.address)
+        (!verified.fee.payer ||
+          addressKey(signal.chain, verified.fee.payer) !==
+            (intent.data.tokenCosts
+              ? rows.find((r) => r.wallet_id === intent.data.tokenCosts!.feePayerWalletId)?.address
+              : source.address))
       )
         continue;
       return { operation, feeCap: cap, feeCapExceeded: BigInt(verified.fee.amount) > cap };
@@ -858,19 +1055,51 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
         .reduce((sum, t) => sum + BigInt(t.amount), 0n);
       loss = spent > returned ? spent - returned : 0n;
     }
+    const tokenGroups = new Map<string, VerifiedExchangeTransfer>();
     for (const transfer of verified.transfers.filter(
-      (transfer) =>
-        transfer.asset.assetId !== `token:${signal.chain}:native` &&
-        addressKey(signal.chain, transfer.from ?? '') === source.address,
+      (t) =>
+        t.asset.assetId !== `token:${signal.chain}:native` &&
+        addressKey(signal.chain, t.from ?? '') === source.address,
     ))
-      await this.incident(
-        tx,
-        source,
-        signal,
-        'unsupported_asset_outflow',
-        'Unsupported asset left a customer deposit wallet; custody exception requires review',
-        transfer,
-      );
+      tokenGroups.set(transfer.asset.assetId, transfer);
+    for (const [assetId, transfer] of tokenGroups) {
+      const authorized = await this.authorisedSweep(tx, source, rows, signal, verified, assetId);
+      if (authorized) continue;
+      const sent = verified.transfers
+        .filter(
+          (t) =>
+            t.asset.assetId === assetId &&
+            addressKey(signal.chain, t.from ?? '') === source.address,
+        )
+        .reduce((n, t) => n + BigInt(t.amount), 0n);
+      const received = verified.transfers
+        .filter(
+          (t) => t.asset.assetId === assetId && addressKey(signal.chain, t.to) === source.address,
+        )
+        .reduce((n, t) => n + BigInt(t.amount), 0n);
+      if (sent > received)
+        await this.incident(
+          tx,
+          source,
+          signal,
+          'unexpected_customer_outflow',
+          'Token custody left outside a persisted matching hot sweep',
+          {
+            amount: (sent - received).toString(),
+            asset: transfer.asset,
+            blockHash: verified.blockHash,
+          },
+        );
+      else
+        await this.incident(
+          tx,
+          source,
+          signal,
+          'unsupported_asset_outflow',
+          'Unapproved token movement requires custody review',
+          transfer,
+        );
+    }
     if (loss <= 0n) return;
     const sweep = await this.authorisedSweep(tx, source, rows, signal, verified);
     if (sweep) {
@@ -935,7 +1164,12 @@ export class ActivityExchangeService implements OnModuleInit, OnModuleDestroy {
       category.startsWith('unsupported_asset')
         ? evidence
         : category === 'unexpected_customer_outflow'
-          ? (evidence as { blockHash?: string }).blockHash
+          ? (evidence as { asset?: { assetId: string } }).asset?.assetId.endsWith(':native')
+            ? (evidence as { blockHash?: string }).blockHash
+            : {
+                blockHash: (evidence as { blockHash?: string }).blockHash,
+                asset: (evidence as { asset?: unknown }).asset,
+              }
           : category === 'unspendable_native_account'
             ? ((evidence as VerifiedExchangeTransfer).destinationOwnerProgram ?? null)
             : null,

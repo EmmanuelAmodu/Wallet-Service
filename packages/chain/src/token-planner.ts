@@ -163,17 +163,39 @@ export class TokenPlanner {
   }
 
   async validateCertificate(certificate: TokenCertificate) {
-    const c=tokenCertificateSchema.parse(certificate);
-    if(c.standard==='spl') return this.validateMint(c);
+    const c = tokenCertificateSchema.parse(certificate);
+    if (c.standard === 'spl') return this.validateMint(c);
     await this.verify(c);
-    for(const tag of ['finalized','pending']) {
-      const code=z.string().regex(/^0x(?:[a-fA-F0-9]{2})+$/).parse(await this.rpc.call('ethereum','eth_getCode',[c.contract,tag]));
-      if(keccak256(code)!==c.runtimeCodeHash) reject('Certified token code changed');
-      if(code.toLowerCase().startsWith('0xef0100')) reject('Delegated token code is unsupported');
-      const raw=Buffer.from(code.slice(2),'hex');
-      for(let i=0;i<raw.length;i++) {const op=raw[i];if([0xf2,0xf4,0xff].includes(op)) reject('Proxy/delegation/destruction token code is unsupported');if(op>=0x60&&op<=0x7f)i+=op-0x5f;}
-      const precision=word.parse(await this.rpc.call('ethereum','eth_call',[{to:c.contract,data:'0x313ce567'},tag]));
-      if(BigInt(precision)!==BigInt(c.decimals)) reject('Certified token precision changed');
+    for (const tag of ['finalized', 'pending']) {
+      const code = z
+        .string()
+        .regex(/^0x(?:[a-fA-F0-9]{2})+$/)
+        .parse(await this.rpc.call('ethereum', 'eth_getCode', [c.contract, tag]));
+      if (keccak256(code) !== c.runtimeCodeHash) reject('Certified token code changed');
+      if (code.toLowerCase().startsWith('0xef0100')) reject('Delegated token code is unsupported');
+      const raw = Buffer.from(code.slice(2), 'hex');
+      const metadataLength = raw.length >= 2 ? raw.readUInt16BE(raw.length - 2) : 0;
+      const metadata =
+        metadataLength > 0 && metadataLength + 2 < raw.length
+          ? raw.subarray(raw.length - metadataLength - 2, raw.length - 2)
+          : undefined;
+      const end =
+        metadata &&
+        metadata[0] >= 0xa1 &&
+        metadata[0] <= 0xbf &&
+        metadata.includes(Buffer.from('solc'))
+          ? raw.length - metadataLength - 2
+          : raw.length;
+      for (let i = 0; i < end; i++) {
+        const op = raw[i];
+        if ([0xf2, 0xf4, 0xff].includes(op))
+          reject('Proxy/delegation/destruction token code is unsupported');
+        if (op >= 0x60 && op <= 0x7f) i += op - 0x5f;
+      }
+      const precision = word.parse(
+        await this.rpc.call('ethereum', 'eth_call', [{ to: c.contract, data: '0x313ce567' }, tag]),
+      );
+      if (BigInt(precision) !== BigInt(c.decimals)) reject('Certified token precision changed');
     }
   }
 
@@ -187,7 +209,8 @@ export class TokenPlanner {
     const mint = data(result.value, 82);
     if (
       ![0, 1].includes(mint.readUInt32LE(0)) ||
-      mint[45] !== 1 || (mint[44]===0 && mint.readBigUInt64LE(36)===1n) ||
+      mint[45] !== 1 ||
+      (mint[44] === 0 && mint.readBigUInt64LE(36) === 1n) ||
       mint[44] !== c.decimals ||
       mint.readUInt32LE(46) !== 0
     )
@@ -427,7 +450,21 @@ export class TokenPlanner {
     const floor = await this.validateMint(c);
     const accounts = await this.discoverOwnedAccounts(c, input.wallet.address);
     const preferred = await associatedTokenAddress(input.wallet.address, c.mint);
-    const candidate = accounts.filter(a=>a.state==='spendable' && BigInt(a.amount)>0n).sort((a,b)=>a.address===preferred?-1:b.address===preferred?1:a.address.localeCompare(b.address))[0];
+    const candidate = accounts
+      .filter(
+        (a) =>
+          a.state === 'spendable' &&
+          BigInt(a.amount) > 0n &&
+          (input.amount === undefined ||
+            BigInt(a.amount) >= positiveUnits(input.amount, (1n << 64n) - 1n)),
+      )
+      .sort((a, b) =>
+        a.address === preferred
+          ? -1
+          : b.address === preferred
+            ? 1
+            : a.address.localeCompare(b.address),
+      )[0];
     const sourceAddress = input.sourceTokenAccount ?? candidate?.address ?? preferred;
     const source = accounts.find((account) => account.address === sourceAddress);
     if (!source || source.state !== 'spendable')
@@ -529,9 +566,9 @@ export class TokenPlanner {
     };
   }
 
-  async revalidate(prepared: TokenPreparation): Promise<void> {
+  async revalidate(prepared: TokenPreparation, signed = false): Promise<void> {
     validateTokenPreparation(prepared);
-    if (Date.parse(prepared.expiresAt) <= Date.now())
+    if (!signed && Date.parse(prepared.expiresAt) <= Date.now())
       throw new SweepDeferral('preparation_expired', 'Token preparation expired before dispatch');
     if (prepared.fundingShortfallUnits !== '0')
       throw new SweepDeferral('waiting_funds', 'Fee funding must confirm before token signing');

@@ -56,7 +56,7 @@ Use deterministic local-chain/mocked-RPC fixtures for automated tests, with Sepo
 
 ## 3. Initial asset scope
 
-Phases 1–5 deliver native ETH, BTC, and SOL. Phase 6 adds explicitly allowlisted ERC-20 and SPL tokens after each adapter passes deposit → credit → sweep → withdrawal certification.
+Phases 1–5 deliver native ETH, BTC, and SOL. Phase 6 adds individually certified transfer-only ERC-20 and classic SPL tokens after each adapter passes deposit → credit → sweep → withdrawal certification.
 
 Do not credit unsupported tokens as available customer balances merely because the existing provider reports them. Record unsupported assets as visible custody exceptions. Do not enable NFTs or unusual token semantics/extensions automatically.
 

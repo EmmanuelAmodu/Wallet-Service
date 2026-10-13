@@ -192,15 +192,29 @@ export class TokenFeesService {
             r.registry_revision !==
               (r.wallet_id === source.id ? source.registry_revision : payer.registry_revision) ||
             r.ledger_ack_revision !== r.registry_revision ||
-            (r.wallet_id === source.id &&
-              (!r.ready || r.listener_ack_revision !== r.registry_revision)),
+            (r.wallet_id === source.id && (!r.ready || r.listener_ack_revision <= 0)),
         )
       )
         return deferred('Fee dependency requires current registry acknowledgments');
-      const outstanding=await tx.tokenFeeReservation.findFirst({where:{domain_id:request.domainId,reset_epoch:request.resetEpoch,source_wallet_id:source.id,chain:asset.chain,network:asset.network,state:{in:pending}}});
-      if(outstanding) {
-        const prior=tokenFeeRequestSchema.parse(outstanding.request);
-        if(request.kind==='gas_funding' && outstanding.kind==='gas_funding' && prior.generation===request.generation && executionDigest(prior.certificate)===executionDigest(request.certificate)) return outstanding;
+      const outstanding = await tx.tokenFeeReservation.findFirst({
+        where: {
+          domain_id: request.domainId,
+          reset_epoch: request.resetEpoch,
+          source_wallet_id: source.id,
+          chain: asset.chain,
+          network: asset.network,
+          state: { in: pending },
+        },
+      });
+      if (outstanding) {
+        const prior = tokenFeeRequestSchema.parse(outstanding.request);
+        if (
+          request.kind === 'gas_funding' &&
+          outstanding.kind === 'gas_funding' &&
+          prior.generation === request.generation &&
+          executionDigest(prior.certificate) === executionDigest(request.certificate)
+        )
+          return outstanding;
         return deferred('Customer wallet already has outstanding fee exposure');
       }
       const principal = units(request.principalUnits),

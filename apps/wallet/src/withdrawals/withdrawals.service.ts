@@ -33,7 +33,10 @@ import { WalletPrismaService } from '../prisma/prisma.service.js';
 import { CustodyService } from '../custody/custody.service.js';
 import { ExchangeMessagingService } from '../exchange-messaging/exchange-messaging.service.js';
 import { executionAssetSchema } from '../../../../packages/shared/src/execution-contracts.js';
-import { tokenCertificateSchema, tokenAsset } from '../../../../packages/shared/src/token-contracts.js';
+import {
+  tokenCertificateSchema,
+  tokenAsset,
+} from '../../../../packages/shared/src/token-contracts.js';
 import { executionConfig, ExecutionSettings } from '../config/execution.config.js';
 import { walletConfig, WalletConfig } from '../config/wallet.config.js';
 
@@ -204,7 +207,11 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
           throw new ConflictException('Idempotency key was used for a different withdrawal');
         return previous;
       }
-      if (!(parsed.asset.assetId.endsWith(':native') ? this.execution.withdrawalsEnabled : this.execution.tokensEnabled))
+      if (
+        !(parsed.asset.assetId.endsWith(':native')
+          ? this.execution.withdrawalsEnabled
+          : this.execution.tokensEnabled)
+      )
         throw new ServiceUnavailableException('Withdrawal execution is disabled');
       const customer = await tx.exchangeCustomer.findUnique({ where: { customer_id: customerId } });
       if (
@@ -250,8 +257,12 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
       )
         throw new ConflictException('Hot custody or withdrawal asset is not ready');
       if (!parsed.asset.assetId.endsWith(':native')) {
-        const certificate=tokenCertificateSchema.parse(asset!.transfer_certificate);
-        if(canonicalAsset(tokenAsset(certificate))!==canonicalAsset(parsed.asset) || asset!.decimals!==certificate.decimals) throw new ConflictException('Token transfer certificate mismatch');
+        const certificate = tokenCertificateSchema.parse(asset!.transfer_certificate);
+        if (
+          canonicalAsset(tokenAsset(certificate)) !== canonicalAsset(parsed.asset) ||
+          asset!.decimals !== certificate.decimals
+        )
+          throw new ConflictException('Token transfer certificate mismatch');
       }
       if (parsed.asset.chain === 'bitcoin' && BigInt(parsed.amount) < 546n)
         throw new BadRequestException('Bitcoin withdrawal is below the conservative dust floor');
@@ -527,7 +538,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
           destination: w.destination,
           amount: { asset: event.data.amount.asset, amount: w.principal_units },
           preparationDigest: event.data.preparationDigest,
-          ...(event.data.tokenCosts?{tokenCosts:event.data.tokenCosts}:{}),
+          ...(event.data.tokenCosts ? { tokenCosts: event.data.tokenCosts } : {}),
         });
         await enqueueFanOut(tx, execute, [QUEUES.wallet]);
       } else if (event.type === 'withdrawal.plan.deferred.v1') {

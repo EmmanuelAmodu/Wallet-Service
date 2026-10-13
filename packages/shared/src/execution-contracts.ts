@@ -1,5 +1,9 @@
 import { z } from 'zod';
-import { tokenPreparationSchema, tokenExecutionAssetSchema, tokenCostsSchema } from './token-contracts.js';
+import {
+  tokenPreparationSchema,
+  tokenExecutionAssetSchema,
+  tokenCostsSchema,
+} from './token-contracts.js';
 import { tokenExecutionAuthorizationSchema } from './token-authorization.js';
 import { signSchema, signedSchema } from './contracts.js';
 import {
@@ -9,7 +13,10 @@ import {
   signerAttestationSchema,
 } from './execution-authorization.js';
 
-export const executionAssetSchema = z.union([nativeExecutionAssetSchema, tokenExecutionAssetSchema]);
+export const executionAssetSchema = z.union([
+  nativeExecutionAssetSchema,
+  tokenExecutionAssetSchema,
+]);
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const base = z.object({
@@ -28,13 +35,56 @@ const base = z.object({
   requestDigest: digest,
   policyVersion: z.string().min(1).max(64),
 });
-const fundingPlanData = z.object({sourceWalletId:z.uuid(),destinationWalletId:z.uuid(),asset:nativeExecutionAssetSchema,
- sourceRegistryRevision:z.number().int().positive(),hotRegistryRevision:z.number().int().positive(),generation:z.number().int().positive(),
- amount:executionUnitsSchema.refine(v=>BigInt(v)>0n),feeReservationId:z.uuid(),fundedAssetId:z.string().regex(/^token:ethereum:erc20:0x[0-9a-f]{40}$/),certificateDigest:digest}).strict();
+const fundingPlanData = z
+  .object({
+    sourceWalletId: z.uuid(),
+    destinationWalletId: z.uuid(),
+    asset: nativeExecutionAssetSchema,
+    sourceRegistryRevision: z.number().int().positive(),
+    hotRegistryRevision: z.number().int().positive(),
+    generation: z.number().int().positive(),
+    amount: executionUnitsSchema.refine((v) => BigInt(v) > 0n),
+    feeReservationId: z.uuid(),
+    fundedAssetId: z.string().regex(/^token:ethereum:erc20:0x[0-9a-f]{40}$/),
+    certificateDigest: digest,
+  })
+  .strict();
 const fundingEvents = [
- base.extend({type:z.literal('funding.plan.requested.v1'),data:fundingPlanData}).strict(),
- base.extend({type:z.literal('funding.plan.prepared.v1'),data:z.object({sourceWalletId:z.uuid(),destinationWalletId:z.uuid(),amount:z.object({asset:nativeExecutionAssetSchema,amount:executionUnitsSchema.refine(v=>BigInt(v)>0n)}).strict(),preparationDigest:digest,maxFeeUnits:executionUnitsSchema,expiresAt:z.iso.datetime({offset:true})}).strict()}).strict(),
- base.extend({type:z.literal('funding.plan.deferred.v1'),data:z.object({code:z.string().min(1).max(128),reason:z.string().min(1).max(500),retryAfter:z.iso.datetime({offset:true}),preparationDigest:digest.optional(),terminalSafe:z.literal(true).optional()}).strict()}).strict(),
+  base.extend({ type: z.literal('funding.plan.requested.v1'), data: fundingPlanData }).strict(),
+  base
+    .extend({
+      type: z.literal('funding.plan.prepared.v1'),
+      data: z
+        .object({
+          sourceWalletId: z.uuid(),
+          destinationWalletId: z.uuid(),
+          amount: z
+            .object({
+              asset: nativeExecutionAssetSchema,
+              amount: executionUnitsSchema.refine((v) => BigInt(v) > 0n),
+            })
+            .strict(),
+          preparationDigest: digest,
+          maxFeeUnits: executionUnitsSchema,
+          expiresAt: z.iso.datetime({ offset: true }),
+        })
+        .strict(),
+    })
+    .strict(),
+  base
+    .extend({
+      type: z.literal('funding.plan.deferred.v1'),
+      data: z
+        .object({
+          code: z.string().min(1).max(128),
+          reason: z.string().min(1).max(500),
+          retryAfter: z.iso.datetime({ offset: true }),
+          preparationDigest: digest.optional(),
+          terminalSafe: z.literal(true).optional(),
+        })
+        .strict(),
+    })
+    .strict(),
 ] as const;
 export const executionEventSchemas = [
   ...fundingEvents,

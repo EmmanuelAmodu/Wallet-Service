@@ -6,7 +6,12 @@ import { lock } from '../../../../packages/database/src/locks.js';
 import { ChainRpcService } from '../../../../packages/chain/src/chain-rpc.service.js';
 import { TokenPlanner, TokenPreparation } from '../../../../packages/chain/src/token-planner.js';
 import { TokenObserver } from '../../../../packages/chain/src/token-observer.js';
-import { TokenSignRequest, tokenCertificateSchema, tokenPreparationSchema, tokenSignRequestSchema, tokenAsset } from '../../../../packages/shared/src/token-contracts.js';
+import {
+  TokenSignRequest,
+  tokenCertificateSchema,
+  tokenPreparationSchema,
+  tokenAsset,
+} from '../../../../packages/shared/src/token-contracts.js';
 import { signTokenExecutionAuthorization } from '../../../../packages/shared/src/token-authorization.js';
 import {
   NativeSweepPlanner,
@@ -48,7 +53,12 @@ type Plan = Extract<
 >;
 type Execute = Extract<
   ExchangeEvent,
-  { type: 'sweep.execute.requested.v1' | 'withdrawal.execute.requested.v1' | 'funding.execute.requested.v1' }
+  {
+    type:
+      | 'sweep.execute.requested.v1'
+      | 'withdrawal.execute.requested.v1'
+      | 'funding.execute.requested.v1';
+  }
 >;
 type Result = Extract<
   Message,
@@ -86,32 +96,88 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
   }
 
   private request(execution: CustodyExecution): SignRequest | TokenSignRequest {
-    return this.tokenPreparation(execution)?.request ?? signSchema.parse(execution.prepared_request);
+    return (
+      this.tokenPreparation(execution)?.request ?? signSchema.parse(execution.prepared_request)
+    );
   }
 
   private async tokenAuthority(tx: Prisma.TransactionClient, plan: Plan) {
-    const configuration = await tx.assetConfiguration.findUniqueOrThrow({where:{domain_id_chain_network_asset_id:{domain_id:plan.domainId,chain:plan.data.asset.chain,network:plan.data.asset.network,asset_id:plan.data.asset.assetId}}});
+    const configuration = await tx.assetConfiguration.findUniqueOrThrow({
+      where: {
+        domain_id_chain_network_asset_id: {
+          domain_id: plan.domainId,
+          chain: plan.data.asset.chain,
+          network: plan.data.asset.network,
+          asset_id: plan.data.asset.assetId,
+        },
+      },
+    });
     if (!this.config.tokensEnabled || !configuration.transfer_certificate)
-      throw new SweepDeferral('disabled','Certified token execution is disabled');
+      throw new SweepDeferral('disabled', 'Certified token execution is disabled');
     const certificate = tokenCertificateSchema.parse(configuration.transfer_certificate);
-    if (canonical(tokenAsset(certificate)) !== canonical(plan.data.asset) || configuration.decimals !== certificate.decimals || configuration.standard !== certificate.standard)
+    if (
+      canonical(tokenAsset(certificate)) !== canonical(plan.data.asset) ||
+      configuration.decimals !== certificate.decimals ||
+      configuration.standard !== certificate.standard
+    )
       throw new ActionRejectedError('Token certificate metadata mismatch');
-    if(plan.type==='sweep.plan.requested.v1') {
-      const coverage=await tx.tokenWalletCoverage.findUnique({where:{wallet_id_asset_id:{wallet_id:plan.data.sourceWalletId,asset_id:plan.data.asset.assetId}}});
-      if(!coverage?.ready || coverage.domain_id!==plan.domainId || coverage.reset_epoch!==plan.resetEpoch || coverage.registry_revision!==plan.data.sourceRegistryRevision || coverage.configuration_revision!==configuration.configuration_revision || coverage.certificate_digest!==executionDigest(certificate))
-       throw new SweepDeferral('paused_review','Token-specific address watch and historical coverage is not ready');
+    if (plan.type === 'sweep.plan.requested.v1') {
+      const coverage = await tx.tokenWalletCoverage.findUnique({
+        where: {
+          wallet_id_asset_id: {
+            wallet_id: plan.data.sourceWalletId,
+            asset_id: plan.data.asset.assetId,
+          },
+        },
+      });
+      if (
+        !coverage?.ready ||
+        coverage.domain_id !== plan.domainId ||
+        coverage.reset_epoch !== plan.resetEpoch ||
+        coverage.registry_revision !== plan.data.sourceRegistryRevision ||
+        coverage.configuration_revision !== configuration.configuration_revision ||
+        coverage.certificate_digest !== executionDigest(certificate)
+      )
+        throw new SweepDeferral(
+          'paused_review',
+          'Token-specific address watch and historical coverage is not ready',
+        );
     }
     let sponsor: Wallet | undefined;
     if (certificate.standard === 'spl' && plan.type === 'sweep.plan.requested.v1') {
-      const payer = await tx.wallet.findFirst({where:{custody_domain_id:plan.domainId,reset_epoch:plan.resetEpoch,chain:'solana',network:certificate.network,custody_role:'management',account:1,active:true}});
-      if (!payer || !payer.address || !payer.published_at || !(await this.custody.publicationAllowed(tx,payer)))
-        throw new SweepDeferral('paused_review','Management1 sponsor is not ready');
-      const registry = await tx.exchangeWalletRegistry.findUnique({where:{wallet_id:payer.id}});
-      if (registry?.ledger_status !== 'ready' || registry.registry_revision !== payer.registry_revision || registry.ledger_ack_revision !== payer.registry_revision)
-        throw new SweepDeferral('paused_review','Management1 sponsor lacks Ledger registry acknowledgment');
-      sponsor=payer;
+      const payer = await tx.wallet.findFirst({
+        where: {
+          custody_domain_id: plan.domainId,
+          reset_epoch: plan.resetEpoch,
+          chain: 'solana',
+          network: certificate.network,
+          custody_role: 'management',
+          account: 1,
+          active: true,
+        },
+      });
+      if (
+        !payer ||
+        !payer.address ||
+        !payer.published_at ||
+        !(await this.custody.publicationAllowed(tx, payer))
+      )
+        throw new SweepDeferral('paused_review', 'Management1 sponsor is not ready');
+      const registry = await tx.exchangeWalletRegistry.findUnique({
+        where: { wallet_id: payer.id },
+      });
+      if (
+        registry?.ledger_status !== 'ready' ||
+        registry.registry_revision !== payer.registry_revision ||
+        registry.ledger_ack_revision !== payer.registry_revision
+      )
+        throw new SweepDeferral(
+          'paused_review',
+          'Management1 sponsor lacks Ledger registry acknowledgment',
+        );
+      sponsor = payer;
     }
-    return {certificate,sponsor};
+    return { certificate, sponsor };
   }
 
   onModuleInit() {
@@ -135,54 +201,140 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
   }
 
   async handle(message: Message): Promise<boolean> {
-    if(message.type==='asset.transfer.watch.acknowledged.v1') {
-      if(message.domainId!==this.walletConfig.domainId || message.resetEpoch!==this.auth.resetEpoch)throw new ActionRejectedError('Token watch acknowledgment domain or epoch mismatch');
-      await this.db.$transaction(async tx=>{
-       await lock(tx,`token-coverage:${message.data.walletId}:${message.data.asset.assetId}`);
-       const wallet=await tx.wallet.findUnique({where:{id:message.data.walletId}}),asset=await tx.assetConfiguration.findUnique({where:{domain_id_chain_network_asset_id:{domain_id:message.domainId,chain:message.data.asset.chain,network:message.data.asset.network,asset_id:message.data.asset.assetId}}});
-       if(!wallet || wallet.custody_domain_id!==message.domainId || wallet.reset_epoch!==message.resetEpoch || wallet.chain!==message.data.asset.chain || wallet.network!==message.data.asset.network || !asset?.transfer_certificate || executionDigest(asset.transfer_certificate)!==message.data.certificateDigest)throw new ActionRejectedError('Token watch does not match a registered wallet and certificate');
-       if(wallet.registry_revision!==message.data.registryRevision || asset.configuration_revision!==message.data.configurationRevision)return;
-       const key={wallet_id:wallet.id,asset_id:message.data.asset.assetId},prior=await tx.tokenWalletCoverage.findUnique({where:{wallet_id_asset_id:key}});
-       if(prior&&prior.readiness_revision>=message.revision){if(prior.readiness_revision===message.revision&&(prior.generation!==message.data.generation||prior.ready!==message.data.ready||prior.cursor!==(message.data.cursor??null)))throw new ActionRejectedError('Token readiness revision conflicts');return;}
-       const data={domain_id:message.domainId,reset_epoch:message.resetEpoch,certificate_digest:message.data.certificateDigest,configuration_revision:message.data.configurationRevision,registry_revision:message.data.registryRevision,generation:message.data.generation,readiness_revision:message.revision,ready:message.data.ready,cursor:message.data.cursor??null};
-       await tx.tokenWalletCoverage.upsert({where:{wallet_id_asset_id:key},create:{...key,...data},update:data});
+    if (message.type === 'asset.transfer.watch.acknowledged.v1') {
+      if (
+        message.domainId !== this.walletConfig.domainId ||
+        message.resetEpoch !== this.auth.resetEpoch
+      )
+        throw new ActionRejectedError('Token watch acknowledgment domain or epoch mismatch');
+      await this.db.$transaction(async (tx) => {
+        await lock(tx, `token-coverage:${message.data.walletId}:${message.data.asset.assetId}`);
+        const wallet = await tx.wallet.findUnique({ where: { id: message.data.walletId } }),
+          asset = await tx.assetConfiguration.findUnique({
+            where: {
+              domain_id_chain_network_asset_id: {
+                domain_id: message.domainId,
+                chain: message.data.asset.chain,
+                network: message.data.asset.network,
+                asset_id: message.data.asset.assetId,
+              },
+            },
+          });
+        if (
+          !wallet ||
+          wallet.custody_domain_id !== message.domainId ||
+          wallet.reset_epoch !== message.resetEpoch ||
+          wallet.chain !== message.data.asset.chain ||
+          wallet.network !== message.data.asset.network ||
+          !asset?.transfer_certificate ||
+          executionDigest(asset.transfer_certificate) !== message.data.certificateDigest
+        )
+          throw new ActionRejectedError(
+            'Token watch does not match a registered wallet and certificate',
+          );
+        if (
+          wallet.registry_revision !== message.data.registryRevision ||
+          asset.configuration_revision !== message.data.configurationRevision
+        )
+          return;
+        const key = { wallet_id: wallet.id, asset_id: message.data.asset.assetId },
+          prior = await tx.tokenWalletCoverage.findUnique({ where: { wallet_id_asset_id: key } });
+        if (prior && prior.readiness_revision >= message.revision) {
+          if (
+            prior.readiness_revision === message.revision &&
+            (prior.generation !== message.data.generation ||
+              prior.ready !== message.data.ready ||
+              prior.cursor !== (message.data.cursor ?? null))
+          )
+            throw new ActionRejectedError('Token readiness revision conflicts');
+          return;
+        }
+        const data = {
+          domain_id: message.domainId,
+          reset_epoch: message.resetEpoch,
+          certificate_digest: message.data.certificateDigest,
+          configuration_revision: message.data.configurationRevision,
+          registry_revision: message.data.registryRevision,
+          generation: message.data.generation,
+          readiness_revision: message.revision,
+          ready: message.data.ready,
+          cursor: message.data.cursor ?? null,
+        };
+        await tx.tokenWalletCoverage.upsert({
+          where: { wallet_id_asset_id: key },
+          create: { ...key, ...data },
+          update: data,
+        });
       });
       return true;
     }
-    if(message.type==='execution.registry.acknowledged.v1') {
-      const execution=await this.db.custodyExecution.findUnique({where:{operation_id:message.operationId}});
-      if(!execution) throw new Error('Execution registration has not arrived');
-      this.checkIdentity(execution,message);
-      await this.db.custodyExecution.update({where:{id:execution.id},data:{...(message.data.consumer==='ledger'?{ledger_intent_ack:true}:{listener_intent_ack:true}),next_check_at:new Date()}});
+    if (message.type === 'execution.registry.acknowledged.v1') {
+      const execution = await this.db.custodyExecution.findUnique({
+        where: { operation_id: message.operationId },
+      });
+      if (!execution) throw new Error('Execution registration has not arrived');
+      this.checkIdentity(execution, message);
+      await this.db.custodyExecution.update({
+        where: { id: execution.id },
+        data: {
+          ...(message.data.consumer === 'ledger'
+            ? { ledger_intent_ack: true }
+            : { listener_intent_ack: true }),
+          next_check_at: new Date(),
+        },
+      });
       await this.reconcile(execution.transaction_id);
       return true;
     }
-    if(message.type==='funding.plan.prepared.v1') {
-      const execute=exchangeEventSchema.parse({...message,type:'funding.execute.requested.v1',eventId:eventId([message.attemptId,'funding-execute']),causationId:message.eventId,
-        data:{sourceWalletId:message.data.sourceWalletId,destinationWalletId:message.data.destinationWalletId,amount:message.data.amount,preparationDigest:message.data.preparationDigest}});
-      if(execute.type==='funding.execute.requested.v1') await this.execute(execute);
+    if (message.type === 'funding.plan.prepared.v1') {
+      const execute = exchangeEventSchema.parse({
+        ...message,
+        type: 'funding.execute.requested.v1',
+        eventId: eventId([message.attemptId, 'funding-execute']),
+        causationId: message.eventId,
+        data: {
+          sourceWalletId: message.data.sourceWalletId,
+          destinationWalletId: message.data.destinationWalletId,
+          amount: message.data.amount,
+          preparationDigest: message.data.preparationDigest,
+        },
+      });
+      if (execute.type === 'funding.execute.requested.v1') await this.execute(execute);
       return true;
     }
-    if(message.type==='funding.plan.deferred.v1') {
-      const current=await this.db.custodyExecution.findUnique({where:{operation_id:message.operationId}});
-      if(!current || (!current.authorization && current.retired_at && current.state==='deferred'))
-        await this.db.tokenFeeReservation.updateMany({where:{id:message.operationId,state:'reserved'},data:{state:'released'}});
+    if (message.type === 'funding.plan.deferred.v1') {
+      const current = await this.db.custodyExecution.findUnique({
+        where: { operation_id: message.operationId },
+      });
+      if (
+        !current ||
+        (!current.authorization && current.retired_at && current.state === 'deferred')
+      )
+        await this.db.tokenFeeReservation.updateMany({
+          where: { id: message.operationId, state: 'reserved' },
+          data: { state: 'released' },
+        });
       return true;
     }
-    if(message.type==='execution.attempt.updated.v1') {
-      const current=await this.db.custodyExecution.findUnique({where:{operation_id:message.operationId}});
-      if(current && (current.plan as unknown as Plan).type==='funding.plan.requested.v1') return true;
+    if (message.type === 'execution.attempt.updated.v1') {
+      const current = await this.db.custodyExecution.findUnique({
+        where: { operation_id: message.operationId },
+      });
+      if (current && (current.plan as unknown as Plan).type === 'funding.plan.requested.v1')
+        return true;
     }
     if (
       message.type === 'sweep.plan.requested.v1' ||
-      message.type === 'withdrawal.plan.requested.v1' || message.type === 'funding.plan.requested.v1'
+      message.type === 'withdrawal.plan.requested.v1' ||
+      message.type === 'funding.plan.requested.v1'
     ) {
       await this.plan(message);
       return true;
     }
     if (
       message.type === 'sweep.execute.requested.v1' ||
-      message.type === 'withdrawal.execute.requested.v1' || message.type === 'funding.execute.requested.v1'
+      message.type === 'withdrawal.execute.requested.v1' ||
+      message.type === 'funding.execute.requested.v1'
     ) {
       await this.execute(message);
       return true;
@@ -291,11 +443,13 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     tx: Prisma.TransactionClient,
     plan: Plan,
   ): Promise<{ source: Wallet; hot: Wallet }> {
-    if (plan.type === 'funding.plan.requested.v1') return this.fundingAuthority(tx,plan);
+    if (plan.type === 'funding.plan.requested.v1') return this.fundingAuthority(tx, plan);
     if (plan.type === 'withdrawal.plan.requested.v1') return this.withdrawalAuthority(tx, plan);
     if (
       !this.config.enabled ||
-      (plan.data.asset.assetId.endsWith(':native') ? this.config.sweepsEnabled === false : !this.config.tokensEnabled) ||
+      (plan.data.asset.assetId.endsWith(':native')
+        ? this.config.sweepsEnabled === false
+        : !this.config.tokensEnabled) ||
       !this.config.authorityPrivateKey ||
       !this.config.signerPublicKey
     )
@@ -366,7 +520,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       registry.chain !== source.chain ||
       registry.network !== source.network ||
       registry.ledger_ack_revision !== source.registry_revision ||
-      registry.listener_ack_revision !== source.registry_revision ||
+      registry.listener_ack_revision <= 0 ||
       registry.registry_revision !== source.registry_revision ||
       registry.address !== source.address ||
       registry.hot_wallet_id !== hot.id ||
@@ -390,51 +544,152 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         'paused_review',
         'Customer, registry coverage or native sweep capability is not enabled',
       );
-    if (plan.data.asset.assetId !== `token:${source.chain}:native`) await this.tokenAuthority(tx,plan);
-    const current=await tx.custodyExecution.findUnique({where:{operation_id:plan.operationId}});
-    if(!plan.data.asset.assetId.endsWith(':native') && current?.authorization && (!current.ledger_intent_ack || !current.listener_intent_ack)) throw new SweepDeferral('waiting_resources','Token execution identity is not yet acknowledged');
+    if (plan.data.asset.assetId !== `token:${source.chain}:native`)
+      await this.tokenAuthority(tx, plan);
+    const current = await tx.custodyExecution.findUnique({
+      where: { operation_id: plan.operationId },
+    });
+    if (
+      !plan.data.asset.assetId.endsWith(':native') &&
+      current?.authorization &&
+      (!current.ledger_intent_ack || !current.listener_intent_ack)
+    )
+      throw new SweepDeferral(
+        'waiting_resources',
+        'Token execution identity is not yet acknowledged',
+      );
     return { source, hot };
   }
 
-  private async fundingAuthority(tx: Prisma.TransactionClient, plan: Extract<Plan,{type:'funding.plan.requested.v1'}>) {
-    if(!this.config.tokensEnabled || !this.config.authorityPrivateKey || !this.config.signerPublicKey) throw new SweepDeferral('disabled','Management funding is disabled');
+  private async fundingAuthority(
+    tx: Prisma.TransactionClient,
+    plan: Extract<Plan, { type: 'funding.plan.requested.v1' }>,
+  ) {
+    if (
+      !this.config.tokensEnabled ||
+      !this.config.authorityPrivateKey ||
+      !this.config.signerPublicKey
+    )
+      throw new SweepDeferral('disabled', 'Management funding is disabled');
     await tx.$queryRaw`SELECT id FROM custody_domains WHERE id=${plan.domainId} FOR UPDATE`;
     await tx.$queryRaw`SELECT customer_id FROM exchange_customers WHERE customer_id=${plan.customerId}::uuid FOR UPDATE`;
     await tx.$queryRaw`SELECT id FROM wallets WHERE id IN (${plan.data.sourceWalletId}::uuid,${plan.data.destinationWalletId}::uuid) ORDER BY id FOR UPDATE`;
-    const reservation=await tx.tokenFeeReservation.findUnique({where:{id:plan.data.feeReservationId}});
-    const source=await tx.wallet.findUnique({where:{id:plan.data.sourceWalletId}}),hot=await tx.wallet.findUnique({where:{id:plan.data.destinationWalletId}});
-    const customer=await tx.exchangeCustomer.findUnique({where:{customer_id:plan.customerId}});
-    if(!reservation || !source || !hot || reservation.id!==plan.operationId || !['reserved','uncertain','reverted'].includes(reservation.state) || reservation.kind!=='gas_funding' ||
-       reservation.domain_id!==plan.domainId || reservation.reset_epoch!==plan.resetEpoch || reservation.customer_id!==plan.customerId || reservation.management_wallet_id!==source.id || reservation.source_wallet_id!==hot.id ||
-       reservation.principal_units!==plan.data.amount || source.custody_role!=='management' || source.account!==1 || source.management_purpose!=='gas_fee' || hot.custody_role!=='customer_deposit' || hot.account<10 || hot.customer_id!==plan.customerId ||
-       source.seed_id!==hot.seed_id || source.chain!=='ethereum' || source.network!=='11155111' || hot.chain!==source.chain || hot.network!==source.network || plan.data.asset.assetId!=='token:ethereum:native' || plan.data.asset.network!==source.network ||
-       source.registry_revision!==plan.data.sourceRegistryRevision || hot.registry_revision!==plan.data.hotRegistryRevision || !source.address || !hot.address || !source.published_at || !hot.published_at ||
-       !(await this.custody.publicationAllowed(tx,source)) || !(await this.custody.publicationAllowed(tx,hot)) || customer?.state!=='active' || customer.ledger_status!=='ready')
-      throw new SweepDeferral('paused_review','Funding reservation or custody authority is not ready');
-    const request=reservation.request as unknown as import('./token-fees.service.js').TokenFeeRequest;
-    if(tokenAsset(request.certificate).assetId!==plan.data.fundedAssetId || executionDigest(request.certificate)!==plan.data.certificateDigest) throw new ActionRejectedError('Funding certificate binding mismatch');
-    const asset=await tx.assetConfiguration.findUnique({where:{domain_id_chain_network_asset_id:{domain_id:plan.domainId,chain:source.chain,network:source.network,asset_id:plan.data.fundedAssetId}}});
-    if(!asset?.sweep_enabled || !asset.transfer_certificate || executionDigest(asset.transfer_certificate)!==plan.data.certificateDigest) throw new SweepDeferral('paused_review','Funded token certification is paused');
-    const registry=await tx.exchangeWalletRegistry.findMany({where:{wallet_id:{in:[source.id,hot.id]}}});
-    if(registry.length!==2 || registry.some(r=>r.domain_id!==plan.domainId || r.reset_epoch!==plan.resetEpoch || r.ledger_status!=='ready' || r.ledger_ack_revision!==r.registry_revision ||
-      r.registry_revision!==(r.wallet_id===source.id?source.registry_revision:hot.registry_revision) || (r.wallet_id===hot.id && (!r.ready || r.listener_ack_revision!==r.registry_revision))))
-      throw new SweepDeferral('paused_review','Funding registrations are not acknowledged');
-    const current=await tx.custodyExecution.findUnique({where:{operation_id:plan.operationId}});
-    if(current?.authorization && (!current.ledger_intent_ack || !current.listener_intent_ack)) throw new SweepDeferral('waiting_resources','Funding identity must be acknowledged before broadcast');
-    return {source,hot};
+    const reservation = await tx.tokenFeeReservation.findUnique({
+      where: { id: plan.data.feeReservationId },
+    });
+    const source = await tx.wallet.findUnique({ where: { id: plan.data.sourceWalletId } }),
+      hot = await tx.wallet.findUnique({ where: { id: plan.data.destinationWalletId } });
+    const customer = await tx.exchangeCustomer.findUnique({
+      where: { customer_id: plan.customerId },
+    });
+    if (
+      !reservation ||
+      !source ||
+      !hot ||
+      reservation.id !== plan.operationId ||
+      !['reserved', 'uncertain', 'reverted'].includes(reservation.state) ||
+      reservation.kind !== 'gas_funding' ||
+      reservation.domain_id !== plan.domainId ||
+      reservation.reset_epoch !== plan.resetEpoch ||
+      reservation.customer_id !== plan.customerId ||
+      reservation.management_wallet_id !== source.id ||
+      reservation.source_wallet_id !== hot.id ||
+      reservation.principal_units !== plan.data.amount ||
+      source.custody_role !== 'management' ||
+      source.account !== 1 ||
+      source.management_purpose !== 'gas_fee' ||
+      hot.custody_role !== 'customer_deposit' ||
+      hot.account < 10 ||
+      hot.customer_id !== plan.customerId ||
+      source.seed_id !== hot.seed_id ||
+      source.chain !== 'ethereum' ||
+      source.network !== '11155111' ||
+      hot.chain !== source.chain ||
+      hot.network !== source.network ||
+      plan.data.asset.assetId !== 'token:ethereum:native' ||
+      plan.data.asset.network !== source.network ||
+      source.registry_revision !== plan.data.sourceRegistryRevision ||
+      hot.registry_revision !== plan.data.hotRegistryRevision ||
+      !source.address ||
+      !hot.address ||
+      !source.published_at ||
+      !hot.published_at ||
+      !(await this.custody.publicationAllowed(tx, source)) ||
+      !(await this.custody.publicationAllowed(tx, hot)) ||
+      customer?.state !== 'active' ||
+      customer.ledger_status !== 'ready'
+    )
+      throw new SweepDeferral(
+        'paused_review',
+        'Funding reservation or custody authority is not ready',
+      );
+    const request =
+      reservation.request as unknown as import('./token-fees.service.js').TokenFeeRequest;
+    if (
+      tokenAsset(request.certificate).assetId !== plan.data.fundedAssetId ||
+      executionDigest(request.certificate) !== plan.data.certificateDigest
+    )
+      throw new ActionRejectedError('Funding certificate binding mismatch');
+    const asset = await tx.assetConfiguration.findUnique({
+      where: {
+        domain_id_chain_network_asset_id: {
+          domain_id: plan.domainId,
+          chain: source.chain,
+          network: source.network,
+          asset_id: plan.data.fundedAssetId,
+        },
+      },
+    });
+    if (
+      !asset?.sweep_enabled ||
+      !asset.transfer_certificate ||
+      executionDigest(asset.transfer_certificate) !== plan.data.certificateDigest
+    )
+      throw new SweepDeferral('paused_review', 'Funded token certification is paused');
+    const registry = await tx.exchangeWalletRegistry.findMany({
+      where: { wallet_id: { in: [source.id, hot.id] } },
+    });
+    if (
+      registry.length !== 2 ||
+      registry.some(
+        (r) =>
+          r.domain_id !== plan.domainId ||
+          r.reset_epoch !== plan.resetEpoch ||
+          r.ledger_status !== 'ready' ||
+          r.ledger_ack_revision !== r.registry_revision ||
+          r.registry_revision !==
+            (r.wallet_id === source.id ? source.registry_revision : hot.registry_revision) ||
+          (r.wallet_id === hot.id && (!r.ready || r.listener_ack_revision <= 0)),
+      )
+    )
+      throw new SweepDeferral('paused_review', 'Funding registrations are not acknowledged');
+    const current = await tx.custodyExecution.findUnique({
+      where: { operation_id: plan.operationId },
+    });
+    if (current?.authorization && (!current.ledger_intent_ack || !current.listener_intent_ack))
+      throw new SweepDeferral(
+        'waiting_resources',
+        'Funding identity must be acknowledged before broadcast',
+      );
+    return { source, hot };
   }
 
-  private responseType(plan: Plan, result:'prepared'|'deferred'): ExchangeEvent['type'] {
-    return `${plan.type==='withdrawal.plan.requested.v1'?'withdrawal':plan.type==='funding.plan.requested.v1'?'funding':'sweep'}.plan.${result}.v1` as ExchangeEvent['type'];
+  private responseType(plan: Plan, result: 'prepared' | 'deferred'): ExchangeEvent['type'] {
+    return `${plan.type === 'withdrawal.plan.requested.v1' ? 'withdrawal' : plan.type === 'funding.plan.requested.v1' ? 'funding' : 'sweep'}.plan.${result}.v1` as ExchangeEvent['type'];
   }
-  private outputQueue(plan: Plan) { return plan.type==='sweep.plan.requested.v1'?QUEUES.sweep:QUEUES.wallet; }
+
+  private outputQueue(plan: Plan) {
+    return plan.type === 'sweep.plan.requested.v1' ? QUEUES.sweep : QUEUES.wallet;
+  }
 
   private async withdrawalAuthority(
     tx: Prisma.TransactionClient,
     plan: Extract<Plan, { type: 'withdrawal.plan.requested.v1' }>,
   ): Promise<{ source: Wallet; hot: Wallet }> {
     if (
-      !(plan.data.asset.assetId.endsWith(':native') ? this.config.withdrawalsEnabled : this.config.tokensEnabled) ||
+      !(plan.data.asset.assetId.endsWith(':native')
+        ? this.config.withdrawalsEnabled
+        : this.config.tokensEnabled) ||
       !this.config.authorityPrivateKey ||
       !this.config.signerPublicKey
     )
@@ -516,7 +771,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         'paused_review',
         'Customer, hot custody or withdrawal capability is not ready',
       );
-    if (!plan.data.asset.assetId.endsWith(':native')) await this.tokenAuthority(tx,plan);
+    if (!plan.data.asset.assetId.endsWith(':native')) await this.tokenAuthority(tx, plan);
     const owned = await tx.wallet.findFirst({
       where: {
         chain: hot.chain,
@@ -544,8 +799,18 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         'paused_review',
         'Exchange-owned destinations require an internal transfer',
       );
-    const current=await tx.custodyExecution.findUnique({where:{operation_id:plan.operationId}});
-    if(!plan.data.asset.assetId.endsWith(':native') && current?.authorization && (!current.ledger_intent_ack || !current.listener_intent_ack)) throw new SweepDeferral('waiting_resources','Token withdrawal identity is not yet acknowledged');
+    const current = await tx.custodyExecution.findUnique({
+      where: { operation_id: plan.operationId },
+    });
+    if (
+      !plan.data.asset.assetId.endsWith(':native') &&
+      current?.authorization &&
+      (!current.ledger_intent_ack || !current.listener_intent_ack)
+    )
+      throw new SweepDeferral(
+        'waiting_resources',
+        'Token withdrawal identity is not yet acknowledged',
+      );
     return { source: hot, hot };
   }
 
@@ -570,8 +835,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
   private async deferred(plan: Plan, code: string, reason: string, tx: Prisma.TransactionClient) {
     const response = exchangeEventSchema.parse({
       ...plan,
-      type:
-        this.responseType(plan,'deferred'),
+      type: this.responseType(plan, 'deferred'),
       eventId:
         plan.type === 'withdrawal.plan.requested.v1'
           ? randomUUID()
@@ -586,9 +850,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         ).toISOString(),
       },
     });
-    await enqueueFanOut(tx, response, [
-      this.outputQueue(plan),
-    ]);
+    await enqueueFanOut(tx, response, [this.outputQueue(plan)]);
   }
 
   private async plan(plan: Plan) {
@@ -708,12 +970,64 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     if (execution?.state === 'planning') await this.prepare(execution);
   }
 
+  private async nativeDrainGuard(source: Wallet) {
+    if (
+      await this.db.tokenFeeReservation.findFirst({
+        where: {
+          source_wallet_id: source.id,
+          state: { in: ['reserved', 'uncertain', 'reverted'] },
+        },
+      })
+    )
+      throw new SweepDeferral('waiting_funds', 'Native fee dependency is still reserved');
+    const assets = await this.db.assetConfiguration.findMany({
+      where: {
+        domain_id: source.custody_domain_id!,
+        chain: source.chain,
+        network: source.network,
+        sweep_enabled: true,
+        standard: { in: ['erc20', 'spl'] },
+      },
+    });
+    for (const asset of assets) {
+      const c = tokenCertificateSchema.parse(asset.transfer_certificate),
+        planner = new TokenPlanner(this.rpc);
+      await planner.validateCertificate(c);
+      if (c.standard === 'erc20') {
+        for (const tag of ['finalized', 'pending']) {
+          const value = await this.rpc.call('ethereum', 'eth_call', [
+            {
+              to: c.contract,
+              data: '0x70a08231' + source.address!.slice(2).toLowerCase().padStart(64, '0'),
+            },
+            tag,
+          ]);
+          if (typeof value !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(value))
+            throw new SweepDeferral('unavailable', 'Token inventory is unavailable');
+          if (BigInt(value) > 0n)
+            throw new SweepDeferral(
+              'waiting_funds',
+              'Preserve native gas until certified token inventory is swept',
+            );
+        }
+      } else if (
+        (await planner.discoverOwnedAccounts(c, source.address!)).some((a) => BigInt(a.amount) > 0n)
+      )
+        throw new SweepDeferral(
+          'waiting_funds',
+          'Preserve native funds until owned token accounts are swept or reviewed',
+        );
+    }
+  }
+
   private async prepare(execution: CustodyExecution) {
     const plan = execution.plan as unknown as Plan;
     try {
       const wallets = await this.db.$transaction((tx) => this.authority(tx, plan));
+      if (plan.type === 'sweep.plan.requested.v1' && plan.data.asset.assetId.endsWith(':native'))
+        await this.nativeDrainGuard(wallets.source);
       if (!plan.data.asset.assetId.endsWith(':native')) {
-        await this.prepareToken(execution,plan,wallets);
+        await this.prepareToken(execution, plan, wallets);
         return;
       }
       const prepared = await this.planner.plan({
@@ -726,9 +1040,12 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
             : wallets.hot.address!,
         ...(plan.type !== 'sweep.plan.requested.v1' ? { amount: plan.data.amount } : {}),
       });
-      if(plan.type==='funding.plan.requested.v1') {
-        const budget=await this.db.tokenFeeReservation.findUniqueOrThrow({where:{id:plan.operationId}});
-        if(BigInt(prepared.maxFeeUnits)>BigInt(budget.maximum_fee_units)) throw new SweepDeferral('fee_budget','Funding fee quote exceeds reserved budget');
+      if (plan.type === 'funding.plan.requested.v1') {
+        const budget = await this.db.tokenFeeReservation.findUniqueOrThrow({
+          where: { id: plan.operationId },
+        });
+        if (BigInt(prepared.maxFeeUnits) > BigInt(budget.maximum_fee_units))
+          throw new SweepDeferral('fee_budget', 'Funding fee quote exceeds reserved budget');
       }
       const request = signSchema.parse({
         wallet: {
@@ -787,18 +1104,14 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         });
         await enqueueFanOut(
           tx,
-          this.output(
-            updated,
-            this.responseType(plan,'prepared'),
-            {
-              sourceWalletId: current.source_wallet_id,
-              destinationWalletId: current.hot_wallet_id,
-              amount: { asset: plan.data.asset, amount: prepared.amount },
-              preparationDigest: updated.preparation_digest,
-              maxFeeUnits: prepared.maxFeeUnits,
-              expiresAt: prepared.expiresAt,
-            },
-          ),
+          this.output(updated, this.responseType(plan, 'prepared'), {
+            sourceWalletId: current.source_wallet_id,
+            destinationWalletId: current.hot_wallet_id,
+            amount: { asset: plan.data.asset, amount: prepared.amount },
+            preparationDigest: updated.preparation_digest,
+            maxFeeUnits: prepared.maxFeeUnits,
+            expiresAt: prepared.expiresAt,
+          }),
           [this.outputQueue(plan)],
         );
       });
@@ -836,71 +1149,240 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async tokenCosts(tx: Prisma.TransactionClient, plan: Plan, prepared: TokenPreparation, source: Wallet, hot: Wallet) {
-    const {sponsor} = await this.tokenAuthority(tx,plan);
-    const payer=sponsor??source;
-    return {certificate:prepared.certificate,feePayerWalletId:payer.id,feePayerRegistryRevision:payer.registry_revision,
-      maximumFeeUnits:prepared.maxFeeUnits,maximumRentUnits:prepared.rentUnits,
-      ...(prepared.certificate.standard==='spl' && plan.type==='sweep.plan.requested.v1'?{rentCustodyWalletId:hot.id}:{}),
+  private async tokenCosts(
+    tx: Prisma.TransactionClient,
+    plan: Plan,
+    prepared: TokenPreparation,
+    source: Wallet,
+    hot: Wallet,
+  ) {
+    const { sponsor } = await this.tokenAuthority(tx, plan);
+    const payer = sponsor ?? source;
+    return {
+      certificate: prepared.certificate,
+      feePayerWalletId: payer.id,
+      feePayerRegistryRevision: payer.registry_revision,
+      maximumFeeUnits: prepared.maxFeeUnits,
+      maximumRentUnits: prepared.rentUnits,
+      ...(prepared.certificate.standard === 'spl' && plan.type === 'sweep.plan.requested.v1'
+        ? { rentCustodyWalletId: hot.id }
+        : {}),
     };
   }
 
   private async requestFunding(plan: Plan, customerWallet: Wallet, prepared: TokenPreparation) {
-    const management=await this.db.wallet.findFirstOrThrow({where:{custody_domain_id:plan.domainId,reset_epoch:plan.resetEpoch,chain:'ethereum',network:'11155111',custody_role:'management',account:1,active:true}});
-    const quote=await this.planner.plan({chain:'ethereum',network:'11155111',sourceAddress:management.address!,hotAddress:customerWallet.address!,amount:prepared.fundingShortfallUnits});
-    await this.db.$transaction(async tx=>{
-      const budget=await new TokenFeesService(this.db,this.rpc).reserve({domainId:plan.domainId,resetEpoch:plan.resetEpoch,customerId:plan.customerId,sourceWalletId:customerWallet.id,
-        managementWalletId:management.id,sourceRegistryRevision:customerWallet.registry_revision,managementRegistryRevision:management.registry_revision,
-        operationId:plan.operationId,attemptId:plan.attemptId,generation:plan.data.generation,certificate:prepared.certificate,kind:'gas_funding',principalUnits:prepared.fundingShortfallUnits,
-        maximumFeeUnits:quote.maxFeeUnits,maximumRentUnits:'0'},tx);
-      if(budget.state!=='reserved') return;
-      const request=budget.request as unknown as import('./token-fees.service.js').TokenFeeRequest;
-      const operationId=budget.id,attemptId=eventId([budget.id,'funding-attempt']);
-      const data={sourceWalletId:budget.management_wallet_id,destinationWalletId:budget.source_wallet_id,asset:{chain:'ethereum',network:'11155111',assetId:'token:ethereum:native'},
-        sourceRegistryRevision:request.managementRegistryRevision,hotRegistryRevision:request.sourceRegistryRevision,generation:request.generation,amount:budget.principal_units,
-        feeReservationId:budget.id,fundedAssetId:tokenAsset(request.certificate).assetId,certificateDigest:executionDigest(request.certificate)};
-      const requestDigest=executionDigest({domainId:plan.domainId,resetEpoch:plan.resetEpoch,customerId:plan.customerId,operationId,attemptId,policyVersion:plan.policyVersion,data});
-      const event=exchangeEventSchema.parse({...plan,type:'funding.plan.requested.v1',eventId:eventId([budget.id,'funding-plan']),causationId:plan.eventId,aggregateId:operationId,operationId,attemptId,requestDigest,data});
-      await enqueue(tx,QUEUES.wallet,event,`funding-plan:${budget.id}`);
+    const management = await this.db.wallet.findFirstOrThrow({
+      where: {
+        custody_domain_id: plan.domainId,
+        reset_epoch: plan.resetEpoch,
+        chain: 'ethereum',
+        network: '11155111',
+        custody_role: 'management',
+        account: 1,
+        active: true,
+      },
+    });
+    const quote = await this.planner.plan({
+      chain: 'ethereum',
+      network: '11155111',
+      sourceAddress: management.address!,
+      hotAddress: customerWallet.address!,
+      amount: prepared.fundingShortfallUnits,
+    });
+    await this.db.$transaction(async (tx) => {
+      const budget = await new TokenFeesService(this.db, this.rpc).reserve(
+        {
+          domainId: plan.domainId,
+          resetEpoch: plan.resetEpoch,
+          customerId: plan.customerId,
+          sourceWalletId: customerWallet.id,
+          managementWalletId: management.id,
+          sourceRegistryRevision: customerWallet.registry_revision,
+          managementRegistryRevision: management.registry_revision,
+          operationId: plan.operationId,
+          attemptId: plan.attemptId,
+          generation: plan.data.generation,
+          certificate: prepared.certificate,
+          kind: 'gas_funding',
+          principalUnits: prepared.fundingShortfallUnits,
+          maximumFeeUnits: quote.maxFeeUnits,
+          maximumRentUnits: '0',
+        },
+        tx,
+      );
+      if (budget.state !== 'reserved') return;
+      const request =
+        budget.request as unknown as import('./token-fees.service.js').TokenFeeRequest;
+      const operationId = budget.id,
+        attemptId = eventId([budget.id, 'funding-attempt']);
+      const data = {
+        sourceWalletId: budget.management_wallet_id,
+        destinationWalletId: budget.source_wallet_id,
+        asset: { chain: 'ethereum', network: '11155111', assetId: 'token:ethereum:native' },
+        sourceRegistryRevision: request.managementRegistryRevision,
+        hotRegistryRevision: request.sourceRegistryRevision,
+        generation: request.generation,
+        amount: budget.principal_units,
+        feeReservationId: budget.id,
+        fundedAssetId: tokenAsset(request.certificate).assetId,
+        certificateDigest: executionDigest(request.certificate),
+      };
+      const requestDigest = executionDigest({
+        domainId: plan.domainId,
+        resetEpoch: plan.resetEpoch,
+        customerId: plan.customerId,
+        operationId,
+        attemptId,
+        policyVersion: plan.policyVersion,
+        data,
+      });
+      const event = exchangeEventSchema.parse({
+        ...plan,
+        type: 'funding.plan.requested.v1',
+        eventId: eventId([budget.id, 'funding-plan']),
+        causationId: plan.eventId,
+        aggregateId: operationId,
+        operationId,
+        attemptId,
+        requestDigest,
+        data,
+      });
+      await enqueue(tx, QUEUES.wallet, event, `funding-plan:${budget.id}`);
     });
   }
 
-  private async prepareToken(execution: CustodyExecution, plan: Plan, wallets: {source:Wallet;hot:Wallet}) {
-    const {certificate,sponsor} = await this.db.$transaction(tx=>this.tokenAuthority(tx,plan));
-    if(certificate.standard==='erc20' && await this.db.tokenFeeReservation.findFirst({where:{source_wallet_id:wallets.source.id,kind:'gas_funding',state:{in:['reserved','uncertain','reverted']}}})) throw new SweepDeferral('waiting_funds','Prior funding dependency is not canonically settled and acknowledged');
-    const prepared = await new TokenPlanner(this.rpc).plan({certificate,
-      wallet:{chain:certificate.chain,network:certificate.network,seedId:wallets.source.seed_id,account:wallets.source.account,address:wallets.source.address!},
-      recipientOwner:plan.type==='withdrawal.plan.requested.v1'?plan.data.destination:wallets.hot.address!,
-      ...(plan.type==='withdrawal.plan.requested.v1'?{amount:plan.data.amount}:{}),
-      ...(certificate.standard==='spl'?{feePayer:{chain:'solana' as const,network:certificate.network,seedId:wallets.source.seed_id,account:sponsor?1:0,address:sponsor?.address??wallets.source.address!}}:{}),
+  private async prepareToken(
+    execution: CustodyExecution,
+    plan: Plan,
+    wallets: { source: Wallet; hot: Wallet },
+  ) {
+    const { certificate, sponsor } = await this.db.$transaction((tx) =>
+      this.tokenAuthority(tx, plan),
+    );
+    if (
+      certificate.standard === 'erc20' &&
+      (await this.db.tokenFeeReservation.findFirst({
+        where: {
+          source_wallet_id: wallets.source.id,
+          kind: 'gas_funding',
+          state: { in: ['reserved', 'uncertain', 'reverted'] },
+        },
+      }))
+    )
+      throw new SweepDeferral(
+        'waiting_funds',
+        'Prior funding dependency is not canonically settled and acknowledged',
+      );
+    const prepared = await new TokenPlanner(this.rpc).plan({
+      certificate,
+      wallet: {
+        chain: certificate.chain,
+        network: certificate.network,
+        seedId: wallets.source.seed_id,
+        account: wallets.source.account,
+        address: wallets.source.address!,
+      },
+      recipientOwner:
+        plan.type === 'withdrawal.plan.requested.v1' ? plan.data.destination : wallets.hot.address!,
+      ...(plan.type === 'withdrawal.plan.requested.v1' ? { amount: plan.data.amount } : {}),
+      ...(certificate.standard === 'spl'
+        ? {
+            feePayer: {
+              chain: 'solana' as const,
+              network: certificate.network,
+              seedId: wallets.source.seed_id,
+              account: sponsor ? 1 : 0,
+              address: sponsor?.address ?? wallets.source.address!,
+            },
+          }
+        : {}),
     });
     if (prepared.fundingShortfallUnits !== '0') {
-      if(certificate.standard==='erc20' && plan.type==='sweep.plan.requested.v1') await this.requestFunding(plan,wallets.source,prepared);
-      throw new SweepDeferral('waiting_funds','Token execution requires confirmed native fee funding');
+      if (certificate.standard === 'erc20' && plan.type === 'sweep.plan.requested.v1')
+        await this.requestFunding(plan, wallets.source, prepared);
+      throw new SweepDeferral(
+        'waiting_funds',
+        'Token execution requires confirmed native fee funding',
+      );
     }
-    await this.db.$transaction(async tx=>{
-      await lock(tx,`custody-source:${execution.source_wallet_id}`);
-      const current=await tx.custodyExecution.findUniqueOrThrow({where:{id:execution.id}});
-      if(current.state!=='planning') return;
-      await this.authority(tx,plan);
-      if (sponsor) await new TokenFeesService(this.db,this.rpc).reserve({domainId:plan.domainId,resetEpoch:plan.resetEpoch,customerId:plan.customerId,
-        sourceWalletId:wallets.source.id,managementWalletId:sponsor.id,sourceRegistryRevision:wallets.source.registry_revision,managementRegistryRevision:sponsor.registry_revision,
-        operationId:plan.operationId,attemptId:plan.attemptId,generation:plan.data.generation,certificate,kind:'spl_sponsorship',principalUnits:'0',maximumFeeUnits:prepared.maxFeeUnits,maximumRentUnits:prepared.rentUnits,
-      },tx);
-      const keys=prepared.resourceKeys.map(key=>`${plan.domainId}:${plan.resetEpoch}:${certificate.chain}:${certificate.network}:${key}`).sort();
-      for(const key of keys) {
-        await lock(tx,`execution-resource:${key}`);
-        if(await tx.executionResourceClaim.findFirst({where:{resource_key:key,active:true}})) throw new SweepDeferral('waiting_resources','Token/source/sponsor resource is reserved');
+    await this.db.$transaction(async (tx) => {
+      await lock(tx, `custody-source:${execution.source_wallet_id}`);
+      const current = await tx.custodyExecution.findUniqueOrThrow({ where: { id: execution.id } });
+      if (current.state !== 'planning') return;
+      await this.authority(tx, plan);
+      if (sponsor)
+        await new TokenFeesService(this.db, this.rpc).reserve(
+          {
+            domainId: plan.domainId,
+            resetEpoch: plan.resetEpoch,
+            customerId: plan.customerId,
+            sourceWalletId: wallets.source.id,
+            managementWalletId: sponsor.id,
+            sourceRegistryRevision: wallets.source.registry_revision,
+            managementRegistryRevision: sponsor.registry_revision,
+            operationId: plan.operationId,
+            attemptId: plan.attemptId,
+            generation: plan.data.generation,
+            certificate,
+            kind: 'spl_sponsorship',
+            principalUnits: '0',
+            maximumFeeUnits: prepared.maxFeeUnits,
+            maximumRentUnits: prepared.rentUnits,
+          },
+          tx,
+        );
+      const keys = prepared.resourceKeys
+        .map(
+          (key) =>
+            `${plan.domainId}:${plan.resetEpoch}:${certificate.chain}:${certificate.network}:${key}`,
+        )
+        .sort();
+      for (const key of keys) {
+        await lock(tx, `execution-resource:${key}`);
+        if (
+          await tx.executionResourceClaim.findFirst({ where: { resource_key: key, active: true } })
+        )
+          throw new SweepDeferral('waiting_resources', 'Token/source/sponsor resource is reserved');
       }
-      for(const key of keys) await tx.executionResourceClaim.create({data:{id:randomUUID(),resource_key:key,execution_id:current.id}});
-      const updated=await tx.custodyExecution.update({where:{id:current.id},data:{state:'prepared',prepared_request:json(prepared),preparation_digest:prepared.preparedDigest,
-        principal_units:prepared.request.transaction.amount,maximum_fee_units:prepared.maxFeeUnits,expires_at:new Date(prepared.expiresAt),next_check_at:new Date(prepared.expiresAt)}});
-      await tx.transaction.update({where:{id:current.transaction_id},data:{prepared:json(prepared.request.transaction)}});
-      await enqueueFanOut(tx,this.output(updated,plan.type==='withdrawal.plan.requested.v1'?'withdrawal.plan.prepared.v1':'sweep.plan.prepared.v1',{
-        sourceWalletId:current.source_wallet_id,destinationWalletId:current.hot_wallet_id,amount:{asset:plan.data.asset,amount:prepared.request.transaction.amount},
-        preparationDigest:prepared.preparedDigest,maxFeeUnits:prepared.maxFeeUnits,expiresAt:prepared.expiresAt,
-        tokenCosts:await this.tokenCosts(tx,plan,prepared,wallets.source,wallets.hot),
-      }),[plan.type==='withdrawal.plan.requested.v1'?QUEUES.wallet:QUEUES.sweep]);
+      for (const key of keys)
+        await tx.executionResourceClaim.create({
+          data: { id: randomUUID(), resource_key: key, execution_id: current.id },
+        });
+      const updated = await tx.custodyExecution.update({
+        where: { id: current.id },
+        data: {
+          state: 'prepared',
+          prepared_request: json(prepared),
+          preparation_digest: prepared.preparedDigest,
+          principal_units: prepared.request.transaction.amount,
+          maximum_fee_units: prepared.maxFeeUnits,
+          expires_at: new Date(prepared.expiresAt),
+          next_check_at: new Date(prepared.expiresAt),
+        },
+      });
+      await tx.transaction.update({
+        where: { id: current.transaction_id },
+        data: { prepared: json(prepared.request.transaction) },
+      });
+      await enqueueFanOut(
+        tx,
+        this.output(
+          updated,
+          plan.type === 'withdrawal.plan.requested.v1'
+            ? 'withdrawal.plan.prepared.v1'
+            : 'sweep.plan.prepared.v1',
+          {
+            sourceWalletId: current.source_wallet_id,
+            destinationWalletId: current.hot_wallet_id,
+            amount: { asset: plan.data.asset, amount: prepared.request.transaction.amount },
+            preparationDigest: prepared.preparedDigest,
+            maxFeeUnits: prepared.maxFeeUnits,
+            expiresAt: prepared.expiresAt,
+            tokenCosts: await this.tokenCosts(tx, plan, prepared, wallets.source, wallets.hot),
+          },
+        ),
+        [plan.type === 'withdrawal.plan.requested.v1' ? QUEUES.wallet : QUEUES.sweep],
+      );
     });
   }
 
@@ -926,12 +1408,23 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         where: { execution_id: current.id, active: true },
         data: { active: false, released_at: new Date() },
       });
-      await tx.tokenFeeReservation.updateMany({where:{state:'reserved',OR:[{id:current.operation_id},{request:{path:['operationId'],equals:current.operation_id}}]},data:{state:'released'}});
+      await tx.tokenFeeReservation.updateMany({
+        where: {
+          state: 'reserved',
+          OR: [
+            { kind: 'gas_funding', id: current.operation_id },
+            {
+              kind: 'spl_sponsorship',
+              request: { path: ['operationId'], equals: current.operation_id },
+            },
+          ],
+        },
+        data: { state: 'released' },
+      });
       const plan = current.plan as unknown as Plan;
       const response = exchangeEventSchema.parse({
         ...plan,
-        type:
-          this.responseType(plan,'deferred'),
+        type: this.responseType(plan, 'deferred'),
         eventId:
           plan.type === 'withdrawal.plan.requested.v1'
             ? randomUUID()
@@ -948,9 +1441,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
           ).toISOString(),
         },
       });
-      await enqueueFanOut(tx, response, [
-        this.outputQueue(plan),
-      ]);
+      await enqueueFanOut(tx, response, [this.outputQueue(plan)]);
     });
   }
 
@@ -979,6 +1470,10 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       if (!execution.expires_at || execution.expires_at.getTime() <= Date.now())
         throw new SweepDeferral('preparation_expired', 'Unsigned preparation expired');
       const token = this.tokenPreparation(execution);
+      if (plan.type === 'sweep.plan.requested.v1' && !token)
+        await this.nativeDrainGuard(
+          await this.db.wallet.findUniqueOrThrow({ where: { id: execution.source_wallet_id } }),
+        );
       if (token) await new TokenPlanner(this.rpc).revalidate(token);
       else await this.planner.revalidate(signSchema.parse(request), execution.maximum_fee_units!);
       await this.db.$transaction(async (tx) => {
@@ -991,72 +1486,154 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         if (current.expires_at!.getTime() <= Date.now())
           throw new SweepDeferral('preparation_expired', 'Unsigned preparation expired');
         const token = this.tokenPreparation(current);
-        const tokenAuthority = token ? await this.tokenAuthority(tx,plan) : undefined;
-        const authorization = token ? signTokenExecutionAuthorization({version:1,domainId:plan.domainId,resetEpoch:plan.resetEpoch,seedId:source.seed_id,customerId:plan.customerId,
-          operationId:current.operation_id,attemptId:current.attempt_id,requestDigest:current.request_digest,preparationDigest:token.preparedDigest,requestHash:executionDigest(token.request),
-          certificate:token.certificate,policyVersion:'exchange-token-v1',recipientPolicy:'external-wallet-v1',expiresAt:token.expiresAt,
-          ...(plan.type==='withdrawal.plan.requested.v1'?{purpose:'token_withdrawal' as const,reservationId:plan.data.reservationId,source:{walletId:source.id,role:'hot' as const,account:0 as const,path:source.path,address:source.address!,registryRevision:source.registry_revision},target:{role:'external' as const,address:plan.data.destination}}
-          :{purpose:'token_sweep' as const,source:{walletId:source.id,role:'customer_deposit' as const,account:source.account,path:source.path,address:source.address!,registryRevision:source.registry_revision},target:{walletId:hot.id,role:'hot' as const,account:0 as const,path:hot.path,address:hot.address!,registryRevision:hot.registry_revision,seedId:hot.seed_id,domainId:plan.domainId}}),
-          ...(tokenAuthority?.sponsor?{sponsor:{walletId:tokenAuthority.sponsor.id,role:'management' as const,account:1 as const,path:tokenAuthority.sponsor.path,address:tokenAuthority.sponsor.address!,registryRevision:tokenAuthority.sponsor.registry_revision}}:{}),
-        },this.config.authorityPrivateKey!) : signExecutionAuthorization(
-          {
-            version: 1,
-            ...(plan.type === 'funding.plan.requested.v1' ? {
-              purpose:'native_funding' as const,fundingReservationId:plan.data.feeReservationId,fundedAssetId:plan.data.fundedAssetId,certificateDigest:plan.data.certificateDigest,
-              source:{walletId:source.id,role:'management' as const,account:1 as const,path:source.path,address:source.address!,registryRevision:source.registry_revision},
-              target:{walletId:hot.id,role:'customer_deposit' as const,account:hot.account,path:hot.path,address:hot.address!,registryRevision:hot.registry_revision,seedId:hot.seed_id,domainId:plan.domainId},
-            } : plan.type === 'withdrawal.plan.requested.v1'
-              ? {
-                  purpose: 'native_withdrawal' as const,
-                  reservationId: plan.data.reservationId,
-                  source: {
-                    walletId: source.id,
-                    role: 'hot' as const,
-                    account: 0 as const,
-                    path: source.path,
-                    address: source.address!,
-                    registryRevision: source.registry_revision,
-                  },
-                  target: { role: 'external' as const, address: plan.data.destination },
-                }
-              : {
-                  purpose: 'native_sweep' as const,
-                  source: {
-                    walletId: source.id,
-                    role: 'customer_deposit' as const,
-                    account: source.account,
-                    path: source.path,
-                    address: source.address!,
-                    registryRevision: source.registry_revision,
-                  },
-                  target: {
-                    walletId: hot.id,
-                    role: 'hot' as const,
-                    account: 0 as const,
-                    path: hot.path,
-                    address: hot.address!,
-                    seedId: hot.seed_id,
-                    domainId: plan.domainId,
-                    registryRevision: hot.registry_revision,
-                  },
-                }),
-            domainId: plan.domainId,
-            resetEpoch: plan.resetEpoch,
-            seedId: source.seed_id,
-            customerId: plan.customerId,
-            asset: nativeExecutionAssetSchema.parse(plan.data.asset),
-            policyVersion: 'exchange-financial-v1',
-            operationId: current.operation_id,
-            attemptId: current.attempt_id,
-            requestDigest: current.request_digest,
-            preparationDigest: current.preparation_digest!,
-            principalUnits: current.principal_units!,
-            maxFeeUnits: current.maximum_fee_units!,
-            expiresAt: current.expires_at!.toISOString(),
-            requestHash: executionRequestDigest(signSchema.parse(request)),
-          },
-          this.config.authorityPrivateKey!,
-        );
+        const tokenAuthority = token ? await this.tokenAuthority(tx, plan) : undefined;
+        const authorization = token
+          ? signTokenExecutionAuthorization(
+              {
+                version: 1,
+                domainId: plan.domainId,
+                resetEpoch: plan.resetEpoch,
+                seedId: source.seed_id,
+                customerId: plan.customerId,
+                operationId: current.operation_id,
+                attemptId: current.attempt_id,
+                requestDigest: current.request_digest,
+                preparationDigest: token.preparedDigest,
+                requestHash: executionDigest(token.request),
+                certificate: token.certificate,
+                policyVersion: 'exchange-token-v1',
+                recipientPolicy: 'external-wallet-v1',
+                expiresAt: token.expiresAt,
+                ...(plan.type === 'withdrawal.plan.requested.v1'
+                  ? {
+                      purpose: 'token_withdrawal' as const,
+                      reservationId: plan.data.reservationId,
+                      source: {
+                        walletId: source.id,
+                        role: 'hot' as const,
+                        account: 0 as const,
+                        path: source.path,
+                        address: source.address!,
+                        registryRevision: source.registry_revision,
+                      },
+                      target: { role: 'external' as const, address: plan.data.destination },
+                    }
+                  : {
+                      purpose: 'token_sweep' as const,
+                      source: {
+                        walletId: source.id,
+                        role: 'customer_deposit' as const,
+                        account: source.account,
+                        path: source.path,
+                        address: source.address!,
+                        registryRevision: source.registry_revision,
+                      },
+                      target: {
+                        walletId: hot.id,
+                        role: 'hot' as const,
+                        account: 0 as const,
+                        path: hot.path,
+                        address: hot.address!,
+                        registryRevision: hot.registry_revision,
+                        seedId: hot.seed_id,
+                        domainId: plan.domainId,
+                      },
+                    }),
+                ...(tokenAuthority?.sponsor
+                  ? {
+                      sponsor: {
+                        walletId: tokenAuthority.sponsor.id,
+                        role: 'management' as const,
+                        account: 1 as const,
+                        path: tokenAuthority.sponsor.path,
+                        address: tokenAuthority.sponsor.address!,
+                        registryRevision: tokenAuthority.sponsor.registry_revision,
+                      },
+                    }
+                  : {}),
+              },
+              this.config.authorityPrivateKey!,
+            )
+          : signExecutionAuthorization(
+              {
+                version: 1,
+                ...(plan.type === 'funding.plan.requested.v1'
+                  ? {
+                      purpose: 'native_funding' as const,
+                      fundingReservationId: plan.data.feeReservationId,
+                      fundedAssetId: plan.data.fundedAssetId,
+                      certificateDigest: plan.data.certificateDigest,
+                      source: {
+                        walletId: source.id,
+                        role: 'management' as const,
+                        account: 1 as const,
+                        path: source.path,
+                        address: source.address!,
+                        registryRevision: source.registry_revision,
+                      },
+                      target: {
+                        walletId: hot.id,
+                        role: 'customer_deposit' as const,
+                        account: hot.account,
+                        path: hot.path,
+                        address: hot.address!,
+                        registryRevision: hot.registry_revision,
+                        seedId: hot.seed_id,
+                        domainId: plan.domainId,
+                      },
+                    }
+                  : plan.type === 'withdrawal.plan.requested.v1'
+                    ? {
+                        purpose: 'native_withdrawal' as const,
+                        reservationId: plan.data.reservationId,
+                        source: {
+                          walletId: source.id,
+                          role: 'hot' as const,
+                          account: 0 as const,
+                          path: source.path,
+                          address: source.address!,
+                          registryRevision: source.registry_revision,
+                        },
+                        target: { role: 'external' as const, address: plan.data.destination },
+                      }
+                    : {
+                        purpose: 'native_sweep' as const,
+                        source: {
+                          walletId: source.id,
+                          role: 'customer_deposit' as const,
+                          account: source.account,
+                          path: source.path,
+                          address: source.address!,
+                          registryRevision: source.registry_revision,
+                        },
+                        target: {
+                          walletId: hot.id,
+                          role: 'hot' as const,
+                          account: 0 as const,
+                          path: hot.path,
+                          address: hot.address!,
+                          seedId: hot.seed_id,
+                          domainId: plan.domainId,
+                          registryRevision: hot.registry_revision,
+                        },
+                      }),
+                domainId: plan.domainId,
+                resetEpoch: plan.resetEpoch,
+                seedId: source.seed_id,
+                customerId: plan.customerId,
+                asset: nativeExecutionAssetSchema.parse(plan.data.asset),
+                policyVersion: 'exchange-financial-v1',
+                operationId: current.operation_id,
+                attemptId: current.attempt_id,
+                requestDigest: current.request_digest,
+                preparationDigest: current.preparation_digest!,
+                principalUnits: current.principal_units!,
+                maxFeeUnits: current.maximum_fee_units!,
+                expiresAt: current.expires_at!.toISOString(),
+                requestHash: executionRequestDigest(signSchema.parse(request)),
+              },
+              this.config.authorityPrivateKey!,
+            );
         const updated = await tx.custodyExecution.update({
           where: { id: current.id },
           data: {
@@ -1070,10 +1647,29 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
           where: { id: current.transaction_id },
           data: { status: 'signing' },
         });
-        if (token || plan.type==='funding.plan.requested.v1') await tx.tokenFeeReservation.updateMany({where:{state:'reserved',OR:[{id:current.operation_id},{request:{path:['operationId'],equals:current.operation_id}}]},data:{state:'uncertain'}});
-        if (token || event.type === 'withdrawal.execute.requested.v1' || event.type === 'funding.execute.requested.v1') {
-          const costs=token ? await this.tokenCosts(tx,plan,token,source,hot) : undefined;
-          if (token && canonical('tokenCosts' in event.data ? event.data.tokenCosts : undefined) !== canonical(costs)) throw new ActionRejectedError('Token execution fee/rent binding mismatch');
+        if (token || plan.type === 'funding.plan.requested.v1')
+          await tx.tokenFeeReservation.updateMany({
+            where: {
+              state: 'reserved',
+              OR: [
+                { id: current.operation_id },
+                { request: { path: ['operationId'], equals: current.operation_id } },
+              ],
+            },
+            data: { state: 'uncertain' },
+          });
+        if (
+          token ||
+          event.type === 'withdrawal.execute.requested.v1' ||
+          event.type === 'funding.execute.requested.v1'
+        ) {
+          const costs = token ? await this.tokenCosts(tx, plan, token, source, hot) : undefined;
+          if (
+            token &&
+            canonical('tokenCosts' in event.data ? event.data.tokenCosts : undefined) !==
+              canonical(costs)
+          )
+            throw new ActionRejectedError('Token execution fee/rent binding mismatch');
           await enqueueFanOut(tx, event, [QUEUES.ledger, QUEUES.activity]);
         }
         if (event.type === 'withdrawal.execute.requested.v1') {
@@ -1086,7 +1682,9 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
           tx,
           QUEUES.signer,
           messageSchema.parse({
-            ...(token ? {type:'transaction.token.sign' as const,prepared:token} : {type:'transaction.custody.sign' as const,request:signSchema.parse(request)}),
+            ...(token
+              ? { type: 'transaction.token.sign' as const, prepared: token }
+              : { type: 'transaction.custody.sign' as const, request: signSchema.parse(request) }),
             transactionId: current.transaction_id,
             operationId: current.operation_id,
             attemptId: current.attempt_id,
@@ -1150,11 +1748,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         },
         execution.revision,
       ),
-      [
-        QUEUES.ledger,
-        QUEUES.activity,
-        this.outputQueue(execution.plan as unknown as Plan),
-      ],
+      [QUEUES.ledger, QUEUES.activity, this.outputQueue(execution.plan as unknown as Plan)],
     );
   }
 
@@ -1280,7 +1874,9 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
             requestDigest: current.request_digest,
             preparationDigest: current.preparation_digest!,
             preparedRequest: request,
-            ...(this.tokenPreparation(current)?{tokenPreparation:this.tokenPreparation(current)}:{}),
+            ...(this.tokenPreparation(current)
+              ? { tokenPreparation: this.tokenPreparation(current) }
+              : {}),
             signerAttestation: result.signerAttestation,
           },
         },
@@ -1426,17 +2022,26 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     let observation;
     try {
       const token = this.tokenPreparation(execution);
-      observation = token ? await new TokenObserver(this.rpc).observe(token,signedSchema.parse(transaction.signed),
-        execution.inclusion && !execution.reversed ? execution.inclusion as {blockHash:string;blockHeight:string} : undefined) : await this.planner.observe({
-        chain: request.wallet.chain as 'ethereum' | 'bitcoin' | 'solana',
-        network: request.wallet.network!,
-        hash: transaction.tx_hash!,
-        request: signSchema.parse(request),
-        signed: signedSchema.parse(transaction.signed),
-        ...(execution.inclusion && !execution.reversed
-          ? { priorInclusion: execution.inclusion as { blockHash: string; blockHeight: string } }
-          : {}),
-      });
+      observation = token
+        ? await new TokenObserver(this.rpc).observe(
+            token,
+            signedSchema.parse(transaction.signed),
+            execution.inclusion && !execution.reversed
+              ? (execution.inclusion as { blockHash: string; blockHeight: string })
+              : undefined,
+          )
+        : await this.planner.observe({
+            chain: request.wallet.chain as 'ethereum' | 'bitcoin' | 'solana',
+            network: request.wallet.network!,
+            hash: transaction.tx_hash!,
+            request: signSchema.parse(request),
+            signed: signedSchema.parse(transaction.signed),
+            ...(execution.inclusion && !execution.reversed
+              ? {
+                  priorInclusion: execution.inclusion as { blockHash: string; blockHeight: string },
+                }
+              : {}),
+          });
     } catch {
       await this.db.custodyExecution.update({
         where: { id: execution.id },
@@ -1466,7 +2071,16 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       if (observation.state === 'pending') return;
       if (observation.state === 'reverted') {
         if (current.reversed) return;
-        await tx.tokenFeeReservation.updateMany({where:{state:'settled',OR:[{id:current.operation_id},{request:{path:['operationId'],equals:current.operation_id}}]},data:{state:'reverted',actual_units:null,settled_at:null}});
+        await tx.tokenFeeReservation.updateMany({
+          where: {
+            state: 'settled',
+            OR: [
+              { id: current.operation_id },
+              { request: { path: ['operationId'], equals: current.operation_id } },
+            ],
+          },
+          data: { state: 'reverted', actual_units: null, settled_at: null },
+        });
         const other = await tx.custodyExecution.findFirst({
           where: {
             source_wallet_id: current.source_wallet_id,
@@ -1570,9 +2184,20 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
               transactionHash: transaction.tx_hash,
               actualFees:
                 BigInt(observation.actualFeeUnits) > 0n
-                  ? [{ asset: {chain:plan.data.asset.chain,network:plan.data.asset.network,assetId:`token:${plan.data.asset.chain}:native`}, amount: observation.actualFeeUnits }]
+                  ? [
+                      {
+                        asset: {
+                          chain: plan.data.asset.chain,
+                          network: plan.data.asset.network,
+                          assetId: `token:${plan.data.asset.chain}:native`,
+                        },
+                        amount: observation.actualFeeUnits,
+                      },
+                    ]
                   : [],
-              ...('actualRentUnits' in observation ? {actualRentUnits:observation.actualRentUnits} : {}),
+              ...('actualRentUnits' in observation
+                ? { actualRentUnits: observation.actualRentUnits }
+                : {}),
               outcome: observation.state === 'confirmed' ? 'confirmed' : 'failed',
             },
             updated.settlement_revision,
@@ -1586,9 +2211,39 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         !updated.reversed &&
         updated.terminal_proof_revision < updated.settlement_revision
       ) {
-        if (this.tokenPreparation(updated) || (updated.plan as unknown as Plan).type==='funding.plan.requested.v1') {
-          const rent='actualRentUnits' in observation ? BigInt(typeof observation.actualRentUnits==='string'?observation.actualRentUnits:'0') : 0n;
-          await tx.tokenFeeReservation.updateMany({where:{state:{in:['uncertain','reverted']},OR:[{id:current.operation_id},{request:{path:['operationId'],equals:current.operation_id}}]},data:{state:'settled',actual_units:(BigInt(observation.actualFeeUnits??'0')+rent+((updated.plan as unknown as Plan).type==='funding.plan.requested.v1' && observation.state==='confirmed'?BigInt(updated.principal_units!):0n)).toString(),settled_at:new Date()}});
+        if (
+          this.tokenPreparation(updated) ||
+          (updated.plan as unknown as Plan).type === 'funding.plan.requested.v1'
+        ) {
+          const rent =
+            'actualRentUnits' in observation
+              ? BigInt(
+                  typeof observation.actualRentUnits === 'string'
+                    ? observation.actualRentUnits
+                    : '0',
+                )
+              : 0n;
+          await tx.tokenFeeReservation.updateMany({
+            where: {
+              state: { in: ['uncertain', 'reverted'] },
+              OR: [
+                { id: current.operation_id },
+                { request: { path: ['operationId'], equals: current.operation_id } },
+              ],
+            },
+            data: {
+              state: 'settled',
+              actual_units: (
+                BigInt(observation.actualFeeUnits ?? '0') +
+                rent +
+                ((updated.plan as unknown as Plan).type === 'funding.plan.requested.v1' &&
+                observation.state === 'confirmed'
+                  ? BigInt(updated.principal_units!)
+                  : 0n)
+              ).toString(),
+              settled_at: new Date(),
+            },
+          });
         }
         const retired = await tx.custodyExecution.update({
           where: { id: updated.id },

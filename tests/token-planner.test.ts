@@ -541,3 +541,17 @@ test('private token queue signs only an independently authorized preparation and
   assert.equal(rejected.type, 'transaction.custody.rejected');
   assert.throws(() => service.execute(command), /Unsupported signer/);
 });
+
+test('Signed ERC-20 preparation remains retryable after authorization expiry; unsigned preparations expire', async () => {
+  const planner = new TokenPlanner(ethRpc());
+  const plan = await planner.plan({
+    certificate: ethCertificate,
+    wallet: wallet('ethereum', 10),
+    recipientOwner: wallet('ethereum', 0).address,
+  });
+  plan.expiresAt = new Date(Date.now() - 1000).toISOString();
+  const { preparedDigest: _old, ...evidence } = plan;
+  plan.preparedDigest = executionDigest(evidence);
+  await assert.rejects(planner.revalidate(plan), deferral('preparation_expired'));
+  await planner.revalidate(plan, true);
+});

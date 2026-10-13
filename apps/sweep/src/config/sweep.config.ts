@@ -6,7 +6,8 @@ export const sweepConfig = registerAs('sweep', () => {
   if (native !== 'true' && native !== 'false')
     throw new Error('ENABLE_NATIVE_SWEEPS must be true or false');
   const tokens = process.env.ENABLE_TOKEN_EXECUTION ?? 'false';
-  if (!['true','false'].includes(tokens)) throw new Error('ENABLE_TOKEN_EXECUTION must be true or false');
+  if (!['true', 'false'].includes(tokens))
+    throw new Error('ENABLE_TOKEN_EXECUTION must be true or false');
   return {
     databaseUrl:
       process.env.SWEEP_DATABASE_URL ??

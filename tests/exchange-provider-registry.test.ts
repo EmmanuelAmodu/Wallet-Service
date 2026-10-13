@@ -1111,3 +1111,42 @@ test(
     assert.equal(provider.backfills[0].throughCursor, '100');
   },
 );
+
+test('Token coverage requires the selected provider, token history and Solana owned-account certification', () => {
+  const tokens: ProviderCertification = {
+    ...certificate,
+    assetScope: 'native-and-transfer-tokens',
+    tokenTransferCoverage: true,
+    tokenHistoryCoverage: true,
+  };
+  const provider = (certifications: ProviderCertification[]) =>
+    new HttpExchangeWatchProvider({
+      name: 'quicknode',
+      url: 'https://provider.example',
+      apiKey: 'fixture-key',
+      nativeTraceMode: 'callTracer',
+      certifications,
+    });
+  assert.equal(provider([certificate]).tokenCertified('ethereum', '11155111'), false);
+  assert.equal(provider([tokens]).tokenCertified('ethereum', '11155111'), true);
+  assert.equal(provider([tokens]).tokenCertified('ethereum', '1'), false);
+  assert.equal(
+    provider([certificate, { ...tokens, provider: 'bitcoin-core' }]).tokenCertified(
+      'ethereum',
+      '11155111',
+    ),
+    false,
+  );
+  const solana: ProviderCertification = { ...tokens, chain: 'solana', network: 'fixture-solana' };
+  assert.equal(provider([solana]).tokenCertified('solana', 'fixture-solana'), false);
+  assert.equal(
+    provider([{ ...solana, ownedTokenAccountCoverage: true }]).tokenCertified(
+      'solana',
+      'fixture-solana',
+    ),
+    true,
+  );
+  assert.throws(() =>
+    providerCertificationSchema.parse({ ...tokens, tokenHistoryCoverage: undefined }),
+  );
+});

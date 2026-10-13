@@ -411,7 +411,7 @@ Exit: all required phase gates pass, enabled assets reconcile end to end, and ro
 
 ### Phase 9 — Optional follow-up backlog
 
-After initial acceptance, add certified withdrawal batching/concurrency, bounded EVM nonce windows, optional EVM batch contracts, multiple seed-isolated domains/rotation, an explicit internal-transfer API, or a separately owned Treasury service when justified. Each expansion needs its own resource, signing, accounting, and recovery verification.
+After initial acceptance, add certified withdrawal batching/concurrency, bounded EVM nonce windows, multiple seed-isolated domains/rotation, an explicit internal-transfer API, or a separately owned Treasury service when justified. Each expansion needs its own resource, signing, accounting, and recovery verification.
 
 These tasks are optional and do not block the initial serialized hot-wallet scheduler. Enable each only after its independent certification passes.
 
@@ -456,6 +456,8 @@ The recommendations above combine the current repository implementation with the
 
 Validate the exact installed Wallet Core protobuf/signing capabilities before implementing token and multisigner adapters. Protocol support does not establish support in the current signer implementation.
 
-## Phase 6 implementation progress — 11 October
+## Phase 6 implementation completion — 12 October
 
-Wallet Core capability verification and transfer-only token preparation, signing authorization and canonical observation components are implemented. Native Ethereum and Solana execution now enforce the external-wallet recipient policy during preparation/revalidation and dispatch preflight. Token components are not yet admitted by the existing native execution queues or public withdrawal API. Private token signing, durable fee-budget reservations, the known-accounted-token/native ordering barrier and sponsored-fee/rent Ledger postings are implemented. Management funding dispatch/confirmation, canonical token inventory/residuals, provider/token registry coverage and Wallet/Broadcast token holds/outcomes must still be connected before token deposits/withdrawals are enabled. See [Phase 6 implementation notes](exchange-wallet-phase6.md) and the task checklist for the remaining work.
+Transfer-only ERC-20/SPL custody is integrated across Wallet, Sweep, Signer, Broadcast, Listener and Ledger. Management1 funding/sponsorship, durable token/native resource claims, token-specific historical watches, owned-account residual repair, hot0 withdrawals against original holds, fee/rent accounting and canonical reversal are implemented. Deterministic PostgreSQL lifecycle tests supplement adapter/signature and recovery coverage. See [Phase 6 implementation and acceptance notes](exchange-wallet-phase6.md) and the completed P6 task checklist.
+
+Live activation still requires the separate QuickNode gateway deployment/certification, actual asset certificates, native fee capital recorded in Ledger, application migrations and deployment canaries. No real token is enabled; all token feature flags default to false. General contract calls, approvals, token account closure and EVM batch contracts are excluded. Automatic treasury replenishment and signed replacements remain later work.

@@ -14,7 +14,10 @@ import {
   custodySignedSchema,
   custodyRejectedSchema,
 } from '../../shared/src/execution-contracts.js';
-import { tokenPreparationSchema, tokenSignRequestSchema } from '../../shared/src/token-contracts.js';
+import {
+  tokenPreparationSchema,
+  tokenSignRequestSchema,
+} from '../../shared/src/token-contracts.js';
 import { signerAttestationSchema } from '../../shared/src/execution-authorization.js';
 
 export const QUEUES = {
@@ -103,7 +106,7 @@ export const broadcastSnapshotSchema = z
       .extend({
         domainId: z.string().min(1).max(128),
         resetEpoch: z.string().min(1).max(128),
-        preparedRequest: z.union([signSchema,tokenSignRequestSchema]),
+        preparedRequest: z.union([signSchema, tokenSignRequestSchema]),
         tokenPreparation: tokenPreparationSchema.optional(),
         signerAttestation: signerAttestationSchema,
       })

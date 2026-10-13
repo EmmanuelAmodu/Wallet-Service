@@ -600,7 +600,14 @@ export class NativeSweepPlanner {
       priority > maxFee
     )
       defer('fee_budget', 'Prepared Ethereum fee authorization is inconsistent with policy');
-    budget(amount, fee, 1_000_000_000_000_000n, 5_000_000_000_000_000n, input.wallet.account === 0);
+    // Hot withdrawals and purpose-authorized management1 funding are exact payments.
+    budget(
+      amount,
+      fee,
+      1_000_000_000_000_000n,
+      5_000_000_000_000_000n,
+      input.wallet.account === 0 || input.wallet.account === 1,
+    );
     const [
       finalizedRaw,
       pendingRaw,

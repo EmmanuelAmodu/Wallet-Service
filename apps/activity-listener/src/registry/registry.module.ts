@@ -7,8 +7,8 @@ import { ActivityRegistryService } from './registry.service.js';
 import { ExchangeProviderModule } from '../provider/provider.module.js';
 
 @Module({
-  imports: [ChainModule,ActivityPrismaModule, MessagingModule, ExchangeProviderModule],
-  providers: [ActivityRegistryService,TokenRegistryService],
-  exports: [ActivityRegistryService,TokenRegistryService],
+  imports: [ChainModule, ActivityPrismaModule, MessagingModule, ExchangeProviderModule],
+  providers: [ActivityRegistryService, TokenRegistryService],
+  exports: [ActivityRegistryService, TokenRegistryService],
 })
 export class ActivityRegistryModule {}
