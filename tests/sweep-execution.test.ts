@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import 'reflect-metadata';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -22,11 +23,16 @@ async function fixture() {
   const customerId = randomUUID(),
     walletId = randomUUID(),
     hotWalletId = randomUUID();
-  const service = new SweepService(db!, auth, {
-    domainId,
-    enableNativeSweeps: true,
-    retryDelayMs: 0,
-  });
+  const service = new SweepService(
+    db!,
+    auth,
+    {
+      domainId,
+      enableNativeSweeps: true,
+      retryDelayMs: 0,
+    },
+    acceptanceRollout,
+  );
   const event = (type: string, data: unknown, extra: Record<string, unknown> = {}): ExchangeEvent =>
     exchangeEventSchema.parse({
       schemaVersion: 1,
@@ -692,7 +698,7 @@ test(
   { skip: !enabled },
   async () => {
     const f = await fixture();
-    const disabled = new SweepService(db!, auth, { domainId: f.domainId });
+    const disabled = new SweepService(db!, auth, { domainId: f.domainId }, acceptanceRollout);
     await disabled.handle(
       f.event('deposit.credited.v1', {
         depositId: randomUUID(),

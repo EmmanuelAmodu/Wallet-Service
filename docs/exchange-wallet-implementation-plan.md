@@ -463,8 +463,14 @@ Transfer-only ERC-20/SPL custody is integrated across Wallet, Sweep, Signer, Bro
 Live activation still requires the separate QuickNode gateway deployment/certification, actual asset certificates, native fee capital recorded in Ledger, application migrations and deployment canaries. No real token is enabled; all token feature flags default to false. General contract calls, approvals, token account closure and EVM batch contracts are excluded. Automatic treasury replenishment and signed replacements remain later work.
 
 
-## Phase 7 implementation — 13 October
+## Phase 7 implementation — 14 October 2026
 
 Wallet now schedules canonical custody samples and owns audited private recovery commands, management funding gates, alerts and metric projections. Ledger retains immutable per-wallet custody comparisons, per-asset liability/equity/fee/deficit explanations and journal watermarks. Repair requests travel through the existing private queues to Ledger, Sweep, Listener and Broadcast; original holds, resource claims and signed bytes remain authoritative. Provider subscriptions remain customer-only. Domain recovery requires complete fresh evidence and Ledger approval, and a later quarantine defeats stale approvals. See [Phase 7 controls and runbooks](exchange-wallet-phase7.md).
 
 Monitoring is opt-in and no financial execution flag is enabled by this change. Deploy Wallet/Ledger migrations and provision a distinct operations credential before using the new private controls. Customer thawing, arbitrary financial adjustments, automatic replacements and treasury replenishment are not implicit recovery actions.
+
+## Phase 8 implementation — 14 October 2026
+
+Independent rollout controls and a scoped canary now cover new address issuance, finality credit, native/token sweeps, management funding and native/token withdrawals. Read-only native scheduling previews do not create financial state. The repository provides a repeatable disposable PostgreSQL/Redis acceptance runner with stable-source evidence and cleanup, plus actual signed EVM/local Bitcoin and opt-in Solana Devnet smoke runners.
+
+Local native EVM/Bitcoin smoke passed. Solana Devnet funding returned HTTP 429, so its acceptance remains open. Live token certification, separate QuickNode gateway acceptance and a deployed canary are required before those capabilities are activated. No application environment or financial records were reset or enabled. See [Phase 8 acceptance and rollout/rollback](exchange-wallet-phase8.md).

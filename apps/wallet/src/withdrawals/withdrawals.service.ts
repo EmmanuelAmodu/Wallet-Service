@@ -1,4 +1,11 @@
 import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  assertRollout,
+} from '../../../../packages/shared/src/rollout.config.js';
+import {
+  Optional,
   BadRequestException,
   ConflictException,
   Inject,
@@ -98,6 +105,9 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
     private readonly auth: MessageAuth,
     @Inject(walletConfig.KEY) private readonly settings: WalletConfig,
     @Inject(executionConfig.KEY) private readonly execution: ExecutionSettings,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   onModuleInit() {
@@ -207,6 +217,10 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
           throw new ConflictException('Idempotency key was used for a different withdrawal');
         return previous;
       }
+      assertRollout(this.rollout, 'withdrawals', {
+        domainId: this.settings.domainId!,
+        ...parsed.asset,
+      });
       if (
         !(parsed.asset.assetId.endsWith(':native')
           ? this.execution.withdrawalsEnabled

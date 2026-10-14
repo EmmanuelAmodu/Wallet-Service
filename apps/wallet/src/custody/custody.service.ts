@@ -1,4 +1,11 @@
 import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  assertRollout,
+} from '../../../../packages/shared/src/rollout.config.js';
+import {
+  Optional,
   BadRequestException,
   ConflictException,
   Inject,
@@ -70,6 +77,9 @@ export class CustodyService {
     @Inject(walletConfig.KEY) private readonly config: WalletConfig,
     @Inject(exchangeApiConfig.KEY) private readonly exchange: ExchangeApiSettings,
     @Inject(queueConfig.KEY) private readonly queue: Pick<QueueConfig, 'resetEpoch'>,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   private domainId() {
@@ -299,6 +309,7 @@ export class CustodyService {
       await this.enqueueDerivation(tx, existing);
       return existing;
     }
+    assertRollout(this.rollout, 'addresses', { domainId, chain, network });
     return this.ensureWallet(
       tx,
       chain,

@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { signSchema } from '../packages/shared/src/contracts.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -169,6 +170,7 @@ function worker(
     } as BroadcastRpcService,
     { ...config, ...overrides },
     { observe } as unknown as NativeSweepPlanner,
+    acceptanceRollout,
   );
 }
 
@@ -429,7 +431,13 @@ test(
         return { ...included, state: 'pending' as const };
       },
     } as unknown as NativeSweepPlanner;
-    const service = new BroadcastService(db, {} as BroadcastRpcService, config, planner);
+    const service = new BroadcastService(
+      db,
+      {} as BroadcastRpcService,
+      config,
+      planner,
+      acceptanceRollout,
+    );
     await service.execute(f.action, false);
     state = 'outage';
     const confirm = {

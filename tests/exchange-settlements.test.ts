@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import 'reflect-metadata';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,7 +38,7 @@ const db = databaseUrl ? new LedgerPrismaService({ databaseUrl }) : undefined;
 const config = { resetEpoch: 'exchange-settlements-test' };
 const journal = new JournalService(new AccountsService());
 const registry = db ? new ExchangeRegistryService(db) : undefined;
-const deposits = db ? new DepositsService(db, journal, config) : undefined;
+const deposits = db ? new DepositsService(db, journal, config, acceptanceRollout) : undefined;
 const reservations = db ? new ReservationsService(db, journal, config) : undefined;
 const settlements = db ? new SettlementsService(db, journal, reservations!) : undefined;
 const sweepDatabaseUrl = process.env.TEST_SWEEP_DATABASE_URL;
@@ -619,10 +620,15 @@ test(
         `settlement-reorg:${execution.operationId}:2:sweep`,
       ]),
     );
-    const sweep = new SweepService(sweepDb!, new MessageAuth('s'.repeat(64), config.resetEpoch), {
-      domainId: f.domainId,
-      enableNativeSweeps: true,
-    });
+    const sweep = new SweepService(
+      sweepDb!,
+      new MessageAuth('s'.repeat(64), config.resetEpoch),
+      {
+        domainId: f.domainId,
+        enableNativeSweeps: true,
+      },
+      acceptanceRollout,
+    );
     for (const delivery of [...committed, ...reversed]) {
       const result = exchangeEventSchema.parse(delivery.payload);
       await sweep.handle(result);
@@ -666,9 +672,14 @@ test(
       assert.deepEqual(deliveries[0].payload, deliveries[1].payload);
       const event = exchangeEventSchema.parse(deliveries[0].payload);
       assert.equal(event.customerId, f.customerId);
-      const sweep = new SweepService(sweepDb!, new MessageAuth('s'.repeat(64), config.resetEpoch), {
-        domainId: f.domainId,
-      });
+      const sweep = new SweepService(
+        sweepDb!,
+        new MessageAuth('s'.repeat(64), config.resetEpoch),
+        {
+          domainId: f.domainId,
+        },
+        acceptanceRollout,
+      );
       await sweep.handle(event);
       await sweep.handle(event);
       assert.equal(

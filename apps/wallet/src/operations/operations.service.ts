@@ -1,3 +1,13 @@
+import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  rolloutAllows,
+} from '../../../../packages/shared/src/rollout.config.js';
+import {
+  NativeSweepPlanner,
+  SweepDeferral,
+} from '../../../../packages/chain/src/native-sweep-planner.js';
 import { Optional } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
@@ -70,6 +80,9 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
     private readonly execution: CustodyExecutionService,
     private readonly withdrawals: WithdrawalsService,
     @Optional() @InjectQueue(QUEUES.wallet) private readonly queue?: Queue,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   onModuleInit() {
@@ -403,10 +416,10 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
           metrics.push({
             name:
               wallet.custody_role === 'hot'
-                ? 'hot_verified_liquid_units'
+                ? 'hot_verified_custody_units'
                 : wallet.custody_role === 'customer_deposit'
                   ? 'customer_custody_unswept_units'
-                  : 'management_verified_liquid_units',
+                  : 'management_verified_custody_units',
             value: observation.units!,
             labels: {
               wallet: wallet.id,
@@ -689,6 +702,10 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
       where: { id: request.commandId },
     });
     if (stored.state === 'completed') return { ...stored, sequence: stored.sequence.toString() };
+    if (request.action === 'resume-domain' && stored.state === 'failed')
+      throw new ConflictException(
+        'Rejected domain recovery requires a new command ID and fresh evidence',
+      );
     try {
       if (request.action === 'retry-execution') {
         const e = await this.db.custodyExecution.findUnique({
@@ -709,6 +726,10 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
             where: { id: request.commandId },
           });
           if (command.state === 'awaiting-ledger' || command.state === 'completed') return;
+          if (command.state === 'failed')
+            throw new ConflictException(
+              'Rejected domain recovery requires a new command ID and fresh evidence',
+            );
           if (
             await tx.operationsAlert.count({
               where: {
@@ -957,6 +978,76 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  async preview() {
+    const scope = {
+      custody_domain_id: this.wallet.domainId!,
+      reset_epoch: this.auth.resetEpoch,
+      active: true,
+    };
+    const wallets = await this.db.wallet.findMany({
+      where: {
+        ...scope,
+        custody_role: 'customer_deposit',
+        status: 'ready',
+        address: { not: null },
+      },
+      orderBy: { id: 'asc' },
+      take: this.settings.batchSize,
+    });
+    const hot = await this.db.wallet.findMany({
+      where: { ...scope, custody_role: 'hot', account: 0, status: 'ready', address: { not: null } },
+    });
+    const planner = new NativeSweepPlanner(this.rpc),
+      plans = [];
+    for (const wallet of wallets) {
+      const target = hot.find((h) => h.chain === wallet.chain && h.network === wallet.network);
+      if (!target) {
+        plans.push({
+          walletId: wallet.id,
+          state: 'unavailable',
+          reason: 'Registered hot wallet unavailable',
+        });
+        continue;
+      }
+      try {
+        const plan = await planner.plan({
+          chain: wallet.chain as 'ethereum' | 'bitcoin' | 'solana',
+          network: wallet.network,
+          sourceAddress: wallet.address!,
+          hotAddress: target.address!,
+        });
+        plans.push({
+          walletId: wallet.id,
+          chain: wallet.chain,
+          network: wallet.network,
+          state: 'preview',
+          principalUnits: plan.amount,
+          maximumFeeUnits: plan.maxFeeUnits,
+          resourceKeys: plan.resourceKeys,
+          dispatchAllowed: rolloutAllows(this.rollout, 'sweeps', {
+            domainId: this.wallet.domainId!,
+            chain: wallet.chain,
+            network: wallet.network,
+          }),
+        });
+      } catch (error) {
+        plans.push({
+          walletId: wallet.id,
+          state: error instanceof SweepDeferral ? error.code : 'unavailable',
+          reason: error instanceof SweepDeferral ? error.message : 'Canonical planning unavailable',
+        });
+      }
+    }
+    return {
+      mode: this.rollout.mode,
+      sampledAt: new Date().toISOString(),
+      readOnly: true,
+      scope: 'bounded native sweep planning; no token drain ordering or execution authorization',
+      limit: this.settings.batchSize,
+      plans,
+    };
+  }
+
   async collectMetrics() {
     const scope = { domain_id: this.wallet.domainId!, reset_epoch: this.auth.resetEpoch };
     const executions = await this.db.custodyExecution.findMany({
@@ -1073,6 +1164,7 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
   async status() {
     const scope = { domain_id: this.wallet.domainId!, reset_epoch: this.auth.resetEpoch };
     return {
+      rollout: this.rollout,
       domainId: this.wallet.domainId,
       resetEpoch: this.auth.resetEpoch,
       runs: (

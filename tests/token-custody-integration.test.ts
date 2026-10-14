@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { IncidentsService } from '../apps/ledger/src/incidents/incidents.service.js';
 import { OperationsService } from '../apps/wallet/src/operations/operations.service.js';
 import { ReconciliationService } from '../apps/ledger/src/operations/reconciliation.service.js';
@@ -293,7 +294,7 @@ before(async () => {
   sweepDb = new SweepPrismaService({ databaseUrl: fixtures[2].url });
   activityDb = new ActivityPrismaService({ databaseUrl: fixtures[3].url });
   broadcastDb = new BroadcastPrismaService({ databaseUrl: fixtures[4].url });
-  custody = new CustodyService(db, config, settings, auth);
+  custody = new CustodyService(db, config, settings, auth, acceptanceRollout);
   registry = new ExchangeRegistryService(ledger);
   customers = new ExchangeCustomersService(
     db,
@@ -339,17 +340,38 @@ before(async () => {
     ),
   );
   journal = new JournalService(new AccountsService());
-  deposits = new DepositsService(ledger, journal, auth);
+  deposits = new DepositsService(ledger, journal, auth, acceptanceRollout);
   reservations = new ReservationsService(ledger, journal, auth);
   settlements = new SettlementsService(ledger, journal, reservations);
-  sweep = new SweepService(sweepDb, auth, {
-    domainId,
-    enableNativeSweeps: true,
-    enableTokenSweeps: true,
-    retryDelayMs: 0,
-  });
-  execution = new CustodyExecutionService(db, custody, rpc, config, executionSettings, auth);
-  withdrawals = new WithdrawalsService(db, custody, exchange, auth, config, executionSettings);
+  sweep = new SweepService(
+    sweepDb,
+    auth,
+    {
+      domainId,
+      enableNativeSweeps: true,
+      enableTokenSweeps: true,
+      retryDelayMs: 0,
+    },
+    acceptanceRollout,
+  );
+  execution = new CustodyExecutionService(
+    db,
+    custody,
+    rpc,
+    config,
+    executionSettings,
+    auth,
+    acceptanceRollout,
+  );
+  withdrawals = new WithdrawalsService(
+    db,
+    custody,
+    exchange,
+    auth,
+    config,
+    executionSettings,
+    acceptanceRollout,
+  );
   activityRegistry = new ActivityRegistryService(activityDb, auth, provider);
   tokenRegistry = new TokenRegistryService(activityDb, rpc, auth, provider);
   activity = new ActivityExchangeService(
@@ -382,6 +404,7 @@ before(async () => {
       executionSignerPublicKey: attestor.publicKey,
     },
     new NativeSweepPlanner(rpc),
+    acceptanceRollout,
   );
   operations = new OperationsService(
     db,
@@ -917,6 +940,55 @@ test(
 );
 
 test(
+  'Phase 8 withdrawal rollout switch blocks token admission without changing customer holds',
+  { skip: !enabled },
+  async () => {
+    const gated = new WithdrawalsService(db, custody, exchange, auth, config, executionSettings, {
+      ...acceptanceRollout,
+      withdrawals: false,
+    });
+    const f = solanaFixture,
+      before = await registry.balances(domainId, f.customerId),
+      count = await db.withdrawal.count();
+    await assert.rejects(
+      () =>
+        gated.request(
+          f.customerId,
+          withdrawalRequestSchema.parse({
+            asset: f.asset,
+            destination: core.derive({ chain: 'solana', seedId: config.seedId, account: 24 })
+              .address,
+            amount: '1',
+            idempotencyKey: randomUUID(),
+          }),
+        ),
+      /withdrawals paused/,
+    );
+    assert.equal(await db.withdrawal.count(), count);
+    assert.deepEqual(await registry.balances(domainId, f.customerId), before);
+  },
+);
+
+test(
+  'Phase 8 scheduling preview reads canonical native plans without creating operations, claims, signing jobs or journals',
+  { skip: !enabled },
+  async () => {
+    const counts = async () =>
+      Promise.all([
+        db.custodyExecution.count(),
+        db.executionResourceClaim.count(),
+        db.outbox.count(),
+        ledger.journalBatch.count(),
+      ]);
+    const before = await counts();
+    const preview = await operations.preview();
+    assert.equal(preview.readOnly, true);
+    assert.ok(preview.plans.length > 0);
+    assert.deepEqual(await counts(), before);
+  },
+);
+
+test(
   'Phase 7 samples all custody roles with queue reconciliation, preserves books and reports funded hot fee/rent custody',
   { skip: !enabled },
   async () => {
@@ -1098,6 +1170,16 @@ test(
     assert.equal(
       (await db.operationsCommand.findUniqueOrThrow({ where: { id: oldId } })).state,
       'failed',
+    );
+    const rejected = await db.operationsCommand.findUniqueOrThrow({ where: { id: oldId } });
+    await assert.rejects(
+      () =>
+        operations.command({ commandId: oldId, action: 'resume-domain', reason: 'Older approval' }),
+      /new command ID and fresh evidence/i,
+    );
+    assert.deepEqual(
+      (await db.operationsCommand.findUniqueOrThrow({ where: { id: oldId } })).result,
+      rejected.result,
     );
     assert.equal(
       (await db.custodyDomain.findUniqueOrThrow({ where: { id: domainId } })).status,

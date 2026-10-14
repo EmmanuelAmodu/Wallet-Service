@@ -1,6 +1,6 @@
 # Phase 7 — Operational recovery and controls
 
-Updated: 13 October 2026. This phase adds reconciliation and audited recovery to the existing applications. It adds no public worker endpoints and does not enable spending.
+Updated: 14 October 2026. This phase adds reconciliation and audited recovery to the existing applications. It adds no public worker endpoints and does not enable spending.
 
 ## Ownership and reconciliation
 
@@ -46,7 +46,7 @@ Wallet repairs due custody executions and withdrawals, republishes stranded exec
 
 Ledger replays retained credited-deposit, registry, reservation and settlement results, reconciles held/frozen reservations, and re-emits existing custody reports on replay. A missing Wallet operation is an incident requiring payment/nonpayment evidence, never a timeout-based hold release. Sweep scans eligible/residual work under existing source fences. Listener repairs subscriptions, owned-account watches, backfill and due canonical discoveries. Broadcast performs canonical confirmation checks of existing attempts; its periodic repair does not create new dispatch bytes.
 
-Metrics and persisted alerts cover wallet custody differences, liquid hot/management balances, customer custody awaiting sweep, original hot execution principal/fee claims, withdrawal backlog/age, unswept work/age, dust, gas dependencies, registry lag, deposit verification age, unresolved Ledger incidents, held reservations, broadcast uncertainty, reorg exposure, consumer report age and stalled outbox delivery. Values remain integer base units or milliseconds; they are not fiat values. A stale report is not current evidence that the system is healthy.
+Metrics and persisted alerts cover wallet custody differences, verified hot/management custody balances, customer custody awaiting sweep, original hot execution principal/fee claims, withdrawal backlog/age, unswept work/age, dust, gas dependencies, registry lag, deposit verification age, unresolved Ledger incidents, held reservations, broadcast uncertainty, reorg exposure, consumer report age and stalled outbox delivery. Custody balances establish ownership, not spendability: frozen/delegated token balances, rent and active claims require the existing execution checks before spending. Values remain integer base units or milliseconds; they are not fiat values. A stale report is not current evidence that the system is healthy.
 
 ## Recovery runbooks
 
@@ -79,3 +79,5 @@ The development reset remains an initial disposable-environment procedure. Ongoi
 ## Verification
 
 Acceptance includes canonical/malformed/unavailable RPC reads, exact Bitcoin units, mixed Solana contexts, per-asset accounting equations, private-route authentication, forbidden operator actions, queue epoch isolation, immutable audit identity, funding pause/resume, nonce alerts, duplicate reports, domain activation and stale quarantine races. Existing token/native custody and financial tests remain regression gates. No application database, real provider subscription, signing key or real fund is changed by local fixture verification.
+
+Verified on 14 October 2026: all 397 tests passed, with zero failures or skipped tests, using isolated PostgreSQL databases, Redis and deterministic chain/provider fixtures. The final domain-resume regression also verifies that a rejected command cannot reuse its original approval or overwrite its rejection evidence. All application builds, TypeScript checks, lint and formatting passed. P7-01 through P7-06 are complete locally; live-provider acceptance and controlled activation remain Phase 8.

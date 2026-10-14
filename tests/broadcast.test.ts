@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -65,10 +66,16 @@ function job(message: Message, attemptsMade = 0) {
 
 function worker(rpc: Partial<BroadcastRpcService>, overrides: Partial<typeof config> = {}) {
   return new BroadcastProcessor(
-    new BroadcastService(db as BroadcastPrismaService, rpc as BroadcastRpcService, {
-      ...config,
-      ...overrides,
-    }),
+    new BroadcastService(
+      db as BroadcastPrismaService,
+      rpc as BroadcastRpcService,
+      {
+        ...config,
+        ...overrides,
+      },
+      undefined,
+      acceptanceRollout,
+    ),
     auth,
   );
 }

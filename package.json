@@ -44,7 +44,11 @@
     "start:sweep": "node dist/apps/sweep/src/main.js",
     "build:sweep": "npm run db:generate && nest build sweep",
     "migrate:sweep": "npm run migrate -- sweep",
-    "rehearse:reset": "tsx --env-file-if-exists=.env scripts/rehearse-development-reset.ts --run"
+    "rehearse:reset": "tsx --env-file-if-exists=.env scripts/rehearse-development-reset.ts --run",
+    "acceptance:exchange": "tsx scripts/exchange-acceptance.ts",
+    "smoke:evm:local": "tsx scripts/smoke-evm-local.ts",
+    "smoke:bitcoin:regtest": "tsx scripts/smoke-bitcoin-regtest.ts",
+    "smoke:solana:devnet": "tsx scripts/smoke-solana-devnet.ts"
   },
   "license": "ISC",
   "type": "module",

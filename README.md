@@ -357,3 +357,7 @@ References: [NestJS queues](https://docs.nestjs.com/techniques/queues), [BullMQ 
 
 
 Phase 7 adds private audited recovery, canonical custody reconciliation, queue repair and operational metrics/alerts. Monitoring defaults to false and requires Wallet/Ledger migrations; private controls need the distinct operations key as well as Wallet backend authentication. It never enables spending or releases uncertain holds. See [operational controls and runbooks](docs/exchange-wallet-phase7.md).
+
+### Exchange acceptance and rollout
+
+Phase 8 adds independent closed-by-default rollout switches, a single-domain/chain canary, and authenticated read-only native scheduling preview. Run `npm run acceptance:exchange` for disposable local PostgreSQL/Redis acceptance; `npm run smoke:evm:local` and `npm run smoke:bitcoin:regtest` verify real local signed native transfers. Solana Devnet smoke is opt-in with `npm run smoke:solana:devnet -- --run`. Live provider/token certification and deployed canary acceptance remain required. See [Phase 8 rollout and rollback](docs/exchange-wallet-phase8.md).

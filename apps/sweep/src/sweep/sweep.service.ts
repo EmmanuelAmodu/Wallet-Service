@@ -1,6 +1,12 @@
+import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  rolloutAllows,
+} from '../../../../packages/shared/src/rollout.config.js';
 import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
 import { operationsMetrics, ageMetric } from '../../../../packages/queue/src/operations-metrics.js';
-import { Inject, Injectable } from '@nestjs/common';
+import { Optional, Inject, Injectable } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { createHash, randomUUID } from 'node:crypto';
 import type {
@@ -67,6 +73,9 @@ export class SweepService {
     private readonly auth: MessageAuth,
     @Inject(sweepConfig.KEY)
     private readonly config: SweepSettings,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   async handle(input: ExchangeEvent) {
@@ -301,6 +310,14 @@ export class SweepService {
         state: 'paused_review',
         reason: domain?.reason ?? customer?.pause_reason ?? 'Customer custody review required',
       };
+    if (
+      !rolloutAllows(this.rollout, 'sweeps', {
+        domainId: work.domain_id,
+        chain: work.chain,
+        network: work.network,
+      })
+    )
+      return { state: 'paused_review', reason: 'Sweep dispatch paused by rollout policy' };
     if (work.asset_id === `token:${work.chain}:native` && !this.config.enableNativeSweeps)
       return {
         state: 'blocked_execution_not_implemented',

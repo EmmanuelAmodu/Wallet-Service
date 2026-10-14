@@ -45,6 +45,10 @@ export class OperationsController {
     return this.operations.status();
   }
 
+  @Get('preview') preview() {
+    return this.operations.preview();
+  }
+
   @Get('metrics') metrics() {
     return this.operations.metrics();
   }

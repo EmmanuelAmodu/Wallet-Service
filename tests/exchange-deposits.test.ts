@@ -1,3 +1,9 @@
+import { Queue, Worker } from 'bullmq';
+import { once } from 'node:events';
+import { MessageAuth, QUEUES } from '../packages/queue/src/messages.js';
+import { connection } from '../packages/queue/src/messaging.module.js';
+import { retryFailedConsumerJobs } from '../packages/queue/src/consumer-repair.js';
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -13,7 +19,9 @@ const db = enabled
   : undefined;
 const journal = new JournalService(new AccountsService());
 const epoch = 'exchange-deposit-tests';
-const service = enabled ? new DepositsService(db!, journal, { resetEpoch: epoch }) : undefined;
+const service = enabled
+  ? new DepositsService(db!, journal, { resetEpoch: epoch }, acceptanceRollout)
+  : undefined;
 const asset = { chain: 'ethereum' as const, network: '11155111', assetId: 'token:ethereum:native' };
 before(async () => {
   if (db) await db.$connect();
@@ -236,9 +244,14 @@ test(
     }
     const f = await fixture();
     const event = f.event('deposit.finalized.v1', 1);
-    const interrupted = new DepositsService(db!, new InterruptedJournal(new AccountsService()), {
-      resetEpoch: epoch,
-    });
+    const interrupted = new DepositsService(
+      db!,
+      new InterruptedJournal(new AccountsService()),
+      {
+        resetEpoch: epoch,
+      },
+      acceptanceRollout,
+    );
     await assert.rejects(interrupted.handle(event), /Injected crash/);
     assert.equal(await db!.deposit.count({ where: { id: f.depositId } }), 0);
     assert.equal(await db!.journalBatch.count({ where: { domain_id: f.domainId } }), 0);
@@ -265,5 +278,84 @@ test(
       /amount or wallet identity changed/,
     );
     assert.equal(await f.balance('customer_available'), 100n);
+  },
+);
+
+test(
+  'Phase 8 paused credit retains undelivered finality and resumes once; reversals remain active during rollback',
+  { skip: !enabled },
+  async () => {
+    const f = await fixture(),
+      policy = { ...acceptanceRollout, credits: false };
+    const gated = new DepositsService(db!, journal, { resetEpoch: epoch }, policy);
+    const finality = f.event('deposit.finalized.v1', 1);
+    const before = await db!.journalBatch.count({ where: { domain_id: f.domainId } });
+    await assert.rejects(() => gated.handle(finality), /credits paused/);
+    assert.equal(await db!.deposit.findUnique({ where: { id: f.depositId } }), null);
+    assert.equal(await db!.journalBatch.count({ where: { domain_id: f.domainId } }), before);
+    policy.credits = true;
+    await gated.handle(finality);
+    await gated.handle(finality);
+    assert.equal(await f.balance('customer_available'), 100n);
+    policy.credits = false;
+    await gated.handle(f.event('deposit.reverted.v1', 2));
+    assert.equal(await f.balance('customer_available'), 0n);
+  },
+);
+
+test(
+  'Phase 8 retained paused-credit queue job survives a worker restart and authenticated repair credits once',
+  { skip: !enabled || !process.env.TEST_REDIS_URL, timeout: 30000 },
+  async () => {
+    const f = await fixture(),
+      policy = { ...acceptanceRollout, credits: false };
+    const gated = new DepositsService(db!, journal, { resetEpoch: epoch }, policy);
+    const auth = new MessageAuth('q'.repeat(64), epoch),
+      prefix = `phase8_${randomUUID().replaceAll('-', '')}`;
+    const queue = new Queue(QUEUES.ledger, {
+      prefix,
+      connection: connection(process.env.TEST_REDIS_URL!),
+    });
+    const consume = async (job: { data: unknown; id?: string; name: string }) =>
+      gated.handle(auth.open(job.data, job.id!, job.name) as ExchangeEvent);
+    let worker = new Worker(QUEUES.ledger, consume, {
+      prefix,
+      connection: connection(process.env.TEST_REDIS_URL!),
+    });
+    try {
+      await worker.waitUntilReady();
+      const failed = once(worker, 'failed'),
+        finality = f.event('deposit.finalized.v1', 1),
+        id = randomUUID();
+      await queue.add(finality.type, auth.seal(finality, id), {
+        jobId: id,
+        attempts: 1,
+        removeOnFail: false,
+        removeOnComplete: false,
+      });
+      await failed;
+      assert.equal(await f.balance('customer_available'), 0n);
+      assert.equal(
+        await db!.exchangeInbox.findUnique({ where: { event_id: finality.eventId } }),
+        null,
+      );
+      await worker.close();
+      policy.credits = true;
+      worker = new Worker(QUEUES.ledger, consume, {
+        prefix,
+        connection: connection(process.env.TEST_REDIS_URL!),
+      });
+      await worker.waitUntilReady();
+      const completed = once(worker, 'completed');
+      assert.equal((await retryFailedConsumerJobs(queue, auth, f.domainId)).retried, 1);
+      await completed;
+      await gated.handle(finality);
+      assert.equal(await f.balance('customer_available'), 100n);
+      assert.equal((await retryFailedConsumerJobs(queue, auth, f.domainId)).retried, 0);
+    } finally {
+      await worker.close();
+      await queue.obliterate({ force: true });
+      await queue.close();
+    }
   },
 );

@@ -1,3 +1,9 @@
+import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  assertRollout,
+} from '../../../../packages/shared/src/rollout.config.js';
 import { ConflictException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -23,6 +29,9 @@ export class WalletsService {
     @Inject(WalletPrismaService) readonly db: PrismaClient,
     @Inject(walletConfig.KEY) private readonly config: WalletConfig,
     @Optional() @Inject(queueConfig.KEY) private readonly queue?: Pick<QueueConfig, 'resetEpoch'>,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   async createWallet(chain: Chain, externalId: string) {
@@ -33,6 +42,11 @@ export class WalletsService {
         where: { external_id: externalId, chain, network },
       });
       if (existing) return existing;
+      assertRollout(this.rollout, 'addresses', {
+        domainId: this.config.domainId ?? 'legacy-internal',
+        chain,
+        network,
+      });
       let sequence: { account: bigint };
       try {
         [sequence] = await db.$queryRaw<

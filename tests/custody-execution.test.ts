@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import 'reflect-metadata';
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
@@ -205,7 +206,7 @@ before(async () => {
   db = new WalletPrismaService({ databaseUrl: fixtures[0].url });
   ledger = new LedgerPrismaService({ databaseUrl: fixtures[1].url });
   sweepDb = new SweepPrismaService({ databaseUrl: fixtures[2].url });
-  custody = new CustodyService(db, config, settings, auth);
+  custody = new CustodyService(db, config, settings, auth, acceptanceRollout);
   registry = new ExchangeRegistryService(ledger);
   customers = new ExchangeCustomersService(
     db,
@@ -255,17 +256,22 @@ before(async () => {
     ),
   );
   const journal = new JournalService(new AccountsService());
-  deposits = new DepositsService(ledger, journal, auth);
+  deposits = new DepositsService(ledger, journal, auth, acceptanceRollout);
   settlements = new SettlementsService(
     ledger,
     journal,
     new ReservationsService(ledger, journal, auth),
   );
-  sweep = new SweepService(sweepDb, auth, {
-    domainId: settings.domainId,
-    enableNativeSweeps: true,
-    retryDelayMs: 0,
-  });
+  sweep = new SweepService(
+    sweepDb,
+    auth,
+    {
+      domainId: settings.domainId,
+      enableNativeSweeps: true,
+      retryDelayMs: 0,
+    },
+    acceptanceRollout,
+  );
   await custody.bootstrap();
   await deriveOutstanding();
   for (const row of await db.outbox.findMany({ where: { queue: QUEUES.ledger } })) {
@@ -377,6 +383,7 @@ async function fixture() {
       pollIntervalMs: 1000,
     },
     auth,
+    acceptanceRollout,
   );
   const execution = () =>
     db.custodyExecution.findUniqueOrThrow({ where: { attempt_id: plan.attemptId } });
@@ -975,8 +982,17 @@ async function withdrawalFixture() {
     auth,
     config,
     executionSettings,
+    acceptanceRollout,
   );
-  const service = new CustodyExecutionService(db, custody, rpc, config, executionSettings, auth);
+  const service = new CustodyExecutionService(
+    db,
+    custody,
+    rpc,
+    config,
+    executionSettings,
+    auth,
+    acceptanceRollout,
+  );
   const request = {
     asset,
     destination: '0x' + 'aa'.repeat(20),

@@ -165,25 +165,25 @@ See [architecture](architecture.md) for current boundaries and [implementation p
 
 ## Phase 7 — Operational recovery and controls
 
-- [ ] **P7-01** Implement periodic hot/management RPC reconciliation while keeping provider subscriptions scoped to deposit addresses. Detect transactions that bypass the application.
-- [ ] **P7-02** Reconcile verified custody against customer liabilities, equity, fees, deficits, and in-transit/reconciliation accounts per asset/network; persist explanations and unresolved differences.
-- [ ] **P7-03** Add repair workers for missed sweep triggers, orphan holds, stalled attempts, stale projections, and interrupted settlements. Make repair idempotent and preserve financial history.
-- [ ] **P7-04** Add incident review, quarantine/freeze, safe retry/cancellation, and management-funding controls through authenticated internal/admin interfaces with audit records.
-- [ ] **P7-05** Add metrics/alerts for credit latency, unswept value/age, gas backlog, dust, hot available/reserved liquidity, withdrawal age, nonce/UTXO holds, reorg exposure, registry lag, and custody differences.
-- [ ] **P7-06** Document recovery/runbooks for provider gaps, Redis/process outages, unknown broadcasts, reorgs, low liquidity, and unexpected outflows. Distinguish initial development reset from ongoing financial recovery.
+- [x] **P7-01** Implement periodic hot/management RPC reconciliation while keeping provider subscriptions scoped to deposit addresses. Detect transactions that bypass the application.
+- [x] **P7-02** Reconcile verified custody against customer liabilities, equity, fees, deficits, and in-transit/reconciliation accounts per asset/network; persist explanations and unresolved differences.
+- [x] **P7-03** Add repair workers for missed sweep triggers, orphan holds, stalled attempts, stale projections, and interrupted settlements. Make repair idempotent and preserve financial history.
+- [x] **P7-04** Add incident review, quarantine/freeze, safe retry/cancellation, and management-funding controls through authenticated internal/admin interfaces with audit records.
+- [x] **P7-05** Add metrics/alerts for credit latency, unswept value/age, gas backlog, dust, hot available/reserved liquidity, withdrawal age, nonce/UTXO holds, reorg exposure, registry lag, and custody differences.
+- [x] **P7-06** Document recovery/runbooks for provider gaps, Redis/process outages, unknown broadcasts, reorgs, low liquidity, and unexpected outflows. Distinguish initial development reset from ongoing financial recovery.
 
-**Gate:** custody differences and stranded work are visible and recoverable without deleting operations, holds, or journals.
+**Gate passed locally (14 October 2026):** custody differences and stranded work are visible and recoverable without deleting operations, holds, or journals. Verification uses real PostgreSQL/Redis and deterministic RPC fixtures; live deployment remains Phase 8. See [Phase 7 controls, verification and runbooks](exchange-wallet-phase7.md).
 
 ## Phase 8 — Acceptance and controlled rollout
 
-- [ ] **P8-01** Run integration tests with real PostgreSQL/Redis and deterministic RPC/provider fixtures for duplicate/reordered delivery, crash boundaries, concurrency, isolation, reorgs, and stale reset jobs.
-- [ ] **P8-02** Run regtest/local-validator/testnet signed-transaction smoke tests for every enabled native/token adapter; verify recipients, fees, resource usage, and final settlement.
-- [ ] **P8-03** Demonstrate deposit → customer credit → sweep → hot withdrawal, including management fee funding, unchanged balance after sweep, queued low-liquidity withdrawal, and ledger reconciliation.
-- [ ] **P8-04** Exercise recovery after worker/Redis outages, reservation-event loss, provider replay, ambiguous submission, and late confirmation. Confirm no duplicate payout/credit or unsafe hold release.
-- [ ] **P8-05** Add separate switches for address issuance, credit, sweeps, and withdrawals; validate dry-run scheduling and a single-domain/chain canary before expanding assets/networks.
-- [ ] **P8-06** Record acceptance evidence and rollout/rollback procedures that preserve published addresses, operations, reservations, and journals. Enable only certified asset capabilities.
+- [x] **P8-01** Run integration tests with real PostgreSQL/Redis and deterministic RPC/provider fixtures for duplicate/reordered delivery, crash boundaries, concurrency, isolation, reorgs, and stale reset jobs.
+- [ ] **P8-02** Run regtest/local-validator/testnet signed-transaction smoke tests for every enabled native/token adapter; verify recipients, fees, resource usage, and final settlement. Native EVM/Bitcoin smoke passed; Solana Devnet faucet returned HTTP 429. Real token certification remains required before enabling tokens.
+- [x] **P8-03** Demonstrate deposit → customer credit → sweep → hot withdrawal, including management fee funding, unchanged balance after sweep, queued low-liquidity withdrawal, and ledger reconciliation.
+- [x] **P8-04** Exercise recovery after worker/Redis outages, reservation-event loss, provider replay, ambiguous submission, and late confirmation. Confirm no duplicate payout/credit or unsafe hold release.
+- [x] **P8-05** Add separate switches for address issuance, credit, sweeps, and withdrawals; validate dry-run scheduling and a single-domain/chain canary before expanding assets/networks.
+- [x] **P8-06** Record acceptance evidence and rollout/rollback procedures that preserve published addresses, operations, reservations, and journals. Enable only certified asset capabilities.
 
-**Gate:** all required phases pass their checks; enabled assets reconcile end to end; rollout and recovery preserve financial state.
+**Gate remains closed:** 409 tests passed with zero skips, and native EVM/Bitcoin signed smoke passed; local acceptance and rollout controls are implemented; Solana smoke, live asset/provider certification and a deployment canary remain external acceptance requirements. See [Phase 8 evidence and rollout/rollback procedure](exchange-wallet-phase8.md).
 
 ## Phase 9 — Optional follow-up backlog
 

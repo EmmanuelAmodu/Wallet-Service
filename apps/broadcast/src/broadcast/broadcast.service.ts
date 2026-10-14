@@ -1,3 +1,9 @@
+import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  assertRollout,
+} from '../../../../packages/shared/src/rollout.config.js';
 import { operationsMetrics, ageMetric } from '../../../../packages/queue/src/operations-metrics.js';
 import { BroadcastPrismaService } from '../prisma/prisma.service.js';
 import { Prisma } from '.prisma/broadcast-client';
@@ -41,6 +47,9 @@ export class BroadcastService {
     @Inject(BroadcastRpcService) private readonly rpc: BroadcastRpcService,
     @Inject(broadcastConfig.KEY) private readonly config: BroadcastConfig,
     @Optional() private readonly planner?: NativeSweepPlanner,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   async execute(message: Message, finalAttempt: boolean) {
@@ -449,6 +458,11 @@ export class BroadcastService {
       await this.record(action, 'submitted', 0, observed);
       return;
     }
+    assertRollout(
+      this.rollout,
+      snapshot.execution!.preparedRequest.wallet.account === 0 ? 'withdrawals' : 'sweeps',
+      { domainId: snapshot.execution!.domainId, chain: snapshot.chain, network: snapshot.network },
+    );
     if (snapshot.chain === 'solana') {
       const height = await this.rpc.call('solana', 'getBlockHeight', [{ commitment: 'finalized' }]);
       if (typeof height !== 'number' || !Number.isSafeInteger(height))

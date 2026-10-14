@@ -1,6 +1,12 @@
+import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  rolloutAllows,
+} from '../../../../packages/shared/src/rollout.config.js';
 import { assertManagementFundingEnabled } from '../operations/funding-gate.js';
 import { TokenFeesService } from './token-fees.service.js';
-import { Inject, Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Optional, Inject, Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { CustodyExecution, Prisma, Wallet } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 import { lock } from '../../../../packages/database/src/locks.js';
@@ -83,6 +89,9 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     @Inject(walletConfig.KEY) private readonly walletConfig: WalletConfig,
     @Inject(executionConfig.KEY) private readonly config: ExecutionSettings,
     private readonly auth: MessageAuth,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   private get planner() {
@@ -446,6 +455,14 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     tx: Prisma.TransactionClient,
     plan: Plan,
   ): Promise<{ source: Wallet; hot: Wallet }> {
+    if (
+      !rolloutAllows(
+        this.rollout,
+        plan.type === 'withdrawal.plan.requested.v1' ? 'withdrawals' : 'sweeps',
+        { domainId: plan.domainId, ...plan.data.asset },
+      )
+    )
+      throw new SweepDeferral('disabled', 'Custody authorization paused by rollout policy');
     if (plan.type === 'funding.plan.requested.v1') return this.fundingAuthority(tx, plan);
     if (plan.type === 'withdrawal.plan.requested.v1') return this.withdrawalAuthority(tx, plan);
     if (

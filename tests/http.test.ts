@@ -151,6 +151,8 @@ test(
       SIGNER_SEED_FILE: seed,
       SIGNER_SEED_ID: 'http-events',
       EXCHANGE_DOMAIN_ID: 'http-events',
+      EXCHANGE_ROLLOUT_MODE: 'full',
+      ENABLE_ADDRESS_ISSUANCE: 'true',
       EXCHANGE_API_KEY: 'e'.repeat(64),
       ETH_CHAIN_ID: '11155111',
       SOLANA_GENESIS_HASH: devnet,

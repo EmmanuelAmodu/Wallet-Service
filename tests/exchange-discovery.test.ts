@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import 'reflect-metadata';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -32,7 +33,7 @@ const ledger = enabled
 const auth = new MessageAuth('a'.repeat(64), 'phase3-discovery-tests');
 const journal = new JournalService(new AccountsService());
 const depositService = ledger
-  ? new DepositsService(ledger, journal, { resetEpoch: auth.resetEpoch })
+  ? new DepositsService(ledger, journal, { resetEpoch: auth.resetEpoch }, acceptanceRollout)
   : undefined;
 const incidents = ledger ? new IncidentsService(ledger, journal) : undefined;
 const reservations = ledger

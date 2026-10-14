@@ -1,4 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
+import {
+  rolloutConfig,
+  RolloutSettings,
+  closedRollout,
+  assertRollout,
+} from '../../../../packages/shared/src/rollout.config.js';
+import { Optional, Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import type { Deposit, Prisma as LedgerPrisma } from '.prisma/ledger-client';
 import { randomUUID } from 'node:crypto';
@@ -55,6 +61,9 @@ export class DepositsService {
     private readonly db: LedgerPrismaService,
     private readonly journal: JournalService,
     @Inject(queueConfig.KEY) private readonly config: Pick<QueueConfig, 'resetEpoch'>,
+    @Optional()
+    @Inject(rolloutConfig.KEY)
+    private readonly rollout: RolloutSettings = closedRollout,
   ) {}
 
   async handle(input: ExchangeEvent) {
@@ -65,6 +74,10 @@ export class DepositsService {
       throw new ActionRejectedError('Unsupported deposit event');
     if (event.resetEpoch !== this.config.resetEpoch)
       throw new ActionRejectedError('Stale reset epoch');
+    // Do not consume a paused finality event: durable delivery must retry after credit resumes.
+    // Reversals remain enabled so rollout rollback cannot conceal a loss.
+    if (event.type === 'deposit.finalized.v1')
+      assertRollout(this.rollout, 'credits', { domainId: event.domainId, ...event.data.asset });
     await this.db.$transaction(async (tx) =>
       consumeExchangeEvent(tx, event, async () => {
         await lock(tx, `exchange-domain:${event.domainId}`);

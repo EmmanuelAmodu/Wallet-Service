@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import 'reflect-metadata';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -87,7 +88,7 @@ function fixture() {
   const customers = new ExchangeCustomersService(wallet!, settings, auth, {} as LedgerClient);
   const messaging = new ExchangeMessagingService(wallet!, auth, customers);
   const registry = new ExchangeRegistryService(ledger!);
-  const sweeps = new SweepService(sweep!, auth, { domainId });
+  const sweeps = new SweepService(sweep!, auth, { domainId }, acceptanceRollout);
   const event = (
     type: ExchangeEvent['type'],
     data: unknown,
@@ -283,7 +284,12 @@ test(
       },
       { customerId },
     );
-    const deposits = new DepositsService(ledger!, journal, { resetEpoch: auth.resetEpoch });
+    const deposits = new DepositsService(
+      ledger!,
+      journal,
+      { resetEpoch: auth.resetEpoch },
+      acceptanceRollout,
+    );
     await deposits.handle(deposit);
     const outputs = await ledger!.outbox.findMany({
       where: { dedupe_key: { startsWith: `deposit:${depositId}:credited:` } },

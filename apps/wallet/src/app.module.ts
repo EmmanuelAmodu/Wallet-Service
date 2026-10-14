@@ -1,3 +1,4 @@
+import { rolloutConfig } from '../../../packages/shared/src/rollout.config.js';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { queueConfig } from '../../../packages/queue/src/queue.config.js';
@@ -20,7 +21,7 @@ import { CustodyApiModule } from './custody-api/custody-api.module.js';
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
-      load: [queueConfig, walletConfig, networkConfig],
+      load: [rolloutConfig, queueConfig, walletConfig, networkConfig],
     }),
     OutboxModule.register(WalletPrismaModule, WalletPrismaService),
     AuthModule,

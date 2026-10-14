@@ -48,6 +48,7 @@ export async function bootstrapResetRehearsal(
       { seedId, ethereumChainId, solanaGenesisHash, chainNetworks },
       { domainId, apiKey: undefined },
       { resetEpoch: context.plan.resetEpoch },
+      { mode: 'full', addresses: true, credits: false, sweeps: false, withdrawals: false },
     );
     const bootstrap = await custody.bootstrap();
     assert.equal(bootstrap.hotWallets.length, 3);

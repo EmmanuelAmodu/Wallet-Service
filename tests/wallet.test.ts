@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PrismaClient } from '@prisma/client';
@@ -81,11 +82,16 @@ before(async () => {
       ethereumChainId: '11155111',
       solanaGenesisHash: 'devnet',
     });
-    service = new WalletsService(db, {
-      seedId: 'test',
-      ethereumChainId: '11155111',
-      solanaGenesisHash: 'devnet',
-    });
+    service = new WalletsService(
+      db,
+      {
+        seedId: 'test',
+        ethereumChainId: '11155111',
+        solanaGenesisHash: 'devnet',
+      },
+      undefined,
+      acceptanceRollout,
+    );
   }
 });
 after(async () => {

@@ -1,3 +1,7 @@
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import { MessageAuth, QUEUES } from '../../../../packages/queue/src/messages.js';
+import { retryFailedConsumerJobs } from '../../../../packages/queue/src/consumer-repair.js';
 import { ReconciliationService } from '../operations/reconciliation.service.js';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
@@ -22,6 +26,8 @@ export class LedgerExchangeService {
     @Inject(queueConfig.KEY) private readonly config: Pick<QueueConfig, 'resetEpoch'>,
     @Optional() private readonly incidents?: IncidentsService,
     @Optional() private readonly operations?: ReconciliationService,
+    @Optional() @InjectQueue(QUEUES.ledger) private readonly queue?: Queue,
+    @Optional() private readonly auth?: MessageAuth,
   ) {}
 
   async handle(input: ExchangeEvent) {
@@ -34,6 +40,8 @@ export class LedgerExchangeService {
       event.type === 'operations.domain.resume.requested.v1'
     ) {
       if (!this.operations) throw new Error('Operational reconciliation unavailable');
+      if (event.type === 'operations.repair.requested.v1' && this.queue && this.auth)
+        await retryFailedConsumerJobs(this.queue, this.auth, event.domainId);
       return this.operations.handle(event);
     }
     if (

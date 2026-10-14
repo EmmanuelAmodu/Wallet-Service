@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -82,7 +83,7 @@ before(async () => {
   db = new WalletPrismaService({ databaseUrl: walletFixture.url });
   ledgerDb = new LedgerPrismaService({ databaseUrl: ledgerFixture.url });
   registry = new ExchangeRegistryService(ledgerDb);
-  custody = new CustodyService(db, config, settings, auth);
+  custody = new CustodyService(db, config, settings, auth, acceptanceRollout);
   customers = new ExchangeCustomersService(
     db,
     settings,
@@ -151,7 +152,7 @@ test(
   'replica bootstrap is idempotent, reserves only hot0 and approved management1, and repairs pending issuance',
   { skip: !enabled },
   async () => {
-    const replica = new CustodyService(db, config, settings, auth);
+    const replica = new CustodyService(db, config, settings, auth, acceptanceRollout);
     const results = await Promise.all(
       Array.from({ length: 6 }, (_, i) => (i % 2 ? custody : replica).bootstrap()),
     );
@@ -428,7 +429,13 @@ test(
       settings,
       auth,
       {} as LedgerClient,
-      new CustodyService(db, { ...config, seedId: 'other-seed' }, settings, auth),
+      new CustodyService(
+        db,
+        { ...config, seedId: 'other-seed' },
+        settings,
+        auth,
+        acceptanceRollout,
+      ),
     );
     assert.equal('address' in (await changed.assignment(userId, assignmentId)), false);
     assert.equal((await customers.assignment(userId, assignmentId)).state, 'ready');
@@ -452,7 +459,13 @@ test(
     await assert.rejects(
       () =>
         custody.bootstrap.call(
-          new CustodyService(db, { ...config, seedId: 'changed' }, settings, auth),
+          new CustodyService(
+            db,
+            { ...config, seedId: 'changed' },
+            settings,
+            auth,
+            acceptanceRollout,
+          ),
         ),
       /immutable/,
     );

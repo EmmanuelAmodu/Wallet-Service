@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -376,7 +377,7 @@ test(
         },
       });
     const final = deposit('deposit.finalized.v1', 1);
-    const deposits = new DepositsService(db!, journal, { resetEpoch: epoch });
+    const deposits = new DepositsService(db!, journal, { resetEpoch: epoch }, acceptanceRollout);
     await deposits.handle(final);
     const request = f.reserve('180');
     await service!.handle(request);

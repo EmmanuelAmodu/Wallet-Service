@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -140,7 +141,13 @@ before(async () => {
     fixture = await isolatedDatabase(process.env.TEST_DATABASE_URL!);
     db = createDatabase(fixture.url);
     const config = custodySettings(settings.domainId);
-    custody = new CustodyService(db as WalletPrismaService, config, settings, auth);
+    custody = new CustodyService(
+      db as WalletPrismaService,
+      config,
+      settings,
+      auth,
+      acceptanceRollout,
+    );
     signing = await SigningCore.create(testMnemonic, config.seedId, config.ethereumChainId);
     service = new ExchangeCustomersService(
       db as WalletPrismaService,

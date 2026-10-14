@@ -1,3 +1,4 @@
+import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import 'reflect-metadata';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,7 +27,7 @@ function fixture() {
   const customerId = randomUUID();
   const walletId = randomUUID();
   const hotWalletId = randomUUID();
-  const service = new SweepService(db!, auth, { domainId });
+  const service = new SweepService(db!, auth, { domainId }, acceptanceRollout);
   const event = (type: string, data: unknown, extra: Record<string, unknown> = {}): ExchangeEvent =>
     exchangeEventSchema.parse({
       schemaVersion: 1,

@@ -318,3 +318,52 @@ test('Failed consumer repair retries only original authenticated current-scope j
   assert.equal(retried, 1);
   assert.deepEqual(result, { retried: 1, stale: 2 });
 });
+
+test('Phase 8 failed-job repair advances past stale pages without deleting their evidence', async () => {
+  const { retryFailedConsumerJobs } = await import('../packages/queue/src/consumer-repair.js');
+  const auth = new MessageAuth('q'.repeat(64), 'current'),
+    id = randomUUID();
+  const event = exchangeEventSchema.parse({
+    type: 'operations.repair.requested.v1',
+    schemaVersion: 1,
+    eventId: randomUUID(),
+    resetEpoch: 'current',
+    domainId: 'exchange',
+    occurredAt: new Date().toISOString(),
+    correlationId: randomUUID(),
+    causationId: null,
+    aggregateId: 'operations',
+    revision: 1,
+    data: { commandId: randomUUID() },
+  });
+  const offsets: number[] = [];
+  let retried = 0;
+  const queue = {
+    getFailed: async (start: number) => {
+      offsets.push(start);
+      if (start === 0)
+        return Array.from({ length: 100 }, () => ({ id: randomUUID(), name: 'invalid', data: {} }));
+      return [
+        {
+          id,
+          name: event.type,
+          data: auth.seal(event, id),
+          getState: async () => 'failed',
+          retry: async () => {
+            retried++;
+          },
+        },
+      ];
+    },
+  } as unknown as import('bullmq').Queue;
+  assert.deepEqual(await retryFailedConsumerJobs(queue, auth, 'exchange'), {
+    retried: 0,
+    stale: 100,
+  });
+  assert.deepEqual(await retryFailedConsumerJobs(queue, auth, 'exchange'), {
+    retried: 1,
+    stale: 0,
+  });
+  assert.deepEqual(offsets, [0, 100]);
+  assert.equal(retried, 1);
+});
