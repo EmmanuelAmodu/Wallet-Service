@@ -1263,3 +1263,31 @@ test(
     );
   },
 );
+
+test(
+  'Phase 9 attempt journal retains signed and canonical reversal evidence without changing financial history',
+  { skip: !enabled },
+  async () => {
+    const execution = await db.custodyExecution.findUniqueOrThrow({
+      where: { operation_id: solanaWithdrawalId },
+    });
+    const transaction = await db.transaction.findUniqueOrThrow({
+      where: { id: execution.transaction_id },
+    });
+    const before = await ledger.journalBatch.count();
+    const page = await operations.attempts(transaction.id, undefined, 100);
+    assert.equal(page.attempts.length, 1);
+    assert.equal(page.attempts[0].id, execution.attempt_id);
+    assert.equal(page.attempts[0].operation_id, solanaWithdrawalId);
+    assert.equal(page.replacementEnabled, false);
+    const snapshots = page.observations.map((o) => o.evidence as Record<string, unknown>);
+    assert.ok(snapshots.some((s) => s.authorization !== null));
+    assert.ok(snapshots.some((s) => s.signerResult !== null));
+    assert.ok(
+      snapshots.some((s) => JSON.stringify(s.signed) === JSON.stringify(transaction.signed)),
+    );
+    assert.ok(snapshots.some((s) => s.state === 'confirmed' && s.inclusion !== null));
+    assert.ok(snapshots.some((s) => s.reversed === true && s.inclusion !== null));
+    assert.equal(await ledger.journalBatch.count(), before);
+  },
+);

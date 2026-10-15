@@ -7,6 +7,9 @@ import {
   Inject,
   Injectable,
   Post,
+  Param,
+  Query,
+  ParseUUIDPipe,
   ServiceUnavailableException,
   UnauthorizedException,
   UseGuards,
@@ -43,6 +46,27 @@ export class OperationsController {
 
   @Get() status() {
     return this.operations.status();
+  }
+
+  @Get('executions/:transactionId/attempts') attempts(
+    @Param('transactionId', new ParseUUIDPipe()) transactionId: string,
+    @Query(
+      new ZodValidationPipe(
+        z
+          .object({
+            cursor: z
+              .string()
+              .regex(/^[1-9][0-9]{0,18}$/)
+              .refine((n) => /^[1-9][0-9]{0,18}$/.test(n) && BigInt(n) <= 9223372036854775807n)
+              .optional(),
+            limit: z.coerce.number().int().min(1).max(100).default(50),
+          })
+          .strict(),
+      ),
+    )
+    query: { cursor?: string; limit: number },
+  ) {
+    return this.operations.attempts(transactionId, query.cursor, query.limit);
   }
 
   @Get('preview') preview() {

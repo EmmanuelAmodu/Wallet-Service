@@ -496,3 +496,67 @@ test('Bitcoin regtest signs exact witness scripts and rejects cross-network or o
     regtest.close();
   }
 });
+
+test('exact Bitcoin multi-output signing preserves every payout index and hot change with duplicate destinations', () => {
+  const source = wallet('bitcoin'),
+    recipient = core.derive({ chain: 'bitcoin', account: 1, seedId: 'test' }).address;
+  const script = walletCore.BitcoinScript.lockScriptForAddress(
+    source.address,
+    walletCore.CoinType.bitcoin,
+  );
+  let ownScript: string;
+  try {
+    ownScript = Buffer.from(script.data()).toString('hex');
+  } finally {
+    script.delete();
+  }
+  const request = signSchema.parse({
+    wallet: source,
+    transaction: {
+      chain: 'bitcoin',
+      outputs: [
+        { address: recipient, amount: '10000' },
+        { address: recipient, amount: '11000' },
+      ],
+      utxos: [{ txid: 'aa'.repeat(32), vout: 0, amount: '100000', script: ownScript }],
+      satsPerVbyte: 2,
+      changeAmount: '77500',
+    },
+  });
+  const signed = core.sign(request),
+    decoded = bitcoin.Transaction.fromHex(signed.raw);
+  assert.deepEqual(
+    decoded.outs.map((o) => o.value),
+    [10000n, 77500n, 11000n],
+  );
+  assert.deepEqual(
+    decoded.outs.map((o) => bitcoin.address.fromOutputScript(o.script)),
+    [recipient, source.address, recipient],
+  );
+  assert.equal(decoded.getId(), signed.txHash);
+  assert(1500n >= BigInt(decoded.virtualSize() * 2));
+  const [sig, pubkey] = decoded.ins[0].witness,
+    signature = bitcoin.script.signature.decode(sig);
+  assert(
+    verify(
+      decoded.hashForWitnessV0(
+        0,
+        bitcoin.payments.p2pkh({ pubkey }).output!,
+        100000n,
+        signature.hashType,
+      ),
+      pubkey,
+      signature.signature,
+    ),
+  );
+  assert.throws(
+    () =>
+      core.sign(
+        signSchema.parse({
+          ...request,
+          transaction: { ...request.transaction, changeAmount: '79000' },
+        }),
+      ),
+    /positive|fee/,
+  );
+});

@@ -7,6 +7,8 @@ import { WalletPrismaModule } from '../prisma/prisma.module.js';
 import { executionConfig } from '../config/execution.config.js';
 import { TokenFeesService } from './token-fees.service.js';
 import { CustodyExecutionService } from './execution.service.js';
+import { EvmLiquidityService } from './evm-liquidity.service.js';
+import { BatchDraftsService } from './batch-drafts.service.js';
 @Module({
   imports: [
     WalletPrismaModule,
@@ -15,7 +17,7 @@ import { CustodyExecutionService } from './execution.service.js';
     MessagingModule,
     ConfigModule.forFeature(executionConfig),
   ],
-  providers: [CustodyExecutionService, TokenFeesService],
+  providers: [CustodyExecutionService, TokenFeesService, EvmLiquidityService, BatchDraftsService],
   exports: [CustodyExecutionService, TokenFeesService],
 })
 export class ExecutionModule {}

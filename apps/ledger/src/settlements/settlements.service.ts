@@ -366,12 +366,26 @@ export class SettlementsService {
     if (
       operation.domain_id !== event.domainId ||
       operation.reset_epoch !== event.resetEpoch ||
-      operation.attempt_id !== event.attemptId ||
       operation.request_digest !== event.requestDigest ||
       (event.customerId && operation.customer_id !== event.customerId)
     )
       throw new ActionRejectedError('Execution attempt identity mismatch');
-    return operation;
+    const attempt = await tx.ledgerExecutionAttempt.findUnique({ where: { id: event.attemptId } });
+    if (
+      !attempt ||
+      attempt.operation_id !== operation.id ||
+      attempt.domain_id !== event.domainId ||
+      attempt.reset_epoch !== event.resetEpoch ||
+      attempt.request_digest !== event.requestDigest ||
+      attempt.kind !== operation.kind ||
+      attempt.reservation_id !== operation.reservation_id ||
+      attempt.customer_id !== operation.customer_id
+    )
+      throw new ActionRejectedError(
+        'Attempt has not been independently approved for this obligation',
+      );
+    // Financial status belongs to the obligation; execution authority belongs to the bound attempt.
+    return { ...operation, payload: attempt.intent };
   }
 
   private async updateAttempt(
@@ -379,14 +393,55 @@ export class SettlementsService {
     event: Extract<ExchangeEvent, { type: 'execution.attempt.updated.v1' }>,
   ) {
     const operation = await this.operation(tx, event);
-    if (event.revision < operation.attempt_revision) return;
-    if (event.revision === operation.attempt_revision) {
-      if (event.data.state !== operation.state)
-        throw new ActionRejectedError('Attempt revision conflicts with recorded state');
+    const progress = await tx.ledgerAttemptProgress.findUnique({
+      where: { attempt_id: event.attemptId },
+    });
+    if (!progress) throw new Error('Attempt progress is unavailable; retain and retry delivery');
+    const digest = exchangeDigest(event.data);
+    const received = await tx.ledgerAttemptReport.findUnique({
+      where: { attempt_id_revision: { attempt_id: event.attemptId, revision: event.revision } },
+    });
+    if (received) {
+      const original = exchangeEventSchema.parse(received.payload);
+      if (
+        original.type !== 'execution.attempt.updated.v1' ||
+        received.data_digest !== digest ||
+        canonical(original.data) !== canonical(event.data)
+      )
+        throw new ActionRejectedError('Attempt revision conflicts with recorded report content');
       return;
     }
-    if (operation.settlement_batch_id || operation.state === 'reverted') return;
-    if (operation.reservation_id) {
+    const record = (disposition: string) =>
+      tx.ledgerAttemptReport.create({
+        data: {
+          attempt_id: event.attemptId,
+          revision: event.revision,
+          data_digest: digest,
+          payload: event as Prisma.InputJsonValue,
+          disposition,
+        },
+      });
+    if (event.revision < progress.reported_revision) {
+      await record('ignored_stale');
+      return;
+    }
+    if (event.revision === progress.reported_revision) {
+      // Older deployments retained a high-water mark, not the complete report body.
+      if (
+        progress.reported_revision <= 0 ||
+        progress.reported_digest !== null ||
+        (progress.reported_state !== 'unknown' && progress.reported_state !== event.data.state)
+      )
+        throw new ActionRejectedError('Attempt revision conflicts with recorded report content');
+      await record('projection_replay');
+      await tx.ledgerAttemptProgress.update({
+        where: { attempt_id: event.attemptId },
+        data: { reported_state: event.data.state, reported_digest: digest },
+      });
+      return;
+    }
+    const terminal = !!operation.settlement_payload || operation.state === 'reverted';
+    if (!terminal && operation.reservation_id) {
       const reservation = await tx.withdrawalReservation.findUniqueOrThrow({
         where: { id: operation.reservation_id },
       });
@@ -394,6 +449,7 @@ export class SettlementsService {
         throw new ActionRejectedError('Attempt cannot expose a released reservation');
     }
     const ranks: Record<string, number> = {
+      unknown: 0,
       preparing: 0,
       signing: 1,
       signed: 2,
@@ -404,21 +460,34 @@ export class SettlementsService {
       failed: 5,
     };
     const resumingSigned =
-      operation.state === 'attention' && ['queued', 'submitted'].includes(event.data.state);
+      progress.reported_state === 'attention' && ['queued', 'submitted'].includes(event.data.state);
     if (
+      !terminal &&
       !resumingSigned &&
       event.data.state !== 'attention' &&
-      ranks[event.data.state] < (ranks[operation.state] ?? 0)
+      ranks[event.data.state] < ranks[progress.reported_state]
     )
       throw new ActionRejectedError('Attempt state cannot regress');
-    await tx.exchangeOperation.update({
-      where: { id: operation.id },
-      data: { state: event.data.state, attempt_revision: event.revision },
+    await record(terminal ? 'terminal_observation' : 'applied');
+    await tx.ledgerAttemptProgress.update({
+      where: { attempt_id: event.attemptId },
+      data: {
+        reported_state: event.data.state,
+        reported_revision: event.revision,
+        reported_digest: digest,
+      },
     });
+    // Report progress must never overwrite canonical payment/reversal or release a hold.
+    if (!terminal)
+      await tx.exchangeOperation.update({
+        where: { id: operation.id },
+        data: { state: event.data.state, attempt_revision: event.revision },
+      });
   }
 
   private async settle(tx: Prisma.TransactionClient, event: SettlementEvent) {
     const operation = await this.operation(tx, event);
+    await this.retainCanonicalEvent(tx, event);
     const reversals = await this.reversals(tx, event);
     const execution = exchangeEventSchema.parse(operation.payload) as ExecuteEvent;
     const source = await this.wallet(
@@ -671,6 +740,11 @@ export class SettlementsService {
     if (event.revision <= event.data.priorSettlementRevision)
       throw new ActionRejectedError('Reversal revision must follow its referenced settlement');
     const reversals = await this.reversals(tx, event);
+    const accepted = await tx.exchangeOperation.findUnique({ where: { id: event.operationId } });
+    if (accepted) {
+      await this.operation(tx, event);
+      await this.retainCanonicalEvent(tx, event);
+    }
     const duplicate = reversals.find((row) => row.revision === event.revision);
     if (duplicate) {
       if (duplicate.data_digest !== exchangeDigest(event.data))
@@ -879,6 +953,22 @@ export class SettlementsService {
       exchangeEventSchema.parse(walletDelivery.payload),
       `${key}:sweep`,
     );
+  }
+
+  private async retainCanonicalEvent(
+    tx: Prisma.TransactionClient,
+    event: SettlementEvent | RevertEvent,
+  ) {
+    const prior = await tx.ledgerAttemptCanonicalEvent.findUnique({
+      where: { attempt_id_revision: { attempt_id: event.attemptId, revision: event.revision } },
+    });
+    if (prior) {
+      const recorded = exchangeEventSchema.parse(prior.payload);
+      if (prior.event_type !== event.type || canonical(recorded.data) !== canonical(event.data))
+        throw new ActionRejectedError('Canonical attempt revision conflicts: conflicting content');
+      return;
+    }
+    await tx.$executeRaw`SELECT retain_ledger_canonical_event(${JSON.stringify(event)}::jsonb, 'live')`;
   }
 
   private async incident(tx: Prisma.TransactionClient, event: ExchangeEvent, reason: string) {

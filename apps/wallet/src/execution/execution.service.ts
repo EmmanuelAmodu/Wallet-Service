@@ -6,6 +6,7 @@ import {
 } from '../../../../packages/shared/src/rollout.config.js';
 import { assertManagementFundingEnabled } from '../operations/funding-gate.js';
 import { TokenFeesService } from './token-fees.service.js';
+import { EvmLiquidityService } from './evm-liquidity.service.js';
 import { Optional, Inject, Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { CustodyExecution, Prisma, Wallet } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -92,6 +93,7 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(rolloutConfig.KEY)
     private readonly rollout: RolloutSettings = closedRollout,
+    @Optional() private readonly liquidity?: EvmLiquidityService,
   ) {}
 
   private get planner() {
@@ -909,6 +911,15 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         }
         const { source } = await this.authority(tx, plan);
         if (
+          await tx.withdrawalBatchDraft.findFirst({
+            where: { source_wallet_id: source.id, state: 'planned' },
+          })
+        )
+          throw new SweepDeferral(
+            'waiting_resources',
+            'Source belongs to a retained unsigned batch draft',
+          );
+        if (
           (await tx.custodyExecution.findFirst({
             where: { source_wallet_id: source.id, retired_at: null },
           })) ||
@@ -1085,6 +1096,14 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         });
         if (current.state !== 'planning') return;
         await this.authority(tx, plan);
+        if (request.transaction.chain === 'ethereum')
+          await (this.liquidity ?? new EvmLiquidityService(this.rpc)).reserve(
+            tx,
+            current,
+            wallets.source,
+            request.transaction.nonce,
+            prepared.maxFeeUnits,
+          );
         const keys = prepared.resourceKeys
           .map(
             (key) =>
@@ -1331,6 +1350,14 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
       const current = await tx.custodyExecution.findUniqueOrThrow({ where: { id: execution.id } });
       if (current.state !== 'planning') return;
       await this.authority(tx, plan);
+      if (prepared.request.transaction.kind === 'erc20')
+        await (this.liquidity ?? new EvmLiquidityService(this.rpc)).reserve(
+          tx,
+          current,
+          wallets.source,
+          prepared.request.transaction.nonce,
+          prepared.maxFeeUnits,
+        );
       if (sponsor)
         await new TokenFeesService(this.db, this.rpc).reserve(
           {
@@ -1504,6 +1531,14 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
         });
         if (current.state !== 'prepared') return;
         const { source, hot } = await this.authority(tx, plan);
+        if (request.wallet.chain === 'ethereum' && 'nonce' in request.transaction)
+          await (this.liquidity ?? new EvmLiquidityService(this.rpc)).reserve(
+            tx,
+            current,
+            source,
+            request.transaction.nonce,
+            current.maximum_fee_units!,
+          );
         if (current.expires_at!.getTime() <= Date.now())
           throw new SweepDeferral('preparation_expired', 'Unsigned preparation expired');
         const token = this.tokenPreparation(current);

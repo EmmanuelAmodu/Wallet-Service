@@ -435,11 +435,12 @@ export class SigningCore {
       })),
     });
     if (tx.sweepAll || tx.changeAmount !== undefined) {
-      if (tx.outputs.length !== 1)
+      if (tx.sweepAll && tx.outputs.length !== 1)
         throw new BadRequestException('Bitcoin sweep requires one hot output');
       const total = tx.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n);
       const amount = BigInt(tx.outputs[0].amount),
-        fee = total - amount - BigInt(tx.changeAmount ?? '0');
+        principal = tx.outputs.reduce((sum, output) => sum + BigInt(output.amount), 0n),
+        fee = total - principal - BigInt(tx.changeAmount ?? '0');
       if (fee <= 0n) throw new BadRequestException('Bitcoin sweep fee must be positive');
       input.plan = proto.TransactionPlan.fromObject({
         amount: amount.toString(),
@@ -455,47 +456,59 @@ export class SigningCore {
       this.check(output.error, output.encoded.length);
       if (tx.sweepAll || tx.changeAmount !== undefined) {
         const signed = output.transaction;
-        const targetScript = this.core.BitcoinScript.lockScriptForAddress(
-          signingAddress(tx.outputs[0].address),
-          coin,
-        );
-        try {
-          if (
-            !signed ||
-            signed.outputs?.length !== (BigInt(tx.changeAmount ?? '0') > 0n ? 2 : 1) ||
-            signed.inputs?.length !== tx.utxos.length ||
-            signed.outputs[0].value?.toString() !== tx.outputs[0].amount ||
-            !Buffer.from(signed.outputs[0].script ?? []).equals(Buffer.from(targetScript.data()))
-          )
-            throw new BadRequestException('Signed Bitcoin sweep differs from authorized output');
-          if (
-            signed.outputs.length === 2 &&
-            (signed.outputs[1].value?.toString() !== tx.changeAmount ||
-              Buffer.from(signed.outputs[1].script ?? []).toString('hex') !== ownScript)
-          )
-            throw new BadRequestException('Bitcoin change is not the authorized hot change');
-          const outpoints = new Set(tx.utxos.map((u) => `${u.txid}:${u.vout}`));
-          for (const input of signed.inputs) {
-            const outpoint = input.previousOutput;
+        const change = BigInt(tx.changeAmount ?? '0') > 0n;
+        if (
+          !signed ||
+          signed.outputs?.length !== tx.outputs.length + (change ? 1 : 0) ||
+          signed.inputs?.length !== tx.utxos.length
+        )
+          throw new BadRequestException('Signed Bitcoin payment differs from authorized shape');
+        // Wallet Core inserts change after output 0, before its extraOutputs.
+        // Equal destinations remain separate mapped outputs, never aggregated.
+        for (let index = 0; index < tx.outputs.length; index++) {
+          const expected = tx.outputs[index];
+          const actual = signed.outputs[index + (change && index > 0 ? 1 : 0)];
+          const targetScript = this.core.BitcoinScript.lockScriptForAddress(
+            signingAddress(expected.address),
+            coin,
+          );
+          try {
             if (
-              !outpoint ||
-              !outpoints.delete(
-                `${Buffer.from(outpoint.hash ?? [])
-                  .reverse()
-                  .toString('hex')}:${outpoint.index}`,
-              )
+              actual.value?.toString() !== expected.amount ||
+              !Buffer.from(actual.script ?? []).equals(Buffer.from(targetScript.data()))
             )
-              throw new BadRequestException('Signed Bitcoin sweep changed inputs');
+              throw new BadRequestException(
+                'Signed Bitcoin payment differs from authorized output',
+              );
+          } finally {
+            targetScript.delete();
           }
-          const fee =
-            tx.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n) -
-            BigInt(tx.outputs[0].amount) -
-            BigInt(tx.changeAmount ?? '0');
-          if (fee < BigInt(bitcoinVirtualSize(output.encoded) * tx.satsPerVbyte))
-            throw new BadRequestException('Signed Bitcoin sweep fee below authorized rate');
-        } finally {
-          targetScript.delete();
         }
+        if (
+          change &&
+          (signed.outputs[1].value?.toString() !== tx.changeAmount ||
+            Buffer.from(signed.outputs[1].script ?? []).toString('hex') !== ownScript)
+        )
+          throw new BadRequestException('Bitcoin change is not the authorized hot change');
+        const outpoints = new Set(tx.utxos.map((u) => `${u.txid}:${u.vout}`));
+        for (const input of signed.inputs) {
+          const outpoint = input.previousOutput;
+          if (
+            !outpoint ||
+            !outpoints.delete(
+              `${Buffer.from(outpoint.hash ?? [])
+                .reverse()
+                .toString('hex')}:${outpoint.index}`,
+            )
+          )
+            throw new BadRequestException('Signed Bitcoin sweep changed inputs');
+        }
+        const fee =
+          tx.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n) -
+          tx.outputs.reduce((sum, output) => sum + BigInt(output.amount), 0n) -
+          BigInt(tx.changeAmount ?? '0');
+        if (fee < BigInt(bitcoinVirtualSize(output.encoded) * tx.satsPerVbyte))
+          throw new BadRequestException('Signed Bitcoin sweep fee below authorized rate');
       }
       return {
         raw: Buffer.from(output.encoded).toString('hex'),

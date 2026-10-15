@@ -34,6 +34,9 @@ enum WalletTransactionStatus {
 }
 
 model Wallet {
+  batch_drafts WithdrawalBatchDraft[]
+  liquidity_reservations EvmLiquidityReservation[]
+  custody_attempts CustodyAttempt[]
   id                        String                   @id @db.Uuid
   external_id               String
   chain                     String
@@ -158,6 +161,7 @@ model AssetConfiguration {
 }
 
 model Transaction {
+  custody_attempt CustodyAttempt?
   id                   String                  @id @db.Uuid
   wallet_id            String                  @db.Uuid
   wallet               Wallet                  @relation(fields: [wallet_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -183,6 +187,8 @@ model Transaction {
 }
 
 model CustodyExecution {
+  liquidity_reservation EvmLiquidityReservation?
+  attempts CustodyAttempt[]
   id                  String                   @id @db.Uuid
   operation_id        String                   @unique @db.Uuid
   attempt_id          String                   @unique @db.Uuid
@@ -379,6 +385,9 @@ model ExchangeDepositProjection {
 
 // Wallet owns customer withdrawal intents and their reservation/execution saga.
 model Withdrawal {
+  batch_draft_id String? @db.Uuid
+  batch_draft WithdrawalBatchDraft? @relation(fields:[batch_draft_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  batch_memberships WithdrawalBatchDraftMember[]
   id String @id @db.Uuid
   customer_id String @db.Uuid
   domain_id String
@@ -521,4 +530,99 @@ model OperationsFundingGate {
  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
  @@id([domain_id,reset_epoch])
  @@map("operations_funding_gates")
+}
+
+// Immutable attempt identity and append-only state evidence. Current execution rows
+// remain projections; replacement/batch authorization is certified separately.
+model CustodyAttempt {
+  execution CustodyExecution @relation(fields:[execution_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  transaction Transaction @relation(fields:[transaction_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  source Wallet @relation(fields:[source_wallet_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  predecessor CustodyAttempt? @relation("AttemptLineage", fields:[predecessor_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  successors CustodyAttempt[] @relation("AttemptLineage")
+  id String @id @db.Uuid
+  execution_id String @db.Uuid
+  operation_id String @db.Uuid
+  transaction_id String @unique @db.Uuid
+  domain_id String
+  reset_epoch String
+  source_wallet_id String @db.Uuid
+  ordinal Int @default(0)
+  predecessor_id String? @db.Uuid
+  request_digest String
+  created_at DateTime @default(now()) @db.Timestamptz
+  observations CustodyAttemptObservation[]
+  @@unique([execution_id,ordinal])
+  @@index([domain_id,reset_epoch,operation_id], map:"custody_attempts_domain_epoch_operation")
+  @@map("custody_attempts")
+}
+
+model CustodyAttemptObservation {
+  id String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  sequence BigInt @default(autoincrement()) @unique
+  attempt_id String @db.Uuid
+  attempt CustodyAttempt @relation(fields:[attempt_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  digest String
+  provenance String
+  evidence Json
+  recorded_at DateTime @default(now()) @db.Timestamptz
+  @@unique([attempt_id,digest])
+  @@index([attempt_id,sequence], map:"custody_attempt_observations_attempt_sequence")
+  @@map("custody_attempt_observations")
+}
+
+// A chain resource/custody reserve is independent of the customer's Ledger hold.
+model EvmLiquidityReservation {
+  execution_id String @id @db.Uuid
+  execution CustodyExecution @relation(fields:[execution_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  source_wallet_id String @db.Uuid
+  source Wallet @relation(fields:[source_wallet_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+  domain_id String
+  reset_epoch String
+  seed_id String
+  network String
+  nonce String
+  asset_id String
+  principal_units String
+  maximum_fee_units String
+  request_digest String
+  evidence Json
+  state String @default("reserved")
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+  @@index([source_wallet_id,state],map:"evm_liquidity_reservations_source_state")
+  @@unique([source_wallet_id,nonce],where:raw("\"state\" <> 'unsigned_released'"),map:"one_signed_evm_nonce_owner")
+  @@map("evm_liquidity_reservations")
+}
+
+// Draft ownership cannot dispatch a payment. A separate certified signing protocol is required.
+model WithdrawalBatchDraft {
+ id String @id @db.Uuid
+ source_wallet_id String @db.Uuid
+ source Wallet @relation(fields:[source_wallet_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+ domain_id String
+ reset_epoch String
+ manifest Json
+ manifest_digest String
+ state String @default("planned")
+ created_at DateTime @default(now()) @db.Timestamptz
+ released_at DateTime? @db.Timestamptz
+ members WithdrawalBatchDraftMember[]
+ withdrawals Withdrawal[]
+ @@unique([source_wallet_id],where:raw("\"state\" = 'planned'"),map:"one_planned_batch_draft_per_source")
+ @@map("withdrawal_batch_drafts")
+}
+model WithdrawalBatchDraftMember {
+ batch_id String @db.Uuid
+ batch WithdrawalBatchDraft @relation(fields:[batch_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+ member_index Int
+ withdrawal_id String @db.Uuid
+ withdrawal Withdrawal @relation(fields:[withdrawal_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+ attempt_id String @unique @db.Uuid
+ reservation_id String @db.Uuid
+ active Boolean @default(true)
+ @@id([batch_id,member_index])
+ @@unique([withdrawal_id],where:raw("\"active\""),map:"one_active_draft_per_withdrawal")
+ @@unique([reservation_id],where:raw("\"active\""),map:"one_active_draft_per_hold")
+ @@map("withdrawal_batch_draft_members")
 }

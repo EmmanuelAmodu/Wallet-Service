@@ -1147,6 +1147,35 @@ test(
     if (f.rpc.request!.transaction.chain === 'ethereum')
       assert.equal(f.rpc.request!.transaction.amount, f.request.amount);
     assert.equal(result.type, 'transaction.custody.signed');
+    const allocation = await db.evmLiquidityReservation.findUniqueOrThrow({
+      where: {
+        execution_id: (await db.withdrawal.findUniqueOrThrow({ where: { id: w.id } })).attempt_id!,
+      },
+    });
+    assert.equal(allocation.state, 'reserved');
+    assert.equal(allocation.principal_units, f.request.amount);
+    assert.equal(allocation.asset_id, 'token:ethereum:native');
+    assert.equal(allocation.nonce, f.rpc.nonce.toString());
+    await assert.rejects(
+      () =>
+        db.evmLiquidityReservation.update({
+          where: { execution_id: allocation.execution_id },
+          data: { state: 'settled' },
+        }),
+      /canonical acknowledgment/,
+    );
+    await assert.rejects(
+      () =>
+        db.evmLiquidityReservation.update({
+          where: { execution_id: allocation.execution_id },
+          data: { principal_units: '1' },
+        }),
+      /original hot withdrawal|immutable/,
+    );
+    await assert.rejects(
+      () => db.evmLiquidityReservation.delete({ where: { execution_id: allocation.execution_id } }),
+      /retained/,
+    );
     await assert.rejects(() => f.withdrawals.cancel(f.customerId, w.id), /Authorized/);
     await f.settle(w.id);
     assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'settled');
@@ -1157,6 +1186,14 @@ test(
     );
     assert.ok(
       (await db.custodyExecution.findUniqueOrThrow({ where: { operation_id: w.id } })).retired_at,
+    );
+    assert.equal(
+      (
+        await db.evmLiquidityReservation.findUniqueOrThrow({
+          where: { execution_id: allocation.execution_id },
+        })
+      ).state,
+      'settled',
     );
     const balances = await registry.balances(settings.domainId, f.customerId);
     assert.equal(balances.balances[0].available, String(10n ** 18n - BigInt(f.request.amount)));
@@ -1269,6 +1306,14 @@ test(
     });
     f.rpc.canonicalBlock = replacementBlock;
     await f.service.reconcile(execution.transaction_id);
+    assert.equal(
+      (
+        await db.evmLiquidityReservation.findUniqueOrThrow({
+          where: { execution_id: execution.id },
+        })
+      ).state,
+      'reverted',
+    );
     await f.withdrawals.handle(await f.response(w.id, 'execution.attempt.updated.v1'));
     assert.equal((await f.withdrawals.get(f.customerId, w.id)).state, 'reconciliation_required');
     const reversal = await f.response(w.id, 'settlement.reverted.v1', QUEUES.ledger);
@@ -1632,6 +1677,56 @@ test(
     next.rpc.signed = signed.signed;
     await next.service.handle(signed);
     await next.settle(b.id);
+  },
+);
+
+test(
+  'Phase 9 a rewound provider nonce cannot be reassigned from a settled signed withdrawal to a new customer obligation',
+  { skip: !enabled },
+  async () => {
+    const f = await withdrawalFixture();
+    const paid = await f.reserve();
+    await f.sign(paid.id);
+    await f.settle(paid.id);
+    const first = await db.evmLiquidityReservation.findFirstOrThrow({
+      where: {
+        source_wallet_id:
+          f.source.hot_wallet_id ??
+          (await db.withdrawal.findUniqueOrThrow({ where: { id: paid.id } })).hot_wallet_id,
+        state: 'settled',
+      },
+      orderBy: { created_at: 'desc' },
+    });
+    // FakeRpc intentionally still reports the consumed nonce, as an out-of-date/rewound node would.
+    const next = await f.reserve({ ...f.request, idempotencyKey: randomUUID() });
+    await f.withdrawals.repairDue();
+    await f.service.handle(await f.response(next.id, 'withdrawal.plan.requested.v1'));
+    const attempt = await db.custodyExecution.findUniqueOrThrow({
+      where: { operation_id: next.id },
+    });
+    assert.match(attempt.last_error ?? '', /previously signed obligation/);
+    assert.equal(attempt.authorization, null);
+    assert.equal(
+      await db.outbox.count({
+        where: { queue: QUEUES.signer, payload: { path: ['operationId'], equals: next.id } },
+      }),
+      0,
+    );
+    assert.equal(
+      (await ledger.withdrawalReservation.findUniqueOrThrow({ where: { operation_id: next.id } }))
+        .state,
+      'held',
+    );
+    assert.equal(
+      (
+        await db.evmLiquidityReservation.findUniqueOrThrow({
+          where: { execution_id: first.execution_id },
+        })
+      ).state,
+      'settled',
+    );
+    await f.withdrawals.cancel(f.customerId, next.id);
+    await f.release(next.id);
   },
 );
 

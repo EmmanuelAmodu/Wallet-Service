@@ -214,6 +214,7 @@ const serviceKey = 'w'.repeat(64),
         status: async () => ({ state: 'fixture' }),
         command: async (body: unknown) => body,
         metrics: async () => [],
+        attempts: async (transactionId: string) => ({ transactionId, replacementEnabled: false }),
       },
     },
   ],
@@ -239,6 +240,20 @@ test('Operations HTTP requires both private credentials; customer tokens and mal
       'content-type': 'application/json',
     };
     assert.equal((await fetch(url, { headers: headers as Record<string, string> })).status, 200);
+    const historyUrl = `${url}/executions/${randomUUID()}/attempts`;
+    assert.equal(
+      (await fetch(historyUrl, { headers: { authorization: `Bearer ${serviceKey}` } })).status,
+      401,
+    );
+    assert.equal((await fetch(historyUrl, { headers })).status, 200);
+    for (const query of [
+      'cursor=not-a-number',
+      'cursor=9223372036854775808',
+      'limit=0',
+      'domainId=override',
+    ])
+      assert.equal((await fetch(`${historyUrl}?${query}`, { headers })).status, 400);
+
     assert.equal(
       (
         await fetch(`${url}/commands`, {

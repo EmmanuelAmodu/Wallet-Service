@@ -18,6 +18,7 @@ import {
   OnModuleDestroy,
   OnModuleInit,
   ConflictException,
+  BadRequestException,
   NotFoundException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
@@ -1159,6 +1160,56 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
     }
     await this.storeMetrics('wallet', metrics, new Date().toISOString());
     return metrics;
+  }
+
+  async attempts(transactionId: string, cursor?: string, limit = 50) {
+    if (
+      !Number.isSafeInteger(limit) ||
+      limit < 1 ||
+      limit > 100 ||
+      (cursor !== undefined &&
+        (!/^[1-9][0-9]{0,18}$/.test(cursor) || BigInt(cursor) > 9223372036854775807n))
+    )
+      throw new BadRequestException('Invalid attempt history pagination');
+    const execution = await this.db.custodyExecution.findFirst({
+      where: {
+        transaction_id: transactionId,
+        domain_id: this.wallet.domainId!,
+        reset_epoch: this.auth.resetEpoch,
+      },
+    });
+    if (!execution) throw new NotFoundException('Custody execution not found');
+    const attempts = await this.db.custodyAttempt.findMany({
+      where: {
+        execution_id: execution.id,
+        domain_id: this.wallet.domainId!,
+        reset_epoch: this.auth.resetEpoch,
+      },
+      orderBy: { ordinal: 'asc' },
+    });
+    const ids = attempts.map((a) => a.id);
+    if (
+      cursor &&
+      !(await this.db.custodyAttemptObservation.findFirst({
+        where: { attempt_id: { in: ids }, sequence: BigInt(cursor) },
+        select: { id: true },
+      }))
+    )
+      throw new BadRequestException('Attempt history cursor belongs to another execution');
+    const rows = await this.db.custodyAttemptObservation.findMany({
+      where: { attempt_id: { in: ids }, ...(cursor ? { sequence: { gt: BigInt(cursor) } } : {}) },
+      orderBy: { sequence: 'asc' },
+      take: limit + 1,
+    });
+    const observations = rows.slice(0, limit);
+    return {
+      transactionId,
+      operationId: execution.operation_id,
+      replacementEnabled: false,
+      attempts,
+      observations: observations.map((o) => ({ ...o, sequence: o.sequence.toString() })),
+      nextCursor: rows.length > limit ? observations.at(-1)!.sequence.toString() : null,
+    };
   }
 
   async status() {

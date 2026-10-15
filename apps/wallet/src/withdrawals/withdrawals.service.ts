@@ -401,6 +401,8 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
       await lock(tx, `withdrawal:${id}`);
       await tx.$queryRaw`SELECT id FROM withdrawals WHERE id=${id}::uuid FOR UPDATE`;
       const w = await tx.withdrawal.findUniqueOrThrow({ where: { id } });
+      if (w.batch_draft_id)
+        throw new ConflictException('Dissolve the unsigned batch draft before cancelling a member');
       if (['cancelled', 'rejected'].includes(w.state)) return w;
       const execution = await tx.custodyExecution.findUnique({ where: { operation_id: id } });
       if (
@@ -697,6 +699,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
         await lock(tx, `custody-source:${snapshot.hot_wallet_id}`);
         await lock(tx, `withdrawal:${snapshot.id}`);
         const w = await tx.withdrawal.findUniqueOrThrow({ where: { id: snapshot.id } });
+        if (w.batch_draft_id) return;
         await tx.withdrawal.update({
           where: { id: w.id },
           data: { next_check_at: new Date(Date.now() + this.execution.pollIntervalMs) },

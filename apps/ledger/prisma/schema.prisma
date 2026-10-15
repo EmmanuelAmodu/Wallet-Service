@@ -291,6 +291,7 @@ model Deposit {
 }
 
 model WithdrawalReservation {
+  execution_attempts LedgerExecutionAttempt[]
   customer         ExchangeCustomer           @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
   reserve_batch    JournalBatch?              @relation("ReservationReserveBatch", fields: [reserve_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   release_batch    JournalBatch?              @relation("ReservationReleaseBatch", fields: [release_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -316,6 +317,7 @@ model WithdrawalReservation {
 }
 
 model ExchangeOperation {
+  attempts LedgerExecutionAttempt[]
   customer            ExchangeCustomer?      @relation(fields: [customer_id], references: [customer_id], onDelete: NoAction, onUpdate: NoAction)
   reservation         WithdrawalReservation? @relation(fields: [reservation_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   settlement_batch    JournalBatch?          @relation(fields: [settlement_batch_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
@@ -423,4 +425,73 @@ model CustodyReconciliation {
  created_at DateTime @default(now()) @db.Timestamptz
  @@index([domain_id,reset_epoch,wallet_id,created_at])
  @@map("custody_reconciliations")
+}
+
+// Financial obligations remain in ExchangeOperation/WithdrawalReservation.
+// Per-attempt authority is immutable and independently bound to that obligation.
+model LedgerExecutionAttempt {
+  progress LedgerAttemptProgress?
+  reports LedgerAttemptReport[]
+  canonical_events LedgerAttemptCanonicalEvent[]
+  id String @id @db.Uuid
+  operation_id String @db.Uuid
+  operation ExchangeOperation @relation(fields:[operation_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  reservation_id String? @db.Uuid
+  reservation WithdrawalReservation? @relation(fields:[reservation_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  domain_id String
+  reset_epoch String
+  customer_id String? @db.Uuid
+  request_digest String
+  kind ExchangeOperationKind
+  ordinal Int @default(0)
+  predecessor_id String? @db.Uuid
+  predecessor LedgerExecutionAttempt? @relation("LedgerAttemptLineage", fields:[predecessor_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  successors LedgerExecutionAttempt[] @relation("LedgerAttemptLineage")
+  intent Json
+  intent_digest String
+  created_at DateTime @default(now()) @db.Timestamptz
+  @@unique([operation_id,ordinal])
+  @@index([domain_id,reset_epoch,operation_id],map:"ledger_execution_attempts_scope")
+  @@map("ledger_execution_attempts")
+}
+
+// Reported transport/execution progress is independent of canonical financial state.
+model LedgerAttemptProgress {
+  attempt_id String @id @db.Uuid
+  attempt LedgerExecutionAttempt @relation(fields:[attempt_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  reported_state String @default("preparing")
+  reported_revision Int @default(0)
+  reported_digest String?
+  canonical_state String @default("none")
+  canonical_revision Int @default(0)
+  origin String
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+  @@map("ledger_attempt_progress")
+}
+
+model LedgerAttemptReport {
+  attempt_id String @db.Uuid
+  attempt LedgerExecutionAttempt @relation(fields:[attempt_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  revision Int
+  data_digest String
+  payload Json
+  disposition String
+  received_at DateTime @default(now()) @db.Timestamptz
+  @@id([attempt_id,revision])
+  @@map("ledger_attempt_reports")
+}
+
+// Canonical delivery receipts survive later reversals/reinclusions. They are not journals.
+model LedgerAttemptCanonicalEvent {
+  attempt_id String @db.Uuid
+  attempt LedgerExecutionAttempt @relation(fields:[attempt_id], references:[id], onDelete:NoAction, onUpdate:NoAction)
+  revision Int
+  event_type String
+  data_digest String
+  payload Json
+  origin String
+  received_at DateTime @default(now()) @db.Timestamptz
+  @@id([attempt_id,revision])
+  @@map("ledger_attempt_canonical_events")
 }

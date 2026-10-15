@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import { Client } from 'pg';
+import { isolatedDatabase } from './helpers/custody-fixture.js';
 import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import 'reflect-metadata';
 import { after, before, test } from 'node:test';
@@ -85,7 +88,12 @@ function base(domainId: string, revision = 1) {
   };
 }
 
-async function fixture() {
+async function fixture(scope: LedgerPrismaService | undefined = db) {
+  const db = scope!,
+    registry = new ExchangeRegistryService(db),
+    deposits = new DepositsService(db, journal, config, acceptanceRollout),
+    reservations = new ReservationsService(db, journal, config),
+    settlements = new SettlementsService(db, journal, reservations);
   const domainId = `settlement-${randomUUID()}`;
   domains.add(domainId);
   const customerId = randomUUID(),
@@ -1264,5 +1272,644 @@ test(
     await settlements!.handle({ ...outcome, eventId: randomUUID(), revision: 3 });
     assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
     assert.equal(await f.balance('custody_hot', f.hotId), 200n);
+  },
+);
+
+test(
+  'Phase 9 immutable attempt authority binds the original hold and fences unapproved attempts without losing original payment/reorg recovery',
+  { skip: !db },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    await f.execute('sweep', '900');
+    const { execution, reservation } = await f.reserve('200');
+    const attempt = await db!.ledgerExecutionAttempt.findUniqueOrThrow({
+      where: { id: execution.attemptId! },
+    });
+    assert.equal(attempt.operation_id, execution.operationId);
+    assert.equal(attempt.reservation_id, reservation.id);
+    assert.equal(attempt.request_digest, execution.requestDigest);
+    assert.deepEqual(attempt.intent, execution);
+    assert.equal(attempt.ordinal, 0);
+    assert.equal(attempt.predecessor_id, null);
+    const count = await db!.journalBatch.count({ where: { domain_id: f.domainId } });
+    await assert.rejects(
+      () =>
+        settlements!.handle({
+          ...settlement(execution, 'confirmed', '3'),
+          eventId: randomUUID(),
+          attemptId: randomUUID(),
+        }),
+      /independently approved/,
+    );
+    assert.equal(await db!.journalBatch.count({ where: { domain_id: f.domainId } }), count);
+    assert.equal(
+      (await db!.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } })).state,
+      'held',
+    );
+    const sql = new Client({ connectionString: databaseUrl });
+    await sql.connect();
+    try {
+      for (const query of [
+        "UPDATE ledger_execution_attempts SET intent='{}' WHERE id=$1",
+        'UPDATE ledger_execution_attempts SET reservation_id=NULL WHERE id=$1',
+        'DELETE FROM ledger_execution_attempts WHERE id=$1',
+      ])
+        await assert.rejects(
+          () => sql.query(query, [execution.attemptId]),
+          /authority is immutable/,
+        );
+      for (const query of [
+        "UPDATE exchange_operations SET payload='{}' WHERE id=$1",
+        'UPDATE exchange_operations SET attempt_id=gen_random_uuid() WHERE id=$1',
+        'UPDATE exchange_operations SET reservation_id=NULL WHERE id=$1',
+        'DELETE FROM exchange_operations WHERE id=$1',
+      ])
+        await assert.rejects(() => sql.query(query, [execution.operationId]), /immutable|retained/);
+      await assert.rejects(
+        () =>
+          sql.query(
+            `INSERT INTO ledger_execution_attempts(id,operation_id,reservation_id,domain_id,reset_epoch,customer_id,request_digest,kind,ordinal,predecessor_id,intent,intent_digest)
+      SELECT gen_random_uuid(),operation_id,reservation_id,domain_id,reset_epoch,customer_id,request_digest,kind,1,id,intent,intent_digest FROM ledger_execution_attempts WHERE id=$1`,
+            [execution.attemptId],
+          ),
+        /differs|root_attempt_only/,
+      );
+    } finally {
+      await sql.end();
+    }
+    const holdSql = new Client({ connectionString: databaseUrl });
+    await holdSql.connect();
+    try {
+      for (const query of [
+        "UPDATE withdrawal_reservations SET amounts='[]' WHERE id=$1",
+        "UPDATE withdrawal_reservations SET request='{}' WHERE id=$1",
+        'UPDATE withdrawal_reservations SET customer_id=gen_random_uuid() WHERE id=$1',
+        'DELETE FROM withdrawal_reservations WHERE id=$1',
+      ])
+        await assert.rejects(() => holdSql.query(query, [reservation.id]), /immutable|retained/);
+    } finally {
+      await holdSql.end();
+    }
+    const original = settlement(execution, 'confirmed', '3');
+    await settlements!.handle(original);
+    await settlements!.handle({ ...original, eventId: randomUUID() });
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 697n);
+    await settlements!.handle(reversal(execution));
+    assert.equal(await f.balance('customer_reserved', f.customerId), 200n);
+    assert.equal(
+      (await db!.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } })).state,
+      'held',
+    );
+    await settlements!.handle({ ...original, eventId: randomUUID(), revision: 3 });
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 697n);
+    assert.deepEqual(
+      await db!.ledgerExecutionAttempt.findUniqueOrThrow({ where: { id: execution.attemptId! } }),
+      attempt,
+    );
+  },
+);
+
+test(
+  'Phase 9 Ledger migration backfills accepted attempt authority without resetting an existing customer obligation or its hold',
+  { skip: !databaseUrl },
+  async () => {
+    const isolated = await isolatedDatabase(databaseUrl!, 'ledger'),
+      scope = new LedgerPrismaService({ databaseUrl: isolated.url });
+    const sql = new Client({ connectionString: isolated.url });
+    await sql.connect();
+    try {
+      assert.equal(await scope.ledgerExecutionAttempt.count(), 0);
+      await sql.query(`DROP TRIGGER retain_canonical_operation ON exchange_operations;
+      DROP TRIGGER retain_canonical_reversal ON settlement_reversals;
+      DROP TRIGGER retain_canonical_attempt ON ledger_execution_attempts;
+      DROP TABLE ledger_attempt_canonical_events;
+      DROP FUNCTION protect_ledger_canonical_receipt(); DROP FUNCTION capture_ledger_canonical_projection();
+      DROP FUNCTION retain_ledger_canonical_event(jsonb,text);
+      DROP TRIGGER sync_attempt_projection ON exchange_operations; DROP FUNCTION sync_ledger_attempt_projection();
+      DROP TRIGGER initialize_attempt_progress ON ledger_execution_attempts;
+      DROP TABLE ledger_attempt_reports; DROP TABLE ledger_attempt_progress;
+      DROP FUNCTION initialize_ledger_attempt_progress(); DROP FUNCTION protect_ledger_attempt_report(); DROP FUNCTION protect_ledger_attempt_progress();
+      DROP TRIGGER ledger_execution_attempt_insert ON exchange_operations;
+      DROP TRIGGER immutable_exchange_obligation_identity ON exchange_operations;
+      DROP TRIGGER immutable_withdrawal_obligation_terms ON withdrawal_reservations;
+      DROP FUNCTION protect_withdrawal_obligation_terms();
+      DROP FUNCTION bind_new_ledger_execution_attempt(); DROP FUNCTION capture_ledger_execution_attempt(uuid);
+      DROP FUNCTION protect_exchange_obligation_identity(); DROP TABLE ledger_execution_attempts;
+      DROP FUNCTION protect_ledger_execution_attempt();`);
+      const f = await fixture(scope),
+        localSettlements = new SettlementsService(
+          scope,
+          journal,
+          new ReservationsService(scope, journal, config),
+        );
+      await f.credit('1000');
+      const { execution, reservation } = await f.reserve('200', undefined, false);
+      await localSettlements.handle(execution);
+      const before = {
+        operation: await scope.exchangeOperation.findUniqueOrThrow({
+          where: { id: execution.operationId! },
+        }),
+        hold: await scope.withdrawalReservation.findUniqueOrThrow({
+          where: { id: reservation.id },
+        }),
+        journals: await scope.journalBatch.count(),
+      };
+      await sql.query('BEGIN');
+      await sql.query(
+        await readFile(
+          'apps/ledger/prisma/migrations/20261014020000_immutable_execution_attempts/migration.sql',
+          'utf8',
+        ),
+      );
+      await sql.query('COMMIT');
+      const bound = await scope.ledgerExecutionAttempt.findUniqueOrThrow({
+        where: { id: execution.attemptId! },
+      });
+      assert.equal(bound.reservation_id, reservation.id);
+      assert.deepEqual(bound.intent, execution);
+      assert.deepEqual(
+        await scope.exchangeOperation.findUniqueOrThrow({ where: { id: execution.operationId! } }),
+        before.operation,
+      );
+      assert.deepEqual(
+        await scope.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } }),
+        before.hold,
+      );
+      assert.equal(await scope.journalBatch.count(), before.journals);
+      assert.equal(await f.balance('customer_reserved', f.customerId), 200n);
+      assert.equal(
+        (
+          await sql.query(
+            `SELECT count(*)::int AS invalid FROM ledger_execution_attempts WHERE intent_digest<>encode(sha256(convert_to(intent::text,'UTF8')),'hex')`,
+          )
+        ).rows[0].invalid,
+        0,
+      );
+    } finally {
+      await sql.end();
+      await scope.$disconnect();
+      await isolated.drop();
+    }
+  },
+);
+
+test(
+  'Phase 9 per-attempt reports retain revision content independently of canonical payment, late delivery and reorg state',
+  { skip: !db },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    await f.execute('sweep', '900');
+    const { execution, reservation } = await f.reserve('200');
+    const report = (revision: number, data: Record<string, unknown>) =>
+      exchangeEventSchema.parse({
+        ...base(f.domainId, revision),
+        type: 'execution.attempt.updated.v1',
+        operationId: execution.operationId,
+        attemptId: execution.attemptId,
+        requestDigest: execution.requestDigest,
+        data,
+      });
+    const submitted = report(10, {
+      state: 'submitted',
+      transactionHash: 'original-hash',
+      terminalSafe: false,
+    });
+    await settlements!.handle(submitted);
+    await settlements!.handle(report(7, { state: 'queued' }));
+    await settlements!.handle(report(7, { state: 'queued' }));
+    assert.equal(
+      (
+        await db!.ledgerAttemptReport.findUniqueOrThrow({
+          where: { attempt_id_revision: { attempt_id: execution.attemptId!, revision: 7 } },
+        })
+      ).disposition,
+      'ignored_stale',
+    );
+    for (const changed of [
+      report(7, { state: 'attention' }),
+      report(10, { state: 'submitted', transactionHash: 'different-hash', terminalSafe: false }),
+      report(10, { state: 'submitted', transactionHash: 'original-hash', terminalSafe: true }),
+    ])
+      await assert.rejects(() => settlements!.handle(changed), /revision conflicts/);
+    let progress = await db!.ledgerAttemptProgress.findUniqueOrThrow({
+      where: { attempt_id: execution.attemptId! },
+    });
+    assert.equal(progress.reported_revision, 10);
+    assert.equal(progress.reported_state, 'submitted');
+    assert.equal(progress.canonical_state, 'none');
+    assert.equal(
+      (await db!.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } })).state,
+      'held',
+    );
+    const paid = settlement(execution, 'confirmed', '3');
+    await settlements!.handle(paid);
+    // Duplicate reporting after settlement compares with its own receipt, not the financial state.
+    await settlements!.handle({ ...submitted, eventId: randomUUID() });
+    const count = await db!.journalBatch.count({ where: { domain_id: f.domainId } });
+    await settlements!.handle(
+      report(11, { state: 'attention', reason: 'Delayed transport observation' }),
+    );
+    progress = await db!.ledgerAttemptProgress.findUniqueOrThrow({
+      where: { attempt_id: execution.attemptId! },
+    });
+    assert.equal(progress.reported_revision, 11);
+    assert.equal(progress.reported_state, 'attention');
+    assert.equal(progress.canonical_state, 'confirmed');
+    assert.equal(progress.canonical_revision, 1);
+    assert.equal(
+      (await db!.exchangeOperation.findUniqueOrThrow({ where: { id: execution.operationId! } }))
+        .state,
+      'confirmed',
+    );
+    assert.equal(await db!.journalBatch.count({ where: { domain_id: f.domainId } }), count);
+    await settlements!.handle(reversal(execution));
+    await settlements!.handle(report(12, { state: 'queued', terminalSafe: false }));
+    assert.equal(
+      (await db!.exchangeOperation.findUniqueOrThrow({ where: { id: execution.operationId! } }))
+        .state,
+      'reverted',
+    );
+    assert.equal(await f.balance('customer_reserved', f.customerId), 200n);
+    await settlements!.handle({ ...paid, eventId: randomUUID(), revision: 3 });
+    progress = await db!.ledgerAttemptProgress.findUniqueOrThrow({
+      where: { attempt_id: execution.attemptId! },
+    });
+    assert.equal(progress.reported_revision, 12);
+    assert.equal(progress.canonical_state, 'confirmed');
+    assert.equal(progress.canonical_revision, 3);
+    assert.equal(await f.balance('custody_hot', f.hotId), 697n);
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    const sql = new Client({ connectionString: databaseUrl });
+    await sql.connect();
+    try {
+      await assert.rejects(
+        () =>
+          sql.query('UPDATE ledger_attempt_reports SET data_digest=$1 WHERE attempt_id=$2', [
+            'a'.repeat(64),
+            execution.attemptId,
+          ]),
+        /history is immutable/,
+      );
+      await assert.rejects(
+        () =>
+          sql.query('DELETE FROM ledger_attempt_reports WHERE attempt_id=$1', [
+            execution.attemptId,
+          ]),
+        /history is immutable/,
+      );
+      await assert.rejects(
+        () =>
+          sql.query('UPDATE ledger_attempt_progress SET reported_revision=1 WHERE attempt_id=$1', [
+            execution.attemptId,
+          ]),
+        /cannot regress/,
+      );
+      await assert.rejects(
+        () =>
+          sql.query(
+            "UPDATE ledger_attempt_progress SET canonical_state='reverted' WHERE attempt_id=$1",
+            [execution.attemptId],
+          ),
+        /cannot change outcome/,
+      );
+    } finally {
+      await sql.end();
+    }
+  },
+);
+
+test(
+  'Phase 9 progress migration preserves revision fences without inventing historical report content',
+  { skip: !databaseUrl },
+  async () => {
+    const isolated = await isolatedDatabase(databaseUrl!, 'ledger'),
+      scope = new LedgerPrismaService({ databaseUrl: isolated.url }),
+      sql = new Client({ connectionString: isolated.url });
+    await sql.connect();
+    const local = new SettlementsService(
+      scope,
+      journal,
+      new ReservationsService(scope, journal, config),
+    );
+    try {
+      assert.equal(await scope.ledgerAttemptReport.count(), 0);
+      await sql.query(`DROP TRIGGER sync_attempt_projection ON exchange_operations; DROP FUNCTION sync_ledger_attempt_projection();
+      DROP TRIGGER initialize_attempt_progress ON ledger_execution_attempts;
+      DROP TABLE ledger_attempt_reports; DROP TABLE ledger_attempt_progress;
+      DROP FUNCTION initialize_ledger_attempt_progress(); DROP FUNCTION protect_ledger_attempt_report(); DROP FUNCTION protect_ledger_attempt_progress();`);
+      const f = await fixture(scope);
+      await f.credit('1000');
+      const { execution, reservation } = await f.reserve('200');
+      await scope.exchangeOperation.update({
+        where: { id: execution.operationId! },
+        data: { state: 'submitted', attempt_revision: 7 },
+      });
+      await f.execute('sweep', '900');
+      const paidRoot = await f.reserve('100');
+      await scope.exchangeOperation.update({
+        where: { id: paidRoot.execution.operationId! },
+        data: { state: 'submitted', attempt_revision: 5 },
+      });
+      await local.handle(settlement(paidRoot.execution, 'confirmed', '3'));
+      const before = await scope.journalBatch.count();
+      await sql.query('BEGIN');
+      await sql.query(
+        await readFile(
+          'apps/ledger/prisma/migrations/20261014030000_attempt_progress/migration.sql',
+          'utf8',
+        ),
+      );
+      await sql.query('COMMIT');
+      let progress = await scope.ledgerAttemptProgress.findUniqueOrThrow({
+        where: { attempt_id: execution.attemptId! },
+      });
+      assert.equal(progress.origin, 'migration_projection');
+      assert.equal(progress.reported_revision, 7);
+      assert.equal(progress.reported_digest, null);
+      assert.equal(await scope.ledgerAttemptReport.count(), 0);
+      const paidProgress = await scope.ledgerAttemptProgress.findUniqueOrThrow({
+        where: { attempt_id: paidRoot.execution.attemptId! },
+      });
+      assert.equal(paidProgress.reported_state, 'unknown');
+      assert.equal(paidProgress.reported_revision, 5);
+      assert.equal(paidProgress.canonical_state, 'confirmed');
+      const paidReplay = exchangeEventSchema.parse({
+        ...base(f.domainId, 5),
+        type: 'execution.attempt.updated.v1',
+        operationId: paidRoot.execution.operationId,
+        attemptId: paidRoot.execution.attemptId,
+        requestDigest: paidRoot.execution.requestDigest,
+        data: { state: 'submitted', transactionHash: 'paid-original' },
+      });
+      await local.handle(paidReplay);
+      assert.equal(
+        (
+          await scope.ledgerAttemptProgress.findUniqueOrThrow({
+            where: { attempt_id: paidRoot.execution.attemptId! },
+          })
+        ).canonical_state,
+        'confirmed',
+      );
+
+      const original = exchangeEventSchema.parse({
+        ...base(f.domainId, 7),
+        type: 'execution.attempt.updated.v1',
+        operationId: execution.operationId,
+        attemptId: execution.attemptId,
+        requestDigest: execution.requestDigest,
+        data: { state: 'submitted', transactionHash: 'retained-original' },
+      });
+      await local.handle(original);
+      await local.handle({ ...original, eventId: randomUUID() });
+      assert.equal(
+        (
+          await scope.ledgerAttemptReport.findUniqueOrThrow({
+            where: { attempt_id_revision: { attempt_id: execution.attemptId!, revision: 7 } },
+          })
+        ).disposition,
+        'projection_replay',
+      );
+      await assert.rejects(
+        () =>
+          local.handle({
+            ...original,
+            eventId: randomUUID(),
+            data: { ...original.data, state: 'submitted', transactionHash: 'conflicting' },
+          } as typeof original),
+        /revision conflicts/,
+      );
+      progress = await scope.ledgerAttemptProgress.findUniqueOrThrow({
+        where: { attempt_id: execution.attemptId! },
+      });
+      assert.ok(progress.reported_digest);
+      assert.equal(progress.canonical_state, 'none');
+      assert.equal(await scope.journalBatch.count(), before);
+      assert.equal(
+        (await scope.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } }))
+          .state,
+        'held',
+      );
+    } finally {
+      await sql.end();
+      await scope.$disconnect();
+      await isolated.drop();
+    }
+  },
+);
+
+test(
+  'Phase 9 mixed-version progress retains an older worker revision fence and authenticates the first replay without inventing receipts',
+  { skip: !db },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    const { execution } = await f.reserve('100');
+    // This is the exact projection write performed by the previous Ledger worker.
+    await db!.exchangeOperation.update({
+      where: { id: execution.operationId! },
+      data: { state: 'submitted', attempt_revision: 6 },
+    });
+    const p = () =>
+      db!.ledgerAttemptProgress.findUniqueOrThrow({ where: { attempt_id: execution.attemptId! } });
+    assert.equal((await p()).reported_revision, 6);
+    assert.equal((await p()).reported_digest, null);
+    assert.equal(
+      await db!.ledgerAttemptReport.count({ where: { attempt_id: execution.attemptId! } }),
+      0,
+    );
+    const report = (revision: number, data: Record<string, unknown>) =>
+      exchangeEventSchema.parse({
+        ...base(f.domainId, revision),
+        type: 'execution.attempt.updated.v1',
+        operationId: execution.operationId,
+        attemptId: execution.attemptId,
+        requestDigest: execution.requestDigest,
+        data,
+      });
+    await settlements!.handle(report(4, { state: 'signing' }));
+    assert.equal((await p()).reported_revision, 6);
+    assert.equal(
+      (await db!.exchangeOperation.findUniqueOrThrow({ where: { id: execution.operationId! } }))
+        .attempt_revision,
+      6,
+    );
+    const replay = report(6, { state: 'submitted', transactionHash: 'original-retained-hash' });
+    await settlements!.handle(replay);
+    await settlements!.handle({ ...replay, eventId: randomUUID() });
+    assert.equal(
+      (
+        await db!.ledgerAttemptReport.findUniqueOrThrow({
+          where: { attempt_id_revision: { attempt_id: execution.attemptId!, revision: 6 } },
+        })
+      ).disposition,
+      'projection_replay',
+    );
+    await assert.rejects(
+      () => settlements!.handle(report(6, { state: 'submitted', transactionHash: 'changed' })),
+      /revision conflicts/,
+    );
+    assert.equal((await p()).canonical_state, 'none');
+    assert.equal(await f.balance('customer_reserved', f.customerId), 100n);
+  },
+);
+
+test(
+  'Phase 9 canonical attempt receipts reject changed historical settlement content after reversal and reinclusion',
+  { skip: !db },
+  async () => {
+    const f = await fixture();
+    await f.credit('1000');
+    await f.execute('sweep', '900');
+    const { execution } = await f.reserve('200');
+    const paid = settlement(execution, 'confirmed', '3');
+    await settlements!.handle(paid);
+    await settlements!.handle(reversal(execution));
+    await settlements!.handle({ ...paid, eventId: randomUUID(), revision: 3 });
+    const journals = await db!.journalBatch.count();
+    await settlements!.handle({ ...paid, eventId: randomUUID() });
+    assert.equal(await db!.journalBatch.count(), journals);
+    await assert.rejects(
+      () =>
+        settlements!.handle(
+          exchangeEventSchema.parse({
+            ...paid,
+            eventId: randomUUID(),
+            data: { ...paid.data, actualFees: [{ asset: native, amount: '4' }] },
+          }),
+        ),
+      /revision conflicts/,
+    );
+    await assert.rejects(
+      () =>
+        settlements!.handle(
+          exchangeEventSchema.parse({
+            ...paid,
+            eventId: randomUUID(),
+            data: { ...paid.data, outcome: 'failed' },
+          }),
+        ),
+      /revision conflicts/,
+    );
+    const receipts = await db!.ledgerAttemptCanonicalEvent.findMany({
+      where: { attempt_id: execution.attemptId! },
+      orderBy: { revision: 'asc' },
+    });
+    assert.deepEqual(
+      receipts.map((row) => [row.revision, row.event_type]),
+      [
+        [1, 'settlement.requested.v1'],
+        [2, 'settlement.reverted.v1'],
+        [3, 'settlement.requested.v1'],
+      ],
+    );
+    const sql = new Client({ connectionString: databaseUrl });
+    await sql.connect();
+    try {
+      await assert.rejects(
+        () =>
+          sql.query(
+            'UPDATE ledger_attempt_canonical_events SET origin=origin WHERE attempt_id=$1',
+            [execution.attemptId],
+          ),
+        /immutable/,
+      );
+      await assert.rejects(
+        () =>
+          sql.query('DELETE FROM ledger_attempt_canonical_events WHERE attempt_id=$1', [
+            execution.attemptId,
+          ]),
+        /immutable/,
+      );
+      assert.equal(
+        (
+          await sql.query(
+            `SELECT count(*)::int n FROM ledger_attempt_canonical_events WHERE data_digest<>encode(sha256(convert_to((payload->'data')::text,'UTF8')),'hex')`,
+          )
+        ).rows[0].n,
+        0,
+      );
+    } finally {
+      await sql.end();
+    }
+    assert.equal(await f.balance('customer_reserved', f.customerId), 0n);
+    assert.equal(await f.balance('custody_hot', f.hotId), 697n);
+  },
+);
+
+test(
+  'Phase 9 canonical receipt migration retains available reversed payloads without changing financial history',
+  { skip: !databaseUrl },
+  async () => {
+    const isolated = await isolatedDatabase(databaseUrl!, 'ledger');
+    const scope = new LedgerPrismaService({ databaseUrl: isolated.url });
+    const sql = new Client({ connectionString: isolated.url });
+    await sql.connect();
+    try {
+      const f = await fixture(scope);
+      const local = new SettlementsService(
+        scope,
+        journal,
+        new ReservationsService(scope, journal, config),
+      );
+      await f.credit('1000');
+      await f.execute('sweep', '900');
+      const { execution, reservation } = await f.reserve('200');
+      const paid = settlement(execution, 'confirmed', '3');
+      await local.handle(paid);
+      await local.handle(reversal(execution));
+      await local.handle({ ...paid, eventId: randomUUID(), revision: 3 });
+      const before = {
+        operation: await scope.exchangeOperation.findUniqueOrThrow({
+          where: { id: execution.operationId! },
+        }),
+        hold: await scope.withdrawalReservation.findUniqueOrThrow({
+          where: { id: reservation.id },
+        }),
+        journals: await scope.journalBatch.count(),
+      };
+      await sql.query('BEGIN');
+      await sql.query(`DROP TRIGGER retain_canonical_operation ON exchange_operations;
+      DROP TRIGGER retain_canonical_reversal ON settlement_reversals;
+      DROP TRIGGER retain_canonical_attempt ON ledger_execution_attempts;
+      DROP TABLE ledger_attempt_canonical_events;
+      DROP FUNCTION protect_ledger_canonical_receipt(); DROP FUNCTION capture_ledger_canonical_projection();
+      DROP FUNCTION retain_ledger_canonical_event(jsonb,text);`);
+      await sql.query(
+        await readFile(
+          'apps/ledger/prisma/migrations/20261015010000_canonical_attempt_receipts/migration.sql',
+          'utf8',
+        ),
+      );
+      await sql.query('COMMIT');
+      const rows = await scope.ledgerAttemptCanonicalEvent.findMany({
+        where: { attempt_id: execution.attemptId! },
+        orderBy: { revision: 'asc' },
+      });
+      assert.deepEqual(
+        rows.map((r) => r.revision),
+        [1, 2, 3],
+      );
+      assert(rows.every((r) => r.origin === 'migration_projection'));
+      assert.deepEqual(rows[0].payload, paid);
+      assert.deepEqual(
+        await scope.exchangeOperation.findUniqueOrThrow({ where: { id: execution.operationId! } }),
+        before.operation,
+      );
+      assert.deepEqual(
+        await scope.withdrawalReservation.findUniqueOrThrow({ where: { id: reservation.id } }),
+        before.hold,
+      );
+      assert.equal(await scope.journalBatch.count(), before.journals);
+      await local.handle({ ...paid, eventId: randomUUID() });
+      assert.equal(await scope.journalBatch.count(), before.journals);
+    } finally {
+      await sql.end();
+      await scope.$disconnect();
+      await isolated.drop();
+    }
   },
 );

@@ -462,7 +462,6 @@ Transfer-only ERC-20/SPL custody is integrated across Wallet, Sweep, Signer, Bro
 
 Live activation still requires the separate QuickNode gateway deployment/certification, actual asset certificates, native fee capital recorded in Ledger, application migrations and deployment canaries. No real token is enabled; all token feature flags default to false. General contract calls, approvals, token account closure and EVM batch contracts are excluded. Automatic treasury replenishment and signed replacements remain later work.
 
-
 ## Phase 7 implementation — 14 October 2026
 
 Wallet now schedules canonical custody samples and owns audited private recovery commands, management funding gates, alerts and metric projections. Ledger retains immutable per-wallet custody comparisons, per-asset liability/equity/fee/deficit explanations and journal watermarks. Repair requests travel through the existing private queues to Ledger, Sweep, Listener and Broadcast; original holds, resource claims and signed bytes remain authoritative. Provider subscriptions remain customer-only. Domain recovery requires complete fresh evidence and Ledger approval, and a later quarantine defeats stale approvals. See [Phase 7 controls and runbooks](exchange-wallet-phase7.md).
@@ -474,3 +473,17 @@ Monitoring is opt-in and no financial execution flag is enabled by this change. 
 Independent rollout controls and a scoped canary now cover new address issuance, finality credit, native/token sweeps, management funding and native/token withdrawals. Read-only native scheduling previews do not create financial state. The repository provides a repeatable disposable PostgreSQL/Redis acceptance runner with stable-source evidence and cleanup, plus actual signed EVM/local Bitcoin and opt-in Solana Devnet smoke runners.
 
 Local native EVM/Bitcoin smoke passed. Solana Devnet funding returned HTTP 429, so its acceptance remains open. Live token certification, separate QuickNode gateway acceptance and a deployed canary are required before those capabilities are activated. No application environment or financial records were reset or enabled. See [Phase 8 acceptance and rollout/rollback](exchange-wallet-phase8.md).
+
+## Phase 9 selected delivery — 14 October 2026
+
+The selected scope is throughput and recovery: P9-01–03 and P9-08. Multiple custody seeds/domains, internal customer transfers and Treasury extraction are deferred. The first delivery adds immutable original-attempt identity and an append-only Wallet journal, migration baseline for existing executions, and privately authenticated domain/epoch-scoped inspection. The full local acceptance run passed 411 tests without skips.
+
+This does not activate replacements, concurrency or batching. Existing source fences, original financial holds and single-attempt/single-output authority remain enforced. See the [Phase 9 implementation checklist and evidence](exchange-wallet-phase9.md) for the remaining obligation/attempt separation and per-chain certification gates.
+
+Phase 9's next checkpoint separates immutable Ledger original-attempt approval from the accepted financial obligation and reservation. Settlement/reversal requires the per-attempt binding; database guards preserve accepted principal, destination, customer, original hold and approval while allowing normal settlement/freeze/recovery state transitions. The Ledger migration backfills existing authority without rewriting financial history. Full local acceptance passed 413 tests without skips. Child authorization, obligation-level reconciliation across multiple payable attempts, nonce windows and Bitcoin/Solana batching remain incomplete and disabled.
+
+The next recovery prerequisite introduces independent per-attempt reported and canonical revisions, plus immutable report receipts. This fixes duplicate submitted reports conflicting after canonical settlement, rejects changed content at an already received revision (including stale reports), and prevents late delivery from overwriting payment/reversal state. Migration preserves legacy high-water marks, labels first authenticated replay as projection replay and does not reconstruct missing historical reports. Child authorization and multi-attempt winner reconciliation remain pending.
+
+The independent-progress checkpoint passed all 416 acceptance tests with no skips (run `61153b1bb1fc4c6ba5630ea91d9926ac`), including builds, type checks, lint and formatting. Application databases and rollout flags were unchanged.
+
+15 October: the next Phase 9 components add immutable per-attempt canonical delivery receipts, EVM hot-withdrawal custody principal/gas reservations under the existing single-source fence, exact batch member/cost/output mapping and EVM/Bitcoin resource-conflict predicates. A fresh Solana blockhash requires separate nonpayment evidence and is explicitly refused as a conflicting-resource replacement. These changes do not authorize children, concurrent payout windows or batched dispatch; the remaining gates are listed in the Phase 9 delivery document.

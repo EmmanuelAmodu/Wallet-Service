@@ -18,18 +18,18 @@ Current audit: [Phases 1–3 review](exchange-wallet-phases1-3-review.md), 5 Oct
 - Complete each phase's gate before enabling the next customer-facing capability. Preparatory work can run in parallel when its prerequisites are ready.
 - Existing development records can be discarded. Use a coordinated reset; no legacy-address or opening-balance migration is required.
 
-| Phase | Deliverable                                    | Prerequisite | Status                                                               |
-| ----- | ---------------------------------------------- | ------------ | -------------------------------------------------------------------- |
-| 0     | Agreed configuration and contracts             | None         | Implemented/tested; coordinated deployment reset pending             |
-| 1     | Custody roles, allocation, and clean bootstrap | 0            | Implemented/tested; deployment reset/bootstrap pending               |
-| 2     | Durable messaging and exchange accounting      | 1            | Implemented/tested; Phase 1 rollout prerequisite pending             |
-| 3     | Deposit detection, credit, and customer APIs   | 2            | Local implementation/tested; Phase 1 and P3-02 external gate pending |
-| 4     | Safe execution and native sweeps               | 3            | Implemented/tested locally; live execution acceptance pending         |
-| 5     | Hot-wallet withdrawals                         | 4            | Native implementation verified; live acceptance pending     |
+| Phase | Deliverable                                    | Prerequisite | Status                                                                 |
+| ----- | ---------------------------------------------- | ------------ | ---------------------------------------------------------------------- |
+| 0     | Agreed configuration and contracts             | None         | Implemented/tested; coordinated deployment reset pending               |
+| 1     | Custody roles, allocation, and clean bootstrap | 0            | Implemented/tested; deployment reset/bootstrap pending                 |
+| 2     | Durable messaging and exchange accounting      | 1            | Implemented/tested; Phase 1 rollout prerequisite pending               |
+| 3     | Deposit detection, credit, and customer APIs   | 2            | Local implementation/tested; Phase 1 and P3-02 external gate pending   |
+| 4     | Safe execution and native sweeps               | 3            | Implemented/tested locally; live execution acceptance pending          |
+| 5     | Hot-wallet withdrawals                         | 4            | Native implementation verified; live acceptance pending                |
 | 6     | ERC-20 and SPL lifecycle support               | 5            | In progress: transfer adapters verified; financial integration pending |
-| 7     | Operational recovery and controls              | 6            | Pending                                                              |
-| 8     | End-to-end acceptance and rollout              | 7            | Pending                                                              |
-| 9     | Optional throughput and domain expansion       | 8            | Backlog                                                              |
+| 7     | Operational recovery and controls              | 6            | Pending                                                                |
+| 8     | End-to-end acceptance and rollout              | 7            | Pending                                                                |
+| 9     | Optional throughput and domain expansion       | 8            | Backlog                                                                |
 
 ## New direction foundations — User and Sweep
 
@@ -188,6 +188,18 @@ See [architecture](architecture.md) for current boundaries and [implementation p
 ## Phase 9 — Optional follow-up backlog
 
 These tasks increase throughput or scope after the core exchange flow is accepted. They are not prerequisites for the initial serialized hot-wallet scheduler.
+
+**Selected scope (14 October):** P9-01–03 and P9-08. Multiple seeds/domains, internal transfers and Treasury extraction are deferred. The original-attempt journal/private inspection prerequisite is implemented; no main P9 item is complete yet. See the [Phase 9 delivery checklist](exchange-wallet-phase9.md).
+
+- [x] **P9-00A** Add immutable original-attempt identity and transactionally captured preparation/signing/inclusion/settlement/reversal history, migration baseline, and private scoped inspection.
+- [x] **P9-00B.1** Separate immutable Ledger original-attempt approval from financial obligation/hold terms; bind settlement/reversal to that approval and reject accepted-term mutations.
+- [x] **P9-00B.2** Separate per-attempt reported progress from canonical financial state; retain immutable revision receipts and preserve legacy revision fences without inventing report history.
+- [x] **P9-00B.3** Retain canonical settlement/reversal revision receipts independently of later projections, including migration of available reversed payloads.
+- [x] **P9-00C.1** Reserve native ETH/ERC-20 hot-withdrawal custody liquidity and nonce evidence under the existing one-source fence; signing requires the immutable reserve.
+- [x] **P9-00C.2** Add exact batch member/cost/output mapping primitives and Bitcoin exact multi-output signing verification; custody batch admission remains disabled.
+- [x] **P9-00C.3** Add EVM/Bitcoin resource-conflict and retained-lineage predicates; these confer no replacement authorization and reject fresh-blockhash Solana assumptions.
+- [x] **P9-00C.4** Persist complete unsigned batch draft membership/source ownership and atomic dissolution back to the same original holds. No batch signing/dispatch is admitted.
+- [ ] **P9-00B** Add independently authorized child attempts and obligation-level reconciliation before enabling replacements or concurrent payout windows.
 
 - [ ] **P9-01** Add bounded EVM nonce windows plus native/token liquidity reservations; remove serialization only after concurrent execution and replacement tests pass.
 - [ ] **P9-02** Add Bitcoin withdrawal batches with immutable output-to-withdrawal mappings, fee attribution, reserved UTXOs, and hot-owned change. Certify multi-source/multi-key sweep aggregation separately.
