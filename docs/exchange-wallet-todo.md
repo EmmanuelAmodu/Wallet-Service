@@ -200,6 +200,8 @@ These tasks increase throughput or scope after the core exchange flow is accepte
 - [x] **P9-00C.3** Add EVM/Bitcoin resource-conflict and retained-lineage predicates; these confer no replacement authorization and reject fresh-blockhash Solana assumptions.
 - [x] **P9-00C.4** Persist complete unsigned batch draft membership/source ownership and atomic dissolution back to the same original holds. No batch signing/dispatch is admitted.
 - [x] **P9-00C.5** Prepare exact unsigned Bitcoin batches with durable immutable mappings/fee shares and exclusive UTXO claims; dissolve unsigned claims atomically without releasing original holds. Verify real regtest outputs, fees and same-byte reorg/reconfirmation. Batch authority/dispatch/settlement remain pending.
+- [x] **P9-00C.6** Add the private Ledger Bitcoin batch protocol with immutable complete original-hold approval and atomic member settlement/reversal, exact fee attribution, transaction ownership, replay receipts and mixed-version individual-member fences. Wallet orchestration remains pending.
+- [x] **P9-00C.7** Add separate independently signed Bitcoin batch authority, exact Signer/Broadcast snapshot/byte verification and opt-in consumer gates. Test same-byte retry after a lost submission response. No automatic Wallet batch producer is admitted.
 - [ ] **P9-00B** Add independently authorized child attempts and obligation-level reconciliation before enabling replacements or concurrent payout windows.
 
 - [ ] **P9-01** Add bounded EVM nonce windows plus native/token liquidity reservations; remove serialization only after concurrent execution and replacement tests pass.

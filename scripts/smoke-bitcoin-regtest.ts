@@ -6,8 +6,15 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
+import { SigningService } from '../apps/signer/src/signing/signing.service.js';
+import { CustodySigningPolicy } from '../apps/signer/src/signing/custody-signing.policy.js';
+import {
+  signBitcoinBatchAuthorization,
+  bitcoinBatchAttestedResult,
+} from '../packages/shared/src/bitcoin-batch-contracts.js';
+import { verifySignerAttestation } from '../packages/shared/src/execution-authorization.js';
 import { ChainRpcService } from '../packages/chain/src/chain-rpc.service.js';
 import {
   NativeSweepPlanner,
@@ -210,7 +217,56 @@ export async function smokeBitcoinRegtest() {
     const request = prepared.request;
     assert(request.transaction.chain === 'bitcoin');
     const change = BigInt(prepared.changeUnits);
-    const signed = core.sign(request),
+    const authority = generateKeyPairSync('ed25519'),
+      attestor = generateKeyPairSync('ed25519'),
+      transactionId = randomUUID();
+    const result = new SigningService(
+      core,
+      new CustodySigningPolicy(
+        {
+          enabled: true,
+          withdrawalsEnabled: true,
+          bitcoinBatchesEnabled: true,
+          domainId: manifest.domainId,
+          resetEpoch: manifest.resetEpoch,
+          authorityPublicKey: authority.publicKey,
+          attestationPrivateKey: attestor.privateKey,
+        },
+        core,
+      ),
+    ).execute({
+      type: 'payout.batch.sign',
+      batchId: manifest.batchId,
+      transactionId,
+      manifest,
+      preparation: prepared,
+      authorization: signBitcoinBatchAuthorization(
+        {
+          version: 1,
+          purpose: 'bitcoin_withdrawal_batch',
+          domainId: manifest.domainId,
+          resetEpoch: manifest.resetEpoch,
+          seedId: manifest.seedId,
+          batchId: manifest.batchId,
+          transactionId,
+          manifestDigest: prepared.manifestDigest,
+          preparationDigest: prepared.preparationDigest,
+          sourcePath: hot.path,
+          expiresAt: prepared.expiresAt,
+        },
+        authority.privateKey,
+      ),
+    });
+    assert(result.type === 'payout.batch.signed');
+    assert.equal(
+      verifySignerAttestation(
+        result.signerAttestation,
+        bitcoinBatchAttestedResult(result),
+        attestor.publicKey,
+      ).status,
+      'signed',
+    );
+    const signed = result.signed,
       mapping = prepared.memberOutputs;
     const decoded = (await rpc.call('bitcoin', 'decoderawtransaction', [signed.raw])) as {
       txid: string;
@@ -253,6 +309,15 @@ export async function smokeBitcoinRegtest() {
       blockhash: string;
     };
     assert(first.confirmations >= 6);
+    const canonical = await planner.observe({
+      chain: 'bitcoin',
+      network: 'regtest',
+      hash: signed.txHash,
+      request,
+      signed,
+    });
+    assert.equal(canonical.state, 'confirmed');
+    assert.equal(canonical.actualFeeUnits, prepared.feeUnits);
     await rpc.call('bitcoin', 'invalidateblock', [first.blockhash]);
     const orphan = (await rpc.call('bitcoin', 'getrawtransaction', [signed.txHash, true])) as {
       confirmations?: number;
@@ -278,6 +343,8 @@ export async function smokeBitcoinRegtest() {
       restoredBlockHash: restored.blockhash,
       confirmations: restored.confirmations,
       reconfirmedSameBytesAfterReorg: true,
+      independentBatchAuthorityAndAttestation: true,
+      canonicalBatchObserverVerified: true,
     });
     const folder = resolve('artifacts', 'acceptance', 'bitcoin-regtest');
     await mkdir(folder, { recursive: true });

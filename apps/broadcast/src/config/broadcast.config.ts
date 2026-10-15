@@ -28,6 +28,11 @@ export const broadcastConfig = registerAs('broadcast', () => {
   if (!['true', 'false'].includes(tokens))
     throw new Error('Invalid configuration: ENABLE_TOKEN_EXECUTION');
   const custodyMode = process.env.EXCHANGE_DOMAIN_ID !== undefined;
+  const batches = process.env.ENABLE_BITCOIN_BATCH_WITHDRAWALS ?? 'false';
+  if (!['true', 'false'].includes(batches))
+    throw new Error('Invalid configuration: ENABLE_BITCOIN_BATCH_WITHDRAWALS');
+  if (batches === 'true' && withdrawals !== 'true')
+    throw new Error('Bitcoin batches require native withdrawals');
   const domainId =
     custodyMode || native === 'true' || withdrawals === 'true' || tokens === 'true'
       ? required('EXCHANGE_DOMAIN_ID')
@@ -41,6 +46,7 @@ export const broadcastConfig = registerAs('broadcast', () => {
     pollIntervalMs: integerSetting('CONFIRMATION_POLL_MS', 30000, 10, 86400000),
     maxPolls: integerSetting('CONFIRMATION_MAX_POLLS', 120, 1, 10000),
     nativeWithdrawalsEnabled: withdrawals === 'true',
+    bitcoinBatchesEnabled: batches === 'true',
     tokenExecutionEnabled: tokens === 'true',
     nativeSweepsEnabled: native === 'true',
     custodyMode,
@@ -61,10 +67,12 @@ export type BroadcastConfig = Omit<
   | 'nativeWithdrawalsEnabled'
   | 'custodyMode'
   | 'tokenExecutionEnabled'
+  | 'bitcoinBatchesEnabled'
 > & {
   chainNetworks?: ConfigType<typeof broadcastConfig>['chainNetworks'];
   nativeSweepsEnabled?: boolean;
   nativeWithdrawalsEnabled?: boolean;
   custodyMode?: boolean;
   tokenExecutionEnabled?: boolean;
+  bitcoinBatchesEnabled?: boolean;
 };

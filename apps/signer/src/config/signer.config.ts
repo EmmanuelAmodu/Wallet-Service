@@ -36,6 +36,11 @@ export const signerConfig = registerAs('signer', () => {
     throw new Error('ENABLE_TOKEN_SIGNING must be true or false');
   const tokenSigningEnabled = tokens === 'true';
   const nativeWithdrawalsEnabled = withdrawals === 'true';
+  const batches = process.env.ENABLE_BITCOIN_BATCH_WITHDRAWALS ?? 'false';
+  if (!['true', 'false'].includes(batches))
+    throw new Error('ENABLE_BITCOIN_BATCH_WITHDRAWALS must be true or false');
+  if (batches === 'true' && !nativeWithdrawalsEnabled)
+    throw new Error('Bitcoin batches require native withdrawals');
   const nativeSweepsEnabled = enable === 'true';
   const ethereumChainId = required('ETH_CHAIN_ID');
   const chainIds = {
@@ -55,6 +60,7 @@ export const signerConfig = registerAs('signer', () => {
     nativeSweepsEnabled,
     tokenSigningEnabled,
     nativeWithdrawalsEnabled,
+    bitcoinBatchesEnabled: batches === 'true',
     ...(nativeSweepsEnabled || nativeWithdrawalsEnabled || tokenSigningEnabled
       ? {
           executionAuthorityPublicKey: executionKey('EXECUTION_AUTHORITY_PUBLIC_KEY_FILE', false),

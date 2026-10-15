@@ -490,3 +490,6 @@ The independent-progress checkpoint passed all 416 acceptance tests with no skip
 
 
 15 October, unsigned Bitcoin batch preparation: Wallet now retains exact payout/change mapping, deterministic fee attribution and complete exclusive UTXO reservations for an unsigned draft. Atomic dissolution retains preparation/resource history and returns withdrawals to their same original holds. The shared planner passed real Bitcoin Core regtest output/fee/mempool checks and six-block confirmation followed by same-byte reorg/reconfirmation. This advances P9-02 preparation; independent batch authority, dispatch and per-member financial settlement/recovery remain unfinished. No main Phase 9 item is complete or activated.
+
+
+15 October, Bitcoin batch financial/signing consumers: Ledger now has private queue commands for complete immutable original-hold approval and atomic settlement/reversal with exact member fee conservation and revision receipts. Signer and Broadcast have separate independently authorized full-batch validation, actual signed-byte/fee checks and an additional default-false batch gate. Real regtest exercised the batch signing policy, attestation and canonical observer. Wallet's aggregate orchestration/recovery and original-member projections remain pending, so P9-02 and Phase 9 remain incomplete and batching stays disabled.

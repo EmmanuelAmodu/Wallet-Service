@@ -495,3 +495,40 @@ model LedgerAttemptCanonicalEvent {
   @@id([attempt_id,revision])
   @@map("ledger_attempt_canonical_events")
 }
+
+model LedgerPayoutBatch {
+ id String @id @db.Uuid
+ domain_id String
+ reset_epoch String
+ manifest Json
+ manifest_digest String
+ preparation Json
+ preparation_digest String
+ state String @default("prepared")
+ revision Int @default(0)
+ chain_identity String? @unique
+ created_at DateTime @default(now()) @db.Timestamptz
+ members LedgerPayoutBatchMember[]
+ receipts LedgerPayoutBatchReceipt[]
+ @@map("ledger_payout_batches")
+}
+model LedgerPayoutBatchMember {
+ batch_id String @db.Uuid
+ batch LedgerPayoutBatch @relation(fields:[batch_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+ member_index Int
+ operation_id String @unique @db.Uuid
+ attempt_id String @unique @db.Uuid
+ reservation_id String @unique @db.Uuid
+ @@id([batch_id,member_index])
+ @@map("ledger_payout_batch_members")
+}
+model LedgerPayoutBatchReceipt {
+ batch_id String @db.Uuid
+ batch LedgerPayoutBatch @relation(fields:[batch_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+ revision Int
+ digest String
+ payload Json
+ created_at DateTime @default(now()) @db.Timestamptz
+ @@id([batch_id,revision])
+ @@map("ledger_payout_batch_receipts")
+}

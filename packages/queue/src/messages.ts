@@ -19,6 +19,15 @@ import {
   tokenSignRequestSchema,
 } from '../../shared/src/token-contracts.js';
 import { signerAttestationSchema } from '../../shared/src/execution-authorization.js';
+import {
+  payoutBatchLedgerCommandSchema,
+  payoutBatchLedgerResultSchema,
+  bitcoinBatchSignSchema,
+  bitcoinBatchSignedSchema,
+  bitcoinBatchRejectedSchema,
+  bitcoinBatchPreparationSchema,
+} from '../../shared/src/bitcoin-batch-contracts.js';
+import { payoutBatchManifestSchema } from '../../shared/src/payout-policy.js';
 
 export const QUEUES = {
   wallet: 'wallet-actions',
@@ -108,6 +117,13 @@ export const broadcastSnapshotSchema = z
         resetEpoch: z.string().min(1).max(128),
         preparedRequest: z.union([signSchema, tokenSignRequestSchema]),
         tokenPreparation: tokenPreparationSchema.optional(),
+        bitcoinBatch: z
+          .object({
+            manifest: payoutBatchManifestSchema,
+            preparation: bitcoinBatchPreparationSchema,
+          })
+          .strict()
+          .optional(),
         signerAttestation: signerAttestationSchema,
       })
       .strict()
@@ -119,6 +135,11 @@ export const broadcastSnapshotSchema = z
       ctx.addIssue({ code: 'custom', message: 'Solana expiry height required' });
   });
 const legacyMessageSchema = z.discriminatedUnion('type', [
+  ...payoutBatchLedgerCommandSchema.options,
+  payoutBatchLedgerResultSchema,
+  bitcoinBatchSignSchema,
+  bitcoinBatchSignedSchema,
+  bitcoinBatchRejectedSchema,
   z
     .object({
       type: z.literal('custody.assignment.issue'),

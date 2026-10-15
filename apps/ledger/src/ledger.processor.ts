@@ -28,6 +28,15 @@ export class LedgerProcessor extends WorkerHost implements BeforeApplicationShut
       throw new UnrecoverableError('Invalid queue message');
     }
     try {
+      if (
+        message.type === 'payout.batch.ledger.prepare' ||
+        message.type === 'payout.batch.ledger.settle' ||
+        message.type === 'payout.batch.ledger.revert'
+      ) {
+        if (!this.exchange) throw new ActionRejectedError('Exchange ledger handler is unavailable');
+        await this.exchange.handleBatch(message);
+        return;
+      }
       if ('schemaVersion' in message) {
         if (!this.exchange) throw new ActionRejectedError('Exchange ledger handler is unavailable');
         await this.exchange.handle(message);

@@ -18,6 +18,8 @@ import {
 } from '../../../../packages/queue/src/messages.js';
 import { enqueue } from '../../../../packages/queue/src/outbox.service.js';
 import { networkFor } from '../../../../packages/chain/src/config.js';
+import { validateBitcoinBatch } from '../../../../packages/shared/src/bitcoin-batch-contracts.js';
+import { verifyBitcoinPayment } from '../../../../packages/chain/src/native-sweep-planner.js';
 import { BroadcastRpcService } from './broadcast-rpc.service.js';
 
 import { broadcastConfig, BroadcastConfig } from '../config/broadcast.config.js';
@@ -349,6 +351,28 @@ export class BroadcastService {
     )
       throw new ActionRejectedError('Native custody broadcasting is disabled');
     try {
+      if (execution.bitcoinBatch) {
+        if (!this.config.bitcoinBatchesEnabled || execution.tokenPreparation)
+          throw new Error('Bitcoin batching is disabled');
+        const { manifest, preparation } = validateBitcoinBatch(
+          execution.bitcoinBatch.manifest,
+          execution.bitcoinBatch.preparation,
+        );
+        if (
+          snapshot.chain !== 'bitcoin' ||
+          snapshot.network !== 'regtest' ||
+          manifest.domainId !== execution.domainId ||
+          manifest.resetEpoch !== execution.resetEpoch ||
+          execution.operationId !== manifest.batchId ||
+          execution.attemptId !== manifest.batchId ||
+          execution.requestDigest !== preparation.manifestDigest ||
+          canonical(execution.preparedRequest) !== canonical(preparation.request)
+        )
+          throw new Error('Bitcoin batch broadcast scope mismatch');
+        const verified = verifyBitcoinPayment(preparation.request, snapshot.signed);
+        if (verified.feeUnits !== preparation.feeUnits)
+          throw new Error('Bitcoin batch signed fee mismatch');
+      }
       if (execution.tokenPreparation) {
         validateTokenPreparation(execution.tokenPreparation as TokenPreparation);
         if (canonical(execution.preparedRequest) !== canonical(execution.tokenPreparation.request))
@@ -360,9 +384,11 @@ export class BroadcastService {
         execution.preparedRequest.wallet.chain !== snapshot.chain ||
         execution.preparedRequest.transaction.chain !== snapshot.chain ||
         execution.preparedRequest.wallet.network !== snapshot.network ||
-        (execution.tokenPreparation
-          ? execution.tokenPreparation.preparedDigest
-          : executionRequestDigest(signSchema.parse(execution.preparedRequest))) !==
+        (execution.bitcoinBatch
+          ? execution.bitcoinBatch.preparation.preparationDigest
+          : execution.tokenPreparation
+            ? execution.tokenPreparation.preparedDigest
+            : executionRequestDigest(signSchema.parse(execution.preparedRequest))) !==
           execution.preparationDigest
       )
         throw new Error('Execution snapshot binding mismatch');

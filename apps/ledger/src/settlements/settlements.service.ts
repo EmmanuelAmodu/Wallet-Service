@@ -25,6 +25,16 @@ import {
   publishExchangeEvent,
 } from '../exchange/exchange-inbox.js';
 import { resultIdentity } from '../exchange/events.js';
+import {
+  PayoutBatchLedgerCommand,
+  payoutBatchLedgerCommandSchema,
+  validateBitcoinBatch,
+} from '../../../../packages/shared/src/bitcoin-batch-contracts.js';
+import {
+  payoutBatchManifestSchema,
+  allocateBatchCosts,
+} from '../../../../packages/shared/src/payout-policy.js';
+import { executionDigest } from '../../../../packages/shared/src/execution-authorization.js';
 
 type ExecuteEvent = Extract<
   ExchangeEvent,
@@ -49,6 +59,271 @@ export class SettlementsService {
     private readonly journal: JournalService,
     private readonly reservations: ReservationsService,
   ) {}
+
+  /** One transaction owns every original hold and journal in the atomic chain payout. */
+  async handleBatch(input: PayoutBatchLedgerCommand) {
+    const command = payoutBatchLedgerCommandSchema.parse(input);
+    return this.db.$transaction(
+      async (tx) => {
+        await lock(tx, `exchange-domain:${command.domainId}`);
+        await lock(tx, `payout-batch:${command.batchId}`);
+        let batch = await tx.ledgerPayoutBatch.findUnique({ where: { id: command.batchId } });
+        if (
+          batch &&
+          (batch.domain_id !== command.domainId || batch.reset_epoch !== command.resetEpoch)
+        )
+          throw new ActionRejectedError('Payout batch scope mismatch');
+        await tx.$executeRaw`SELECT set_config('waas.payout_batch', ${command.batchId}, true)`;
+        if (command.type === 'payout.batch.ledger.prepare') {
+          const { manifest, preparation } = validateBitcoinBatch(
+            command.manifest,
+            command.preparation,
+          );
+          if (
+            manifest.batchId !== command.batchId ||
+            manifest.domainId !== command.domainId ||
+            manifest.resetEpoch !== command.resetEpoch
+          )
+            throw new ActionRejectedError('Payout batch approval scope mismatch');
+          if (batch) {
+            if (
+              batch.manifest_digest !== preparation.manifestDigest ||
+              batch.preparation_digest !== preparation.preparationDigest
+            )
+              throw new ActionRejectedError('Payout batch approval is immutable');
+          } else {
+            const expiry = Date.parse(preparation.expiresAt);
+            if (expiry <= Date.now() || expiry > Date.now() + 300_000)
+              throw new ActionRejectedError(
+                'Payout batch preparation expired or outside approval window',
+              );
+            const source = await this.wallet(tx, manifest.sourceWalletId, command, manifest.asset);
+            if (
+              source.role !== 'hot' ||
+              source.account !== 0 ||
+              source.address !== manifest.sourceAddress ||
+              source.registry_revision !== manifest.sourceRegistryRevision
+            )
+              throw new ActionRejectedError(
+                'Payout batch requires its exact acknowledged hot source',
+              );
+            batch = await tx.ledgerPayoutBatch.create({
+              data: {
+                id: command.batchId,
+                domain_id: command.domainId,
+                reset_epoch: command.resetEpoch,
+                manifest: manifest as Prisma.InputJsonValue,
+                manifest_digest: preparation.manifestDigest,
+                preparation: preparation as unknown as Prisma.InputJsonValue,
+                preparation_digest: preparation.preparationDigest,
+              },
+            });
+            for (const [index, member] of manifest.members.entries()) {
+              if (await tx.exchangeOperation.findUnique({ where: { id: member.operationId } }))
+                throw new ActionRejectedError(
+                  'Previously attempted obligation cannot enter a payout batch',
+                );
+              const hold = await tx.withdrawalReservation.findUniqueOrThrow({
+                where: { id: member.reservationId },
+              });
+              if (
+                hold.operation_id !== member.operationId ||
+                hold.customer_id !== member.customerId ||
+                hold.request_digest !== member.requestDigest ||
+                hold.state !== 'held'
+              )
+                throw new ActionRejectedError(
+                  'Batch member requires its exact original active hold',
+                );
+              await this.recordExecution(
+                tx,
+                this.batchMemberEvent(manifest, index, 'withdrawal.execute.requested.v1', 1, {
+                  sourceWalletId: manifest.sourceWalletId,
+                  destination: member.destination,
+                  amount: { asset: manifest.asset, amount: member.principalUnits },
+                  preparationDigest: preparation.preparationDigest,
+                }) as ExecuteEvent,
+              );
+              await tx.ledgerPayoutBatchMember.create({
+                data: {
+                  batch_id: batch.id,
+                  member_index: index,
+                  operation_id: member.operationId,
+                  attempt_id: member.attemptId,
+                  reservation_id: member.reservationId,
+                },
+              });
+            }
+          }
+        } else {
+          if (!batch) throw new Error('Payout batch approval has not arrived');
+          const { manifest, preparation } = validateBitcoinBatch(batch.manifest, batch.preparation);
+          const receipt = await tx.ledgerPayoutBatchReceipt.findUnique({
+            where: { batch_id_revision: { batch_id: batch.id, revision: command.revision } },
+          });
+          const digest = executionDigest(command);
+          if (receipt) {
+            if (receipt.digest !== digest)
+              throw new ActionRejectedError('Payout batch revision has conflicting content');
+          } else {
+            if (command.type === 'payout.batch.ledger.settle') {
+              if (command.actualFeeUnits !== preparation.feeUnits)
+                throw new ActionRejectedError(
+                  'Canonical batch fee differs from its exact prepared inputs and outputs',
+                );
+              const identity = canonical([
+                batch.domain_id,
+                'bitcoin',
+                'regtest',
+                command.transactionHash,
+              ]);
+              if (batch.chain_identity && batch.chain_identity !== identity)
+                throw new ActionRejectedError('Payout batch transaction identity is immutable');
+              if (batch.state === 'settled' && command.revision > batch.revision)
+                throw new ActionRejectedError(
+                  'A new batch settlement revision requires canonical reversal first',
+                );
+              if (
+                await tx.exchangeOperation.findUnique({ where: { settlement_identity: identity } })
+              )
+                throw new ActionRejectedError(
+                  'Payout transaction already belongs to an individual obligation',
+                );
+              batch = await tx.ledgerPayoutBatch.update({
+                where: { id: batch.id },
+                data: { chain_identity: identity },
+              });
+              const shares = allocateBatchCosts(manifest, command.actualFeeUnits);
+              for (const [index, share] of shares.entries())
+                await this.settle(
+                  tx,
+                  this.batchMemberEvent(
+                    manifest,
+                    index,
+                    'settlement.requested.v1',
+                    command.revision,
+                    {
+                      transactionHash: command.transactionHash,
+                      outcome: 'confirmed',
+                      actualFees:
+                        share.feeUnits === '0'
+                          ? []
+                          : [{ asset: manifest.asset, amount: share.feeUnits }],
+                    },
+                  ) as SettlementEvent,
+                  batch.id,
+                );
+            } else {
+              if (command.revision <= command.priorSettlementRevision)
+                throw new ActionRejectedError(
+                  'Batch reversal must follow its referenced settlement',
+                );
+              if (
+                batch.state === 'settled' &&
+                command.revision > batch.revision &&
+                command.priorSettlementRevision !== batch.revision
+              )
+                throw new ActionRejectedError(
+                  'Batch reversal must identify the current canonical settlement',
+                );
+              for (const [index] of manifest.members.entries())
+                await this.revert(
+                  tx,
+                  this.batchMemberEvent(
+                    manifest,
+                    index,
+                    'settlement.reverted.v1',
+                    command.revision,
+                    {
+                      priorSettlementRevision: command.priorSettlementRevision,
+                      reason: command.reason,
+                    },
+                  ) as RevertEvent,
+                  batch.id,
+                );
+            }
+            await tx.ledgerPayoutBatchReceipt.create({
+              data: {
+                batch_id: batch.id,
+                revision: command.revision,
+                digest,
+                payload: command as Prisma.InputJsonValue,
+              },
+            });
+            if (command.revision > batch.revision)
+              batch = await tx.ledgerPayoutBatch.update({
+                where: { id: batch.id },
+                data: {
+                  revision: command.revision,
+                  state: command.type === 'payout.batch.ledger.settle' ? 'settled' : 'reverted',
+                },
+              });
+          }
+        }
+        await enqueue(
+          tx,
+          QUEUES.wallet,
+          {
+            type: 'payout.batch.ledger.result',
+            batchId: batch!.id,
+            domainId: batch!.domain_id,
+            resetEpoch: batch!.reset_epoch,
+            manifestDigest: batch!.manifest_digest,
+            preparationDigest: batch!.preparation_digest,
+            state: batch!.state as 'prepared' | 'settled' | 'reverted',
+            revision: batch!.revision,
+          },
+          `payout-batch-ledger:${batch!.id}:${batch!.revision}`,
+        );
+        return batch!;
+      },
+      { timeout: 30_000 },
+    );
+  }
+
+  private batchMemberEvent(
+    manifest: ReturnType<typeof payoutBatchManifestSchema.parse>,
+    index: number,
+    type: ExecuteEvent['type'] | SettlementEvent['type'] | RevertEvent['type'],
+    revision: number,
+    data: unknown,
+  ) {
+    const member = manifest.members[index];
+    const digest = executionDigest([manifest.batchId, member.operationId, type, revision]);
+    const eventId = `${digest.slice(0, 8)}-${digest.slice(8, 12)}-8${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+    return exchangeEventSchema.parse({
+      eventId,
+      schemaVersion: 1,
+      domainId: manifest.domainId,
+      resetEpoch: manifest.resetEpoch,
+      occurredAt: new Date().toISOString(),
+      correlationId: manifest.batchId,
+      causationId: null,
+      aggregateId: member.operationId,
+      revision,
+      type,
+      operationId: member.operationId,
+      attemptId: member.attemptId,
+      customerId: member.customerId,
+      requestDigest: member.requestDigest,
+      policyVersion: 'exchange-financial-v1',
+      data,
+    });
+  }
+
+  private async requireBatchContext(
+    tx: Prisma.TransactionClient,
+    operationId: string,
+    batchId?: string,
+  ) {
+    const member = await tx.ledgerPayoutBatchMember.findUnique({
+      where: { operation_id: operationId },
+    });
+    if (member?.batch_id !== batchId)
+      throw new ActionRejectedError(
+        'Batch members require atomic complete batch financial processing',
+      );
+  }
 
   async handle(event: ExchangeEvent) {
     return this.db.$transaction(async (tx) => {
@@ -102,7 +377,7 @@ export class SettlementsService {
   private async wallet(
     tx: Prisma.TransactionClient,
     id: string,
-    event: ExchangeEvent,
+    event: Pick<ExchangeEvent, 'domainId' | 'resetEpoch'>,
     asset: CanonicalAsset,
   ) {
     const wallet = await tx.exchangeWallet.findUnique({ where: { wallet_id: id } });
@@ -485,7 +760,8 @@ export class SettlementsService {
       });
   }
 
-  private async settle(tx: Prisma.TransactionClient, event: SettlementEvent) {
+  private async settle(tx: Prisma.TransactionClient, event: SettlementEvent, batchId?: string) {
+    await this.requireBatchContext(tx, event.operationId, batchId);
     const operation = await this.operation(tx, event);
     await this.retainCanonicalEvent(tx, event);
     const reversals = await this.reversals(tx, event);
@@ -509,7 +785,15 @@ export class SettlementsService {
       execution.data.amount.asset.chain,
       event.data.transactionHash,
     );
-    const identity = canonical([event.domainId, source.chain, source.network, hash]);
+    const chainIdentity = canonical([event.domainId, source.chain, source.network, hash]);
+    if (
+      !batchId &&
+      (await tx.ledgerPayoutBatch.findUnique({ where: { chain_identity: chainIdentity } }))
+    )
+      throw new ActionRejectedError('Transaction already belongs to an approved payout batch');
+    const identity = batchId
+      ? canonical([event.domainId, source.chain, source.network, hash, batchId, event.operationId])
+      : chainIdentity;
     const digest = exchangeDigest({
       identity,
       outcome: event.data.outcome,
@@ -736,7 +1020,8 @@ export class SettlementsService {
     );
   }
 
-  private async revert(tx: Prisma.TransactionClient, event: RevertEvent) {
+  private async revert(tx: Prisma.TransactionClient, event: RevertEvent, batchId?: string) {
+    await this.requireBatchContext(tx, event.operationId, batchId);
     if (event.revision <= event.data.priorSettlementRevision)
       throw new ActionRejectedError('Reversal revision must follow its referenced settlement');
     const reversals = await this.reversals(tx, event);

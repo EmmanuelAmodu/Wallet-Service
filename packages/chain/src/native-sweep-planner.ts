@@ -1001,7 +1001,6 @@ export class NativeSweepPlanner {
     request: SignRequest;
     signed: SignedTransaction;
   }) {
-    const request = input.request.transaction as BitcoinRequest;
     let raw: unknown;
     try {
       raw = await this.rpc.call('bitcoin', 'getrawtransaction', [input.hash, true]);
@@ -1019,39 +1018,8 @@ export class NativeSweepPlanner {
         input.signed.encoding === 'hex',
       'Bitcoin signed bytes',
     );
-    const decoded = decodeBitcoinSweep(transaction.hex);
-    evidence(decoded.txid === input.hash, 'Bitcoin signed raw hash');
-    const reservedInputs = new Set(request.utxos.map((utxo) => `${utxo.txid}:${utxo.vout}`));
-    evidence(
-      decoded.inputs.length === request.utxos.length &&
-        reservedInputs.size === request.utxos.length &&
-        new Set(decoded.inputs).size === decoded.inputs.length &&
-        decoded.inputs.every((ref) => reservedInputs.has(ref)),
-      'Bitcoin reserved input set',
-    );
-    evidence(
-      request.outputs.length === 1 &&
-        decoded.outputs.length === (BigInt(request.changeAmount ?? '0') > 0n ? 2 : 1),
-      'Bitcoin output count',
-    );
-    const hotScript = `0014${Buffer.from(regtestWitnessAddress(request.outputs[0].address).program).toString('hex')}`;
-    evidence(
-      decoded.outputs[0].script === hotScript &&
-        decoded.outputs[0].amount.toString() === request.outputs[0].amount,
-      'Bitcoin hot output',
-    );
-    if (decoded.outputs.length === 2) {
-      const sourceScript = `0014${Buffer.from(regtestWitnessAddress(input.request.wallet.address).program).toString('hex')}`;
-      evidence(
-        decoded.outputs[1].script === sourceScript &&
-          decoded.outputs[1].amount.toString() === request.changeAmount,
-        'Bitcoin hot-owned change',
-      );
-    }
-    const fee =
-      request.utxos.reduce((sum, utxo) => sum + BigInt(utxo.amount), 0n) -
-      decoded.outputs.reduce((sum, output) => sum + output.amount, 0n);
-    evidence(fee >= 0n && fee <= 10_000n, 'Bitcoin fee');
+    const { feeUnits } = verifyBitcoinPayment(input.request, input.signed);
+    const fee = BigInt(feeUnits);
     if (!transaction.blockhash) return { state: 'pending' as const };
     const headerSchema = z.object({
       hash: btcHash,
@@ -1204,7 +1172,7 @@ function decodeBitcoinSweep(raw: string) {
     evidence(take(4).readUInt32LE() === 0xffffffff, 'Bitcoin native input sequence');
   }
   const outputCount = compact();
-  evidence(outputCount >= 1 && outputCount <= 2, 'Bitcoin native output count');
+  evidence(outputCount >= 1 && outputCount <= 51, 'Bitcoin native output count');
   const outputs = Array.from({ length: outputCount }, () => ({
     amount: take(8).readBigUInt64LE(),
     script: take(compact()).toString('hex'),
@@ -1233,7 +1201,52 @@ function decodeBitcoinSweep(raw: string) {
   )
     .reverse()
     .toString('hex');
-  return { inputs, outputs, txid };
+  return { inputs, outputs, txid, virtualSize: Math.ceil((base.length * 3 + bytes.length) / 4) };
+}
+
+/** Decode and compare all committed outputs before submission or financial observation. */
+export function verifyBitcoinPayment(request: SignRequest, signed: SignedTransaction) {
+  if (request.transaction.chain !== 'bitcoin' || signed.encoding !== 'hex')
+    throw new Error('Bitcoin payment encoding mismatch');
+  const tx = request.transaction,
+    decoded = decodeBitcoinSweep(signed.raw);
+  evidence(decoded.txid === signed.txHash, 'Bitcoin signed hash');
+  const keys = tx.utxos.map((u) => `${u.txid}:${u.vout}`);
+  evidence(
+    new Set(keys).size === keys.length &&
+      decoded.inputs.length === keys.length &&
+      new Set(decoded.inputs).size === decoded.inputs.length &&
+      decoded.inputs.every((key) => keys.includes(key)),
+    'Bitcoin reserved input set',
+  );
+  const change = BigInt(tx.changeAmount ?? '0');
+  evidence(
+    decoded.outputs.length === tx.outputs.length + (change > 0n ? 1 : 0),
+    'Bitcoin complete output count',
+  );
+  const script = (address: string) =>
+    '0014' + Buffer.from(regtestWitnessAddress(address).program).toString('hex');
+  for (const [index, payout] of tx.outputs.entries()) {
+    const output = decoded.outputs[index + (change > 0n && index > 0 ? 1 : 0)];
+    evidence(
+      output.script === script(payout.address) && output.amount === BigInt(payout.amount),
+      'Bitcoin exact payout output',
+    );
+  }
+  if (change > 0n)
+    evidence(
+      decoded.outputs[1].script === script(request.wallet.address) &&
+        decoded.outputs[1].amount === change,
+      'Bitcoin hot-owned change',
+    );
+  const fee =
+    tx.utxos.reduce((sum, u) => sum + BigInt(u.amount), 0n) -
+    decoded.outputs.reduce((sum, o) => sum + o.amount, 0n);
+  evidence(
+    fee >= BigInt(decoded.virtualSize * tx.satsPerVbyte) && fee <= 10000n,
+    'Bitcoin exact fee and signed size',
+  );
+  return { feeUnits: fee.toString(), virtualSize: decoded.virtualSize };
 }
 
 // Minimal canonical RLP reader for Wallet Core's EIP-1559 native transfers.

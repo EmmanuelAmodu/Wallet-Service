@@ -1382,6 +1382,11 @@ test(
     await sql.connect();
     try {
       assert.equal(await scope.ledgerExecutionAttempt.count(), 0);
+      // Suspend only the empty newer batch layer's FK while reconstructing the older schema.
+      assert.equal(await scope.ledgerPayoutBatchMember.count(), 0);
+      await sql.query(
+        'ALTER TABLE ledger_payout_batch_members DROP CONSTRAINT ledger_payout_batch_members_attempt_id_fkey',
+      );
       await sql.query(`DROP TRIGGER retain_canonical_operation ON exchange_operations;
       DROP TRIGGER retain_canonical_reversal ON settlement_reversals;
       DROP TRIGGER retain_canonical_attempt ON ledger_execution_attempts;
@@ -1425,6 +1430,9 @@ test(
         ),
       );
       await sql.query('COMMIT');
+      await sql.query(
+        'ALTER TABLE ledger_payout_batch_members ADD CONSTRAINT ledger_payout_batch_members_attempt_id_fkey FOREIGN KEY(attempt_id) REFERENCES ledger_execution_attempts(id)',
+      );
       const bound = await scope.ledgerExecutionAttempt.findUniqueOrThrow({
         where: { id: execution.attemptId! },
       });

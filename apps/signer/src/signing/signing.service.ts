@@ -7,6 +7,12 @@ import { TokenSigningPolicy } from './token-signing.policy.js';
 import { TokenPreparation } from '../../../../packages/chain/src/token-planner.js';
 import { tokenCustodySignSchema } from '../../../../packages/shared/src/execution-contracts.js';
 import { CustodySigningPolicy } from './custody-signing.policy.js';
+import { BitcoinBatchSigningPolicy } from './bitcoin-batch-signing.policy.js';
+import { verifyBitcoinPayment } from '../../../../packages/chain/src/native-sweep-planner.js';
+import {
+  bitcoinBatchSignSchema,
+  bitcoinBatchAttestedResult,
+} from '../../../../packages/shared/src/bitcoin-batch-contracts.js';
 import { custodySignSchema } from '../../../../packages/shared/src/execution-contracts.js';
 import {
   executionDigest,
@@ -55,6 +61,54 @@ export class SigningService implements OnApplicationShutdown {
       } catch {
         result = { type: 'transaction.rejected', transactionId: action.transactionId };
       }
+    } else if (action.type === 'payout.batch.sign') {
+      const command = bitcoinBatchSignSchema.parse(action),
+        settings = this.custodyPolicy?.settings;
+      if (!settings?.attestationPrivateKey || !settings.bitcoinBatchesEnabled)
+        throw new ActionRejectedError('Bitcoin batch signing is disabled');
+      const binding = {
+        batchId: command.batchId,
+        transactionId: command.transactionId,
+        manifestDigest: command.preparation.manifestDigest,
+        preparationDigest: command.preparation.preparationDigest,
+      };
+      let unsigned:
+        | Omit<Extract<Message, { type: 'payout.batch.signed' }>, 'signerAttestation'>
+        | Omit<Extract<Message, { type: 'payout.batch.rejected' }>, 'signerAttestation'>;
+      try {
+        const request = new BitcoinBatchSigningPolicy(settings, this.core).authorize(command);
+        const signed = this.core.sign(request);
+        const verified = verifyBitcoinPayment(request, signed);
+        if (verified.feeUnits !== command.preparation.feeUnits)
+          throw new Error('Signed batch fee mismatch');
+        unsigned = { type: 'payout.batch.signed', ...binding, signed };
+      } catch {
+        unsigned = {
+          type: 'payout.batch.rejected',
+          ...binding,
+          commandDigest: executionDigest(command),
+          reason: 'Independent Bitcoin batch signing policy rejected',
+        };
+      }
+      const attested = bitcoinBatchAttestedResult(unsigned);
+      result = {
+        ...unsigned,
+        signerAttestation: signSignerAttestation(
+          {
+            version: 1,
+            domainId: settings.domainId,
+            resetEpoch: settings.resetEpoch,
+            transactionId: command.transactionId,
+            operationId: command.batchId,
+            attemptId: command.batchId,
+            requestDigest: binding.manifestDigest,
+            preparationDigest: binding.preparationDigest,
+            status: unsigned.type === 'payout.batch.signed' ? 'signed' : 'rejected',
+            resultDigest: executionDigest(attested),
+          },
+          settings.attestationPrivateKey,
+        ),
+      } as Message;
     } else if (action.type === 'transaction.custody.sign') {
       const command = custodySignSchema.parse(action);
       const policy = this.custodyPolicy;

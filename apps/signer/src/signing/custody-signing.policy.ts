@@ -11,6 +11,7 @@ export type CustodySigningSettings = {
   enabled: boolean;
   sweepsEnabled?: boolean;
   withdrawalsEnabled?: boolean;
+  bitcoinBatchesEnabled?: boolean;
   fundingEnabled?: boolean;
   domainId: string;
   resetEpoch: string;

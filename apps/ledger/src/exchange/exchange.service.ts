@@ -15,6 +15,10 @@ import { ReservationsService } from '../reservations/reservations.service.js';
 import { SettlementsService } from '../settlements/settlements.service.js';
 import { ExchangeRegistryService } from './registry.service.js';
 import { IncidentsService } from '../incidents/incidents.service.js';
+import {
+  PayoutBatchLedgerCommand,
+  payoutBatchLedgerCommandSchema,
+} from '../../../../packages/shared/src/bitcoin-batch-contracts.js';
 
 @Injectable()
 export class LedgerExchangeService {
@@ -29,6 +33,13 @@ export class LedgerExchangeService {
     @Optional() @InjectQueue(QUEUES.ledger) private readonly queue?: Queue,
     @Optional() private readonly auth?: MessageAuth,
   ) {}
+
+  async handleBatch(input: PayoutBatchLedgerCommand) {
+    const command = payoutBatchLedgerCommandSchema.parse(input);
+    if (command.resetEpoch !== this.config.resetEpoch)
+      throw new ActionRejectedError('Stale reset epoch');
+    return this.settlements.handleBatch(command);
+  }
 
   async handle(input: ExchangeEvent) {
     const event = exchangeEventSchema.parse(input);

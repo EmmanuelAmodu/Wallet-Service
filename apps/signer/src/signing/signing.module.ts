@@ -47,6 +47,7 @@ import { queueConfig } from '../../../../packages/queue/src/queue.config.js';
               config.tokenSigningEnabled,
             sweepsEnabled: config.nativeSweepsEnabled,
             withdrawalsEnabled: config.nativeWithdrawalsEnabled,
+            bitcoinBatchesEnabled: config.bitcoinBatchesEnabled,
             fundingEnabled: config.tokenSigningEnabled,
             domainId: config.domainId,
             resetEpoch: queue.resetEpoch,

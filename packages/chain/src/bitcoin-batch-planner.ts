@@ -4,6 +4,7 @@ import { NativeSweepPlanner, SweepDeferral } from './native-sweep-planner.js';
 import { regtestWitnessAddress } from './bitcoin-address.js';
 import { SignRequest, signSchema } from '../../shared/src/contracts.js';
 import { executionDigest } from '../../shared/src/execution-authorization.js';
+import { validateBitcoinBatch } from '../../shared/src/bitcoin-batch-contracts.js';
 import {
   PayoutBatchManifest,
   payoutBatchManifestSchema,
@@ -92,6 +93,9 @@ export class BitcoinBatchPlanner {
       resourceKeys: quote.resourceKeys,
       expiresAt: quote.expiresAt,
     };
-    return { ...preparation, preparationDigest: executionDigest(preparation) };
+    return validateBitcoinBatch(manifest, {
+      ...preparation,
+      preparationDigest: executionDigest(preparation),
+    }).preparation;
   }
 }

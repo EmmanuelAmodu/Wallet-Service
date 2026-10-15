@@ -629,6 +629,7 @@ model WithdrawalBatchDraftMember {
 }
 
 model WithdrawalBatchPreparation {
+ execution BitcoinBatchExecution?
  batch_id String @id @db.Uuid
  batch WithdrawalBatchDraft @relation(fields:[batch_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
  preparation Json
@@ -637,6 +638,27 @@ model WithdrawalBatchPreparation {
  created_at DateTime @default(now()) @db.Timestamptz
  resources WithdrawalBatchResource[]
  @@map("withdrawal_batch_preparations")
+}
+
+model BitcoinBatchExecution {
+ batch_id String @id @db.Uuid
+ preparation WithdrawalBatchPreparation @relation(fields:[batch_id],references:[batch_id],onDelete:NoAction,onUpdate:NoAction)
+ state String @default("awaiting_ledger")
+ command Json?
+ signer_result Json?
+ signed Json?
+ inclusion Json?
+ canonical_command Json?
+ revision Int @default(0)
+ ledger_ack_revision Int @default(-1)
+ terminal_proof_revision Int @default(0)
+ broadcast_generation Int @default(0)
+ next_check_at DateTime @default(now()) @db.Timestamptz
+ last_error String?
+ created_at DateTime @default(now()) @db.Timestamptz
+ updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+ @@index([next_check_at,batch_id])
+ @@map("bitcoin_batch_executions")
 }
 
 model WithdrawalBatchResource {
