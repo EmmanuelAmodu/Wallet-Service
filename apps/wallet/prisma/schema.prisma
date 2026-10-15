@@ -609,6 +609,7 @@ model WithdrawalBatchDraft {
  released_at DateTime? @db.Timestamptz
  members WithdrawalBatchDraftMember[]
  withdrawals Withdrawal[]
+ preparation WithdrawalBatchPreparation?
  @@unique([source_wallet_id],where:raw("\"state\" = 'planned'"),map:"one_planned_batch_draft_per_source")
  @@map("withdrawal_batch_drafts")
 }
@@ -625,4 +626,26 @@ model WithdrawalBatchDraftMember {
  @@unique([withdrawal_id],where:raw("\"active\""),map:"one_active_draft_per_withdrawal")
  @@unique([reservation_id],where:raw("\"active\""),map:"one_active_draft_per_hold")
  @@map("withdrawal_batch_draft_members")
+}
+
+model WithdrawalBatchPreparation {
+ batch_id String @id @db.Uuid
+ batch WithdrawalBatchDraft @relation(fields:[batch_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
+ preparation Json
+ preparation_digest String
+ expires_at DateTime @db.Timestamptz
+ created_at DateTime @default(now()) @db.Timestamptz
+ resources WithdrawalBatchResource[]
+ @@map("withdrawal_batch_preparations")
+}
+
+model WithdrawalBatchResource {
+ batch_id String @db.Uuid
+ preparation WithdrawalBatchPreparation @relation(fields:[batch_id],references:[batch_id],onDelete:NoAction,onUpdate:NoAction)
+ resource_key String
+ active Boolean @default(true)
+ released_at DateTime? @db.Timestamptz
+ @@id([batch_id,resource_key])
+ @@unique([resource_key],where:raw("\"active\""),map:"one_active_batch_resource")
+ @@map("withdrawal_batch_resources")
 }

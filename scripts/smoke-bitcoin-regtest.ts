@@ -6,10 +6,20 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
 import { ChainRpcService } from '../packages/chain/src/chain-rpc.service.js';
-import { NativeSweepPlanner } from '../packages/chain/src/native-sweep-planner.js';
+import {
+  NativeSweepPlanner,
+  bitcoinDecimalUnits,
+} from '../packages/chain/src/native-sweep-planner.js';
 import { SignRequest } from '../packages/shared/src/contracts.js';
+import { BitcoinBatchPlanner } from '../packages/chain/src/bitcoin-batch-planner.js';
+import {
+  payoutBatchManifestSchema,
+  payoutBatchDigest,
+  allocateBatchCosts,
+} from '../packages/shared/src/payout-policy.js';
 
 export async function smokeBitcoinRegtest() {
   const evidenceFolder = resolve('artifacts', 'acceptance', 'bitcoin-regtest');
@@ -164,6 +174,111 @@ export async function smokeBitcoinRegtest() {
         resourceKeys: plan.resourceKeys,
       });
     }
+    // Certify the exact multi-output primitive separately from application admission.
+    // These IDs represent disposable fixture obligations, never live customer holds.
+    const secondRecipient = core.derive({
+      chain: 'bitcoin',
+      seedId: 'acceptance-only',
+      account: 13,
+    });
+    const manifest = payoutBatchManifestSchema.parse({
+      version: 1,
+      batchId: randomUUID(),
+      domainId: 'acceptance-only',
+      resetEpoch: randomUUID(),
+      seedId: 'acceptance-only',
+      sourceWalletId: randomUUID(),
+      sourceRegistryRevision: 1,
+      sourceAddress: hot.address,
+      asset: { chain: 'bitcoin', network: 'regtest', assetId: 'token:bitcoin:native' },
+      feeAllocation: 'equal-largest-remainder-v1',
+      members: [recipient, recipient, secondRecipient]
+        .map((to) => ({
+          operationId: randomUUID(),
+          attemptId: randomUUID(),
+          reservationId: randomUUID(),
+          customerId: randomUUID(),
+          requestDigest: 'a'.repeat(64),
+          destination: to.address,
+          principalUnits: '100000000',
+          maximumFeeUnits: '10000',
+          maximumRentUnits: '0',
+        }))
+        .sort((a, b) => a.operationId.localeCompare(b.operationId)),
+    });
+    const prepared = await new BitcoinBatchPlanner(rpc).plan(manifest);
+    const request = prepared.request;
+    assert(request.transaction.chain === 'bitcoin');
+    const change = BigInt(prepared.changeUnits);
+    const signed = core.sign(request),
+      mapping = prepared.memberOutputs;
+    const decoded = (await rpc.call('bitcoin', 'decoderawtransaction', [signed.raw])) as {
+      txid: string;
+      vin: { txid: string; vout: number }[];
+      vout: { value: number; scriptPubKey: { address: string } }[];
+    };
+    assert.equal(decoded.txid, signed.txHash);
+    assert.equal(decoded.vout.length, manifest.members.length + 1);
+    assert.equal(decoded.vout[1].scriptPubKey.address, hot.address);
+    assert.equal(bitcoinDecimalUnits(decoded.vout[1].value), change);
+    for (const m of mapping) {
+      assert.equal(decoded.vout[m.outputIndex].scriptPubKey.address, m.destination);
+      assert.equal(
+        bitcoinDecimalUnits(decoded.vout[m.outputIndex].value),
+        BigInt(m.principalUnits),
+      );
+    }
+    assert.deepEqual(
+      decoded.vin.map((u) => `${u.txid}:${u.vout}`).sort(),
+      request.transaction.utxos.map((u) => `${u.txid}:${u.vout}`).sort(),
+    );
+    const fee = BigInt(prepared.feeUnits);
+    const admitted = (await rpc.call('bitcoin', 'testmempoolaccept', [[signed.raw]])) as {
+      allowed: boolean;
+      vsize: number;
+      fees: { base: number };
+    }[];
+    assert.equal(admitted[0].allowed, true);
+    assert.equal(bitcoinDecimalUnits(admitted[0].fees.base), fee);
+    assert(fee >= BigInt(admitted[0].vsize * request.transaction.satsPerVbyte) && fee <= 10000n);
+    const shares = allocateBatchCosts(manifest, fee.toString());
+    assert.equal(
+      shares.reduce((sum, m) => sum + BigInt(m.feeUnits), 0n),
+      fee,
+    );
+    assert.equal(await rpc.call('bitcoin', 'sendrawtransaction', [signed.raw]), signed.txHash);
+    await rpc.call('bitcoin', 'generatetoaddress', [6, miner.address]);
+    const first = (await rpc.call('bitcoin', 'getrawtransaction', [signed.txHash, true])) as {
+      confirmations: number;
+      blockhash: string;
+    };
+    assert(first.confirmations >= 6);
+    await rpc.call('bitcoin', 'invalidateblock', [first.blockhash]);
+    const orphan = (await rpc.call('bitcoin', 'getrawtransaction', [signed.txHash, true])) as {
+      confirmations?: number;
+    };
+    assert.equal(orphan.confirmations ?? 0, 0);
+    await rpc.call('bitcoin', 'generatetoaddress', [6, secondRecipient.address]);
+    const restored = (await rpc.call('bitcoin', 'getrawtransaction', [signed.txHash, true])) as {
+      confirmations: number;
+      blockhash: string;
+    };
+    assert(restored.confirmations >= 6);
+    assert.notEqual(restored.blockhash, first.blockhash);
+    evidence.push({
+      purpose: 'hot-withdrawal-batch-primitive',
+      hash: signed.txHash,
+      manifestDigest: payoutBatchDigest(manifest),
+      preparationDigest: prepared.preparationDigest,
+      members: mapping,
+      feeShares: shares,
+      actualFeeUnits: fee.toString(),
+      changeUnits: change.toString(),
+      initialBlockHash: first.blockhash,
+      restoredBlockHash: restored.blockhash,
+      confirmations: restored.confirmations,
+      reconfirmedSameBytesAfterReorg: true,
+    });
     const folder = resolve('artifacts', 'acceptance', 'bitcoin-regtest');
     await mkdir(folder, { recursive: true });
     await writeFile(
@@ -173,7 +288,7 @@ export async function smokeBitcoinRegtest() {
           status: 'passed',
           verifiedAt: new Date().toISOString(),
           scope:
-            'disposable Bitcoin Core regtest; real Wallet Core signatures, mempool validation, recipients, inputs, fees and six-block canonical finality; not public Bitcoin deployment',
+            'disposable Bitcoin Core regtest; real Wallet Core signatures, single and exact batch outputs, mempool validation, member fee conservation, six-block finality and batch reorg/reconfirmation; not application batch authorization or public Bitcoin deployment',
           evidence,
         },
         null,

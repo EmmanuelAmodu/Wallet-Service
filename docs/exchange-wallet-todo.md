@@ -189,7 +189,7 @@ See [architecture](architecture.md) for current boundaries and [implementation p
 
 These tasks increase throughput or scope after the core exchange flow is accepted. They are not prerequisites for the initial serialized hot-wallet scheduler.
 
-**Selected scope (14 October):** P9-01–03 and P9-08. Multiple seeds/domains, internal transfers and Treasury extraction are deferred. The original-attempt journal/private inspection prerequisite is implemented; no main P9 item is complete yet. See the [Phase 9 delivery checklist](exchange-wallet-phase9.md).
+**Selected scope (updated 15 October):** P9-01–03 and P9-08. Multiple seeds/domains, internal transfers and Treasury extraction are deferred. The original-attempt journal/private inspection prerequisite is implemented; no main P9 item is complete yet. See the [Phase 9 delivery checklist](exchange-wallet-phase9.md).
 
 - [x] **P9-00A** Add immutable original-attempt identity and transactionally captured preparation/signing/inclusion/settlement/reversal history, migration baseline, and private scoped inspection.
 - [x] **P9-00B.1** Separate immutable Ledger original-attempt approval from financial obligation/hold terms; bind settlement/reversal to that approval and reject accepted-term mutations.
@@ -199,6 +199,7 @@ These tasks increase throughput or scope after the core exchange flow is accepte
 - [x] **P9-00C.2** Add exact batch member/cost/output mapping primitives and Bitcoin exact multi-output signing verification; custody batch admission remains disabled.
 - [x] **P9-00C.3** Add EVM/Bitcoin resource-conflict and retained-lineage predicates; these confer no replacement authorization and reject fresh-blockhash Solana assumptions.
 - [x] **P9-00C.4** Persist complete unsigned batch draft membership/source ownership and atomic dissolution back to the same original holds. No batch signing/dispatch is admitted.
+- [x] **P9-00C.5** Prepare exact unsigned Bitcoin batches with durable immutable mappings/fee shares and exclusive UTXO claims; dissolve unsigned claims atomically without releasing original holds. Verify real regtest outputs, fees and same-byte reorg/reconfirmation. Batch authority/dispatch/settlement remain pending.
 - [ ] **P9-00B** Add independently authorized child attempts and obligation-level reconciliation before enabling replacements or concurrent payout windows.
 
 - [ ] **P9-01** Add bounded EVM nonce windows plus native/token liquidity reservations; remove serialization only after concurrent execution and replacement tests pass.

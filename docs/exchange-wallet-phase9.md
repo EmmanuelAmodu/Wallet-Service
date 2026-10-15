@@ -210,3 +210,27 @@ This is draft membership/source ownership, not live batching. Prepared chain res
 ### Verified 15 October checkpoint before draft ownership
 
 Run `929d425c2a1343f98a08adf4ede9e81b` passed **429 tests** with no failures, skips or cancellations, plus all builds, type checks, lint and formatting. Source SHA-256: `22ebef3c6f34cf9d025f601111802016b32fd017d82a2984c41272cc097bb572`. Finished `2026-10-15T09:44:58.828Z`; disposable database cleanup had zero failures. This evidence covers canonical receipts, EVM liquidity, Bitcoin exact output checks, batch planning/cost mappings and resource-conflict predicates. Draft ownership was added afterward and needs its own checkpoint below.
+
+
+### Verified draft and nonce ownership checkpoint
+
+Run `0213c491c75348b1834ae31ec5c59427` passed **433 tests**, all builds, type checks, lint and formatting, with zero failures, skips, cancellations or cleanup failures. Finished `2026-10-15T10:04:47.374Z`; tested-source SHA-256: `7e92b5d59ec5f6fc282d545de34fd70ec4657bd8f0aa2f8306a89b385f0d7084`. This checkpoint precedes the unsigned Bitcoin preparation changes below.
+
+EVM nonce ownership now remains exclusive even after acknowledged settlement. A provider nonce rewind cannot assign the consumed nonce to another original obligation. Only a proved never-signed release relinquishes that nonce. Mixed-version preparation captures legacy workers' exact retained withdrawal exposure without inventing fresh RPC balance evidence. Unsigned draft dissolution has one narrow exception to original-attempt immutability: a completely dissolved draft-only attempt that never had an execution can be cleared while its immutable membership history and original hold remain retained.
+
+### Unsigned Bitcoin preparation and reserved inputs
+
+`BitcoinBatchPlanner` uses the existing native planner's independently checked mature owned UTXOs, pinned regtest identity and fee-rate bounds. It requires canonical P2WPKH source/recipients, preserves every original member as a separate output even for repeated recipients, keeps hot change at output 1, and binds exact inputs, principals, fee shares, change, expiry and resource keys in a preparation digest. Additional output bytes and a conservative signature-size margin are paid from hot change. Insufficient nondust change, a transaction fee over 10,000 satoshis or a member's exhausted fee budget defers preparation. The unsigned quote does not itself reserve inputs or grant spending authority.
+
+Wallet migration `20261015040000_unsigned_batch_preparations` retains immutable preparations and complete exclusive batch UTXO claims. The private `BatchDraftsService.prepareBitcoin` rechecks domain/source/registry/asset/customer admission and commits preparation plus all claims under the source/resource locks. Database guards independently bind original payout mappings, deterministic fee allocation, exact input/principal/fee/change conservation and complete reservations. Cross-table resource fences protect both new batch workers and existing individual workers. An expired preparation cannot be silently replaced: dissolve the entire unsigned draft before replanning. Dissolution deactivates every resource claim but retains the preparation, mappings and resource history; no original customer hold is released. Apply the Wallet migration before deploying this provider and retain history on rollback.
+
+The Bitcoin smoke now calls this same planner against disposable Bitcoin Core 29.0. It signs three exact payouts (including a repeated recipient), independently decodes every input/output and change, verifies actual fee and mempool admission, confirms six blocks, invalidates the inclusion block and confirms the **same transaction bytes/hash** on a new branch. Run at `2026-10-15T15:16:17.262Z` passed. Evidence is in `artifacts/acceptance/bitcoin-regtest/result.json`; it uses disposable fixture obligations and does not claim application batch authority, member financial settlement or public-network certification.
+
+Still pending for P9-02: independent batch authority in Ledger/Signer/Broadcast, publication/dispatch, canonical per-original-hold member settlement, winning-attempt/reorg financial handling, cancellation after authorization and unknown-outcome recovery. There is no public batch endpoint, automatic producer or batch dispatch. P9-01, P9-03 and P9-08 also remain open.
+
+
+### Verified unsigned preparation checkpoint
+
+Run `9bd03a6c37ea41238419e33aae31ee2f` passed **437 tests**, zero failures/skips/cancellations, all application builds and type checks, lint and formatting. Finished `2026-10-15T15:22:45.566Z`; tested-source SHA-256: `8d62a348bb87986dcf8a51d4a17b6cd44657e8f2ec9236017ddbf3d7c49fd219`. Disposable database cleanup had zero failures. Evidence: `artifacts/acceptance/9bd03a6c37ea41238419e33aae31ee2f/result.json`.
+
+New coverage includes actual signed batch input/principal/fee/change conservation and output ordering for repeated recipients; invalid recipients before RPC; spent/foreign inputs; insufficient change and fee budgets; incomplete preparation rollback; immutable mappings/resources; batch-versus-individual resource exclusion in both directions; idempotent preparation; and complete unsigned dissolution preserving original holds and history. The separate real Bitcoin Core regtest evidence above supplements this deterministic application suite. No application database or spending flag was changed.

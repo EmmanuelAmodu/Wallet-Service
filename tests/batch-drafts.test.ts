@@ -13,8 +13,164 @@ import {
 import { custodySettings, isolatedDatabase, testMnemonic } from './helpers/custody-fixture.js';
 import { acceptanceRollout } from './helpers/rollout-fixture.js';
 import { SigningCore } from '../apps/signer/src/signing/signing.core.js';
+import { BitcoinBatchPlanner } from '../packages/chain/src/bitcoin-batch-planner.js';
+import { ChainRpcService } from '../packages/chain/src/chain-rpc.service.js';
+import { regtestWitnessAddress } from '../packages/chain/src/bitcoin-address.js';
+import { Chain } from '../packages/shared/src/contracts.js';
+import { executionDigest } from '../packages/shared/src/execution-authorization.js';
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
+
+test(
+  'unsigned Bitcoin preparation atomically retains exact mappings, fee shares and exclusive outpoints until whole-draft dissolution',
+  { skip: !databaseUrl },
+  async () => {
+    const f = await fixture();
+    try {
+      await f.service.claim(f.manifest);
+      const plan = await f.planner.plan(f.manifest);
+      const data = {
+        batch_id: f.manifest.batchId,
+        preparation: plan,
+        preparation_digest: plan.preparationDigest,
+        expires_at: new Date(plan.expiresAt),
+      };
+      await assert.rejects(
+        f.db.withdrawalBatchPreparation.create({ data }),
+        /complete exact input reservations/,
+      );
+      assert.equal(await f.db.withdrawalBatchPreparation.count(), 0);
+      const forged = structuredClone(plan);
+      forged.request.transaction = {
+        ...forged.request.transaction,
+        chain: 'bitcoin',
+        utxos: [],
+        outputs: [],
+        satsPerVbyte: 2,
+      };
+      await assert.rejects(
+        f.db.withdrawalBatchPreparation.create({ data: { ...data, preparation: forged } }),
+      );
+      const before = await f.db.outbox.count();
+      const row = await f.service.prepareBitcoin(f.manifest.batchId);
+      assert.equal(
+        (await f.service.prepareBitcoin(f.manifest.batchId)).preparation_digest,
+        row.preparation_digest,
+      );
+      const retained = row.preparation as unknown as typeof plan;
+      const { preparationDigest, ...body } = retained;
+      assert.equal(executionDigest(body), preparationDigest);
+      assert.deepEqual(
+        retained.memberOutputs.map((m) => m.outputIndex),
+        [0, 2, 3],
+      );
+      const resources = await f.db.withdrawalBatchResource.findMany({
+        where: { batch_id: row.batch_id },
+      });
+      assert.equal(resources.length, 1);
+      assert.equal(resources[0].active, true);
+      await assert.rejects(
+        f.db.withdrawalBatchPreparation.update({
+          where: { batch_id: row.batch_id },
+          data: { preparation: {} },
+        }),
+        /immutable/,
+      );
+      await assert.rejects(
+        f.db.withdrawalBatchResource.update({
+          where: {
+            batch_id_resource_key: {
+              batch_id: row.batch_id,
+              resource_key: resources[0].resource_key,
+            },
+          },
+          data: { active: false, released_at: new Date() },
+        }),
+        /only unsigned dissolution/,
+      );
+      assert.equal(await f.db.outbox.count(), before);
+      const customerId = f.manifest.members[0].customerId;
+      const otherSource = await f.db.$transaction((tx) =>
+        f.custody.allocateCustomer(tx, customerId, 'ethereum', '11155111'),
+      );
+      const otherHot = await f.db.wallet.findFirstOrThrow({
+        where: { chain: 'ethereum', custody_role: 'hot' },
+      });
+      const transaction = await f.db.transaction.create({
+        data: {
+          id: randomUUID(),
+          wallet_id: otherSource.id,
+          idempotency_key: randomUUID(),
+          request_hash: 'a'.repeat(64),
+          intent: {},
+          status: 'preparing',
+        },
+      });
+      const execution = await f.db.custodyExecution.create({
+        data: {
+          id: randomUUID(),
+          operation_id: randomUUID(),
+          attempt_id: randomUUID(),
+          transaction_id: transaction.id,
+          domain_id: f.manifest.domainId,
+          reset_epoch: f.manifest.resetEpoch,
+          customer_id: customerId,
+          source_wallet_id: otherSource.id,
+          hot_wallet_id: otherHot.id,
+          request_digest: 'a'.repeat(64),
+          plan: { type: 'sweep.plan.requested.v1' },
+          state: 'planning',
+        },
+      });
+      const afterFixture = await f.db.outbox.count();
+      await assert.rejects(
+        f.db.executionResourceClaim.create({
+          data: {
+            id: randomUUID(),
+            execution_id: execution.id,
+            resource_key: resources[0].resource_key,
+          },
+        }),
+        /reserved by an unsigned batch/,
+      );
+      await f.service.releaseUnsigned(row.batch_id);
+      assert.equal(await f.db.withdrawalBatchResource.count({ where: { active: true } }), 0);
+      assert.equal(await f.db.withdrawalBatchPreparation.count(), 1);
+      await assert.rejects(f.service.prepareBitcoin(row.batch_id), /already released/);
+      assert.equal(await f.db.outbox.count(), afterFixture);
+      for (const member of f.manifest.members) {
+        const w = await f.db.withdrawal.findUniqueOrThrow({ where: { id: member.operationId } });
+        assert.equal(w.reservation_id, member.reservationId);
+        assert.equal(w.state, 'queued');
+      }
+      await f.db.executionResourceClaim.create({
+        data: {
+          id: randomUUID(),
+          execution_id: execution.id,
+          resource_key: resources[0].resource_key,
+        },
+      });
+      const next = {
+        ...f.manifest,
+        batchId: randomUUID(),
+        members: f.manifest.members.map((m) => ({ ...m, attemptId: randomUUID() })),
+      };
+      await f.service.claim(next);
+      await assert.rejects(
+        f.service.prepareBitcoin(next.batchId),
+        /already retained by an individual attempt/,
+      );
+      assert.equal(
+        await f.db.withdrawalBatchPreparation.count({ where: { batch_id: next.batchId } }),
+        0,
+      );
+      assert.equal(await f.db.withdrawalBatchResource.count({ where: { active: true } }), 0);
+      await f.service.releaseUnsigned(next.batchId);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 async function fixture(chain: 'bitcoin' | 'solana' = 'bitcoin') {
   const isolated = await isolatedDatabase(databaseUrl!);
@@ -141,12 +297,38 @@ async function fixture(chain: 'bitcoin' | 'solana' = 'bitcoin') {
       members,
       feeAllocation: 'equal-largest-remainder-v1',
     });
-    const service = new BatchDraftsService(db, config, auth);
+    const rpc = new (class extends ChainRpcService {
+      override async call(_chain: Chain, method: string, _params: unknown[]): Promise<unknown> {
+        if (method === 'getblockchaininfo') return { chain: 'regtest' };
+        if (method === 'listunspent')
+          return [{ txid: 'a'.repeat(64), vout: 0, address, confirmations: 6 }];
+        if (method === 'gettxout')
+          return {
+            value: '0.001',
+            confirmations: 6,
+            coinbase: false,
+            scriptPubKey: {
+              address,
+              hex: '0014' + Buffer.from(regtestWitnessAddress(address).program).toString('hex'),
+            },
+          };
+        if (method === 'estimatesmartfee') return { feerate: '0.00002' };
+        throw new Error(`Unexpected batch fixture RPC ${method}`);
+      }
+    })({
+      ethereumChainId: '11155111',
+      solanaGenesisHash: 'unused',
+      chainNetworks: config.chainNetworks,
+    });
+    const planner = new BitcoinBatchPlanner(rpc);
+    const service = new BatchDraftsService(db, config, auth, planner);
     return {
       db,
       manifest,
       service,
       hot,
+      planner,
+      custody,
       close: async () => {
         await db.$disconnect();
         await isolated.drop();
