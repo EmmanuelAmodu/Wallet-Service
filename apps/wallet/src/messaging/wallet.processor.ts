@@ -9,6 +9,7 @@ import { ExchangeMessagingService } from '../exchange-messaging/exchange-messagi
 import { CustodyExecutionService } from '../execution/execution.service.js';
 
 import { WithdrawalsService } from '../withdrawals/withdrawals.service.js';
+import { BitcoinBatchExecutionService } from '../execution/bitcoin-batch-execution.service.js';
 
 @Processor(QUEUES.wallet, { concurrency: 8 })
 export class WalletProcessor extends WorkerHost implements BeforeApplicationShutdown {
@@ -19,6 +20,7 @@ export class WalletProcessor extends WorkerHost implements BeforeApplicationShut
     @Optional() private readonly execution?: CustodyExecutionService,
     @Optional() private readonly withdrawals?: WithdrawalsService,
     @Optional() private readonly operations?: OperationsService,
+    @Optional() private readonly batches?: BitcoinBatchExecutionService,
   ) {
     super();
   }
@@ -37,6 +39,7 @@ export class WalletProcessor extends WorkerHost implements BeforeApplicationShut
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
     try {
       if (this.operations && (await this.operations.handle(message))) return;
+      if (this.batches && (await this.batches.handle(message))) return;
       if (this.execution && (await this.execution.handle(message))) return;
       await this.withdrawals?.handle(message);
       if (isExchangeEvent(message)) {

@@ -274,37 +274,45 @@ export class BatchDraftsService {
       throw new ActionRejectedError('Batch draft custody scope mismatch');
     return this.db.$transaction(async (tx) => {
       await lock(tx, `custody-source:${snapshot.source_wallet_id}`);
-      const batch = await tx.withdrawalBatchDraft.findUniqueOrThrow({
-        where: { id: batchId },
-        include: { members: true },
-      });
-      if (batch.state === 'released') return batch;
-      // Drafts have no signing/broadcast states; a later protocol must not reuse this release path for signed batches.
-      if (batch.state !== 'planned')
-        throw new ActionRejectedError('Only an unsigned draft may dissolve');
-      await tx.withdrawalBatchDraft.update({
-        where: { id: batch.id },
-        data: { state: 'released', released_at: new Date() },
-      });
-      for (const member of batch.members) {
-        await lock(tx, `withdrawal:${member.withdrawal_id}`);
-        await tx.withdrawalBatchDraftMember.update({
-          where: {
-            batch_id_member_index: { batch_id: batch.id, member_index: member.member_index },
-          },
-          data: { active: false },
-        });
-        await tx.withdrawal.update({
-          where: { id: member.withdrawal_id },
-          data: {
-            batch_draft_id: null,
-            attempt_id: null,
-            state: 'queued',
-            revision: { increment: 1 },
-          },
-        });
-      }
-      return tx.withdrawalBatchDraft.findUniqueOrThrow({ where: { id: batch.id } });
+      return this.releaseWithin(tx, batchId);
     });
+  }
+
+  async releaseWithin(tx: Prisma.TransactionClient, batchId: string) {
+    const batch = await tx.withdrawalBatchDraft.findUniqueOrThrow({
+      where: { id: batchId },
+      include: { members: true },
+    });
+    if (batch.domain_id !== this.config.domainId || batch.reset_epoch !== this.auth.resetEpoch)
+      throw new ActionRejectedError('Batch dissolution scope mismatch');
+    if (await tx.bitcoinBatchExecution.findUnique({ where: { batch_id: batchId } }))
+      throw new ActionRejectedError('Admitted batch cannot use unsigned dissolution');
+    if (batch.state === 'released') return batch;
+    // Drafts have no signing/broadcast states; a later protocol must not reuse this release path for signed batches.
+    if (batch.state !== 'planned')
+      throw new ActionRejectedError('Only an unsigned draft may dissolve');
+    await tx.withdrawalBatchDraft.update({
+      where: { id: batch.id },
+      data: { state: 'released', released_at: new Date() },
+    });
+    for (const member of batch.members) {
+      await lock(tx, `withdrawal:${member.withdrawal_id}`);
+      await tx.withdrawalBatchDraftMember.update({
+        where: {
+          batch_id_member_index: { batch_id: batch.id, member_index: member.member_index },
+        },
+        data: { active: false },
+      });
+      await tx.withdrawal.update({
+        where: { id: member.withdrawal_id },
+        data: {
+          batch_draft_id: null,
+          attempt_id: null,
+          state: 'queued',
+          revision: { increment: 1 },
+        },
+      });
+    }
+    return tx.withdrawalBatchDraft.findUniqueOrThrow({ where: { id: batch.id } });
   }
 }

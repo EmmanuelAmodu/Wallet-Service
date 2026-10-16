@@ -2144,18 +2144,22 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
             id: { not: current.id },
           },
         });
+        const batchOwner = await tx.withdrawalBatchDraft.findFirst({
+          where: { source_wallet_id: current.source_wallet_id, state: 'planned' },
+        });
+        const sourceOwnedElsewhere = other || batchOwner;
         const updated = await tx.custodyExecution.update({
           where: { id: current.id },
           data: {
             state: 'attention',
             reversed: true,
-            ...(!other ? { retired_at: null } : {}),
+            ...(!sourceOwnedElsewhere ? { retired_at: null } : {}),
             revision: { increment: 1 },
             settlement_revision: { increment: 1 },
             last_error: 'Canonical inclusion orphaned; source retained for reconciliation',
           },
         });
-        if (!other) {
+        if (!sourceOwnedElsewhere) {
           await tx.transaction.update({
             where: { id: transactionId },
             data: { status: 'attention' },
@@ -2344,7 +2348,13 @@ export class CustodyExecutionService implements OnModuleInit, OnModuleDestroy {
           id: { not: current.id },
         },
       });
-      if (other) throw new ActionRejectedError('Another execution owns this source fence');
+      if (
+        other ||
+        (await tx.withdrawalBatchDraft.findFirst({
+          where: { source_wallet_id: current.source_wallet_id, state: 'planned' },
+        }))
+      )
+        throw new ActionRejectedError('Another execution owns this source fence');
       const claims = await tx.executionResourceClaim.findMany({
         where: { execution_id: current.id },
       });

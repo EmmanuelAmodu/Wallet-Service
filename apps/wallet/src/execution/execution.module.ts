@@ -9,6 +9,7 @@ import { TokenFeesService } from './token-fees.service.js';
 import { CustodyExecutionService } from './execution.service.js';
 import { EvmLiquidityService } from './evm-liquidity.service.js';
 import { BatchDraftsService } from './batch-drafts.service.js';
+import { BitcoinBatchExecutionService } from './bitcoin-batch-execution.service.js';
 @Module({
   imports: [
     WalletPrismaModule,
@@ -17,7 +18,18 @@ import { BatchDraftsService } from './batch-drafts.service.js';
     MessagingModule,
     ConfigModule.forFeature(executionConfig),
   ],
-  providers: [CustodyExecutionService, TokenFeesService, EvmLiquidityService, BatchDraftsService],
-  exports: [CustodyExecutionService, TokenFeesService],
+  providers: [
+    CustodyExecutionService,
+    TokenFeesService,
+    EvmLiquidityService,
+    BatchDraftsService,
+    BitcoinBatchExecutionService,
+  ],
+  exports: [
+    CustodyExecutionService,
+    TokenFeesService,
+    BitcoinBatchExecutionService,
+    BatchDraftsService,
+  ],
 })
 export class ExecutionModule {}

@@ -7,6 +7,14 @@ CREATE TABLE bitcoin_batch_executions (
  next_check_at timestamptz NOT NULL DEFAULT now(),last_error text,created_at timestamptz NOT NULL DEFAULT now(),updated_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX bitcoin_batch_execution_due ON bitcoin_batch_executions(next_check_at,batch_id);
+CREATE TABLE bitcoin_batch_signer_results (
+ batch_id uuid NOT NULL REFERENCES bitcoin_batch_executions(batch_id),digest text NOT NULL CHECK(digest ~ '^[a-f0-9]{64}$'),payload jsonb NOT NULL,
+ received_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(batch_id,digest)
+);
+CREATE FUNCTION protect_batch_signer_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Authenticated batch signer result history is immutable'; END;
+$$;
+CREATE TRIGGER protect_batch_signer_receipt BEFORE UPDATE OR DELETE ON bitcoin_batch_signer_results FOR EACH ROW EXECUTE FUNCTION protect_batch_signer_receipt();
 ALTER TABLE withdrawal_batch_drafts DROP CONSTRAINT withdrawal_batch_drafts_state_check;
 ALTER TABLE withdrawal_batch_drafts ADD CONSTRAINT withdrawal_batch_drafts_state_check CHECK(state IN ('planned','released','completed'));
 
@@ -22,7 +30,10 @@ BEGIN
  ELSE
   IF ROW(NEW.batch_id,NEW.created_at) IS DISTINCT FROM ROW(OLD.batch_id,OLD.created_at)
    OR (OLD.command IS NOT NULL AND NEW.command IS DISTINCT FROM OLD.command)
-   OR (OLD.signer_result IS NOT NULL AND NEW.signer_result IS DISTINCT FROM OLD.signer_result)
+   OR (OLD.signer_result IS NOT NULL AND NEW.signer_result IS DISTINCT FROM OLD.signer_result AND NOT (
+    OLD.signer_result->>'type'='payout.batch.rejected' AND NEW.signer_result->>'type'='payout.batch.signed'
+    AND EXISTS(SELECT 1 FROM bitcoin_batch_signer_results WHERE batch_id=NEW.batch_id AND payload=OLD.signer_result)
+    AND EXISTS(SELECT 1 FROM bitcoin_batch_signer_results WHERE batch_id=NEW.batch_id AND payload=NEW.signer_result)))
    OR (OLD.signed IS NOT NULL AND NEW.signed IS DISTINCT FROM OLD.signed)
    OR NEW.revision<OLD.revision OR NEW.ledger_ack_revision<OLD.ledger_ack_revision
    OR NEW.broadcast_generation<OLD.broadcast_generation OR NEW.terminal_proof_revision<OLD.terminal_proof_revision THEN
@@ -39,6 +50,29 @@ BEGIN
 END;
 $$;
 CREATE TRIGGER guard_bitcoin_batch_execution BEFORE INSERT OR UPDATE OR DELETE ON bitcoin_batch_executions FOR EACH ROW EXECUTE FUNCTION guard_bitcoin_batch_execution();
+
+CREATE TABLE bitcoin_batch_execution_events (
+ sequence bigserial PRIMARY KEY,batch_id uuid NOT NULL REFERENCES bitcoin_batch_executions(batch_id),snapshot jsonb NOT NULL,digest text NOT NULL,
+ created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX bitcoin_batch_execution_event_scope ON bitcoin_batch_execution_events(batch_id,sequence);
+CREATE FUNCTION capture_bitcoin_batch_execution() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE body jsonb; fingerprint text; prior text;
+BEGIN
+ body=to_jsonb(NEW)-'next_check_at'-'updated_at';
+ fingerprint=encode(sha256(convert_to(body::text,'UTF8')),'hex');
+ SELECT digest INTO prior FROM bitcoin_batch_execution_events WHERE batch_id=NEW.batch_id ORDER BY sequence DESC LIMIT 1;
+ IF prior IS DISTINCT FROM fingerprint THEN
+  INSERT INTO bitcoin_batch_execution_events(batch_id,snapshot,digest) VALUES(NEW.batch_id,body,fingerprint);
+ END IF;
+ RETURN NEW;
+END;
+$$;
+CREATE TRIGGER journal_bitcoin_batch_execution AFTER INSERT OR UPDATE ON bitcoin_batch_executions FOR EACH ROW EXECUTE FUNCTION capture_bitcoin_batch_execution();
+CREATE FUNCTION protect_bitcoin_batch_execution_event() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN RAISE EXCEPTION 'Batch execution history is immutable'; END;
+$$;
+CREATE TRIGGER immutable_bitcoin_batch_execution_event BEFORE UPDATE OR DELETE ON bitcoin_batch_execution_events FOR EACH ROW EXECUTE FUNCTION protect_bitcoin_batch_execution_event();
 
 CREATE OR REPLACE FUNCTION guard_batch_draft() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE w wallets%ROWTYPE;

@@ -1,3 +1,4 @@
+import { BatchDraftsService } from '../execution/batch-drafts.service.js';
 import {
   rolloutConfig,
   RolloutSettings,
@@ -108,6 +109,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(rolloutConfig.KEY)
     private readonly rollout: RolloutSettings = closedRollout,
+    @Optional() private readonly batchDrafts?: BatchDraftsService,
   ) {}
 
   onModuleInit() {
@@ -400,9 +402,16 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
       await lock(tx, `custody-source:${snapshot.hot_wallet_id}`);
       await lock(tx, `withdrawal:${id}`);
       await tx.$queryRaw`SELECT id FROM withdrawals WHERE id=${id}::uuid FOR UPDATE`;
-      const w = await tx.withdrawal.findUniqueOrThrow({ where: { id } });
-      if (w.batch_draft_id)
-        throw new ConflictException('Dissolve the unsigned batch draft before cancelling a member');
+      let w = await tx.withdrawal.findUniqueOrThrow({ where: { id } });
+      if (w.batch_draft_id) {
+        if (
+          !this.batchDrafts ||
+          (await tx.bitcoinBatchExecution.findUnique({ where: { batch_id: w.batch_draft_id } }))
+        )
+          throw new ConflictException('Admitted batch members cannot be cancelled independently');
+        await this.batchDrafts.releaseWithin(tx, w.batch_draft_id);
+        w = await tx.withdrawal.findUniqueOrThrow({ where: { id } });
+      }
       if (['cancelled', 'rejected'].includes(w.state)) return w;
       const execution = await tx.custodyExecution.findUnique({ where: { operation_id: id } });
       if (
@@ -677,6 +686,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
       where: {
         domain_id: this.settings.domainId,
         reset_epoch: this.auth.resetEpoch,
+        batch_draft_id: null,
         state: {
           in: [
             'reserving',
@@ -700,6 +710,26 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
         await lock(tx, `withdrawal:${snapshot.id}`);
         const w = await tx.withdrawal.findUniqueOrThrow({ where: { id: snapshot.id } });
         if (w.batch_draft_id) return;
+        if (
+          this.execution.bitcoinBatchesEnabled &&
+          w.state === 'queued' &&
+          w.chain === 'bitcoin' &&
+          w.asset_id === 'token:bitcoin:native' &&
+          !w.cancel_requested &&
+          (await tx.withdrawal.count({
+            where: {
+              hot_wallet_id: w.hot_wallet_id,
+              state: 'queued',
+              customer: { state: 'active', ledger_status: 'ready' },
+              batch_draft_id: null,
+              attempt_id: null,
+              cancel_requested: false,
+              reservation_id: { not: null },
+              asset_id: 'token:bitcoin:native',
+            },
+          })) >= 2
+        )
+          return;
         await tx.withdrawal.update({
           where: { id: w.id },
           data: { next_check_at: new Date(Date.now() + this.execution.pollIntervalMs) },

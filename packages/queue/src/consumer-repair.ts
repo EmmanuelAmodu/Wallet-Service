@@ -10,7 +10,18 @@ export async function retryFailedConsumerJobs(queue: Queue, auth: MessageAuth, d
   for (const job of jobs) {
     try {
       const message = auth.open(job.data, job.id!, job.name);
-      if (!('domainId' in message) || message.domainId !== domainId) {
+      const scope =
+        'domainId' in message
+          ? {
+              domainId: message.domainId,
+              resetEpoch: 'resetEpoch' in message ? message.resetEpoch : auth.resetEpoch,
+            }
+          : 'signerAttestation' in message
+            ? message.signerAttestation.claims
+            : 'authorization' in message
+              ? message.authorization.claims
+              : undefined;
+      if (!scope || scope.domainId !== domainId || scope.resetEpoch !== auth.resetEpoch) {
         stale++;
         continue;
       }

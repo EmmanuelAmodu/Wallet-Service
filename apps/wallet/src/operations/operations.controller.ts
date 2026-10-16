@@ -73,6 +73,10 @@ export class OperationsController {
     return this.operations.preview();
   }
 
+  @Get('batches/:batchId') batch(@Param('batchId', new ParseUUIDPipe()) batchId: string) {
+    return this.operations.batch(batchId);
+  }
+
   @Get('metrics') metrics() {
     return this.operations.metrics();
   }

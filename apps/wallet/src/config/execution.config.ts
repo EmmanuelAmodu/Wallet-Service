@@ -8,6 +8,7 @@ export interface ExecutionSettings {
   tokensEnabled?: boolean;
   sweepsEnabled?: boolean;
   withdrawalsEnabled?: boolean;
+  bitcoinBatchesEnabled?: boolean;
   authorityPrivateKey?: KeyObject;
   signerPublicKey?: KeyObject;
   pollIntervalMs: number;
@@ -24,6 +25,12 @@ export const executionConfig = registerAs('custodyExecution', (): ExecutionSetti
     throw new Error('Invalid configuration: ENABLE_TOKEN_EXECUTION');
   const tokensEnabled = tokenFlag === 'true';
   const withdrawalsEnabled = withdrawalFlag === 'true';
+  const batchFlag = process.env.ENABLE_BITCOIN_BATCH_WITHDRAWALS ?? 'false';
+  if (!['true', 'false'].includes(batchFlag))
+    throw new Error('Invalid configuration: ENABLE_BITCOIN_BATCH_WITHDRAWALS');
+  if (batchFlag === 'true' && !withdrawalsEnabled)
+    throw new Error('Bitcoin batches require native withdrawals');
+  const bitcoinBatchesEnabled = batchFlag === 'true';
   const sweepsEnabled = flag === 'true';
   const enabled = sweepsEnabled || withdrawalsEnabled || tokensEnabled;
   const pollIntervalMs = integerSetting('EXECUTION_RECONCILIATION_MS', 30000, 100, 86400000);
@@ -53,6 +60,7 @@ export const executionConfig = registerAs('custodyExecution', (): ExecutionSetti
     tokensEnabled,
     sweepsEnabled,
     withdrawalsEnabled,
+    bitcoinBatchesEnabled,
     authorityPrivateKey,
     signerPublicKey,
     pollIntervalMs,

@@ -1,3 +1,4 @@
+import { ExecutionModule } from '../execution/execution.module.js';
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { WalletPrismaModule } from '../prisma/prisma.module.js';
@@ -11,6 +12,7 @@ import { WithdrawalsService } from './withdrawals.service.js';
 import { WithdrawalsController } from './withdrawals.controller.js';
 @Module({
   imports: [
+    ExecutionModule,
     WalletPrismaModule,
     CustodyModule,
     ExchangeMessagingModule,

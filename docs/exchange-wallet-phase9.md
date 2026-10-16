@@ -2,15 +2,15 @@
 
 Updated: 15 October 2026.
 
-Status: throughput/recovery scope selected: P9-01, P9-02, P9-03 and P9-08. The first deliveries add immutable original-attempt history/private inspection and separate Ledger attempt authority bound to the original financial obligation. Actual replacement authorization, multi-attempt financial settlement, nonce windows and batches remain incomplete. Phase 8's outstanding live acceptance requirements remain in effect; new spending features stay disabled until independently certified.
+Status: throughput/recovery scope selected: P9-01, P9-02, P9-03 and P9-08. Original-attempt history, independent Ledger authority, Bitcoin batch consumers and Wallet batch orchestration are implemented. P9-02 native Bitcoin batching is locally complete with 454 passing acceptance tests; the live rollout gate remains closed. Replacement authorization/multi-attempt settlement, EVM windows above one and Solana batches remain incomplete. Phase 8's outstanding live acceptance requirements remain in effect; new spending features stay disabled until independently certified.
 
 ## Current constraints verified in the code
 
 - `CustodyExecution.operation_id` is unique: one logical operation currently has one execution and one immutable signed attempt.
 - `one_active_custody_execution_per_source` allows one live execution per source wallet. `one_pending_per_wallet` also serializes pending transaction rows. Removing either constraint alone is insufficient to introduce safe concurrency.
 - Withdrawal intents retain one unique reservation and one unique attempt. Authority checks require the plan's attempt, original hold, source, amount, destination and registry revision to match the stored intent.
-- Existing single-obligation native signing still requires exactly one payout. Bitcoin now has a separate batch authority/policy and independently verified Broadcast snapshot behind `ENABLE_BITCOIN_BATCH_WITHDRAWALS=false`; Wallet does not yet orchestrate that protocol. Solana batch authority remains pending.
-- Ledger retains one financial obligation per original hold. A separate Bitcoin batch command now atomically approves, settles or reverses all original members with conserving fee shares; Wallet orchestration remains pending. Individual delivery cannot partially settle approved batch members.
+- Existing single-obligation native signing still requires exactly one payout. Bitcoin now has a separate batch authority/policy and independently verified Broadcast snapshot behind `ENABLE_BITCOIN_BATCH_WITHDRAWALS=false`; Wallet now orchestrates that protocol through Ledger approval, signing, broadcast and canonical aggregate settlement/reversal. Solana batch authority remains pending.
+- Ledger retains one financial obligation per original hold. A separate Bitcoin batch command now atomically approves, settles or reverses all original members with conserving fee shares; Wallet applies complete group projections and requires fresh post-accounting canonical proof before source retirement. Individual delivery cannot partially settle approved batch members.
 - Provider watches remain customer-only. Older funded generations must remain observable during any future rotation, even after new address issuance moves to another seed.
 - Rollout policy, source fences, original holds, signed bytes and compensating journals remain authoritative. Phase 9 must not reintroduce tenants, arbitrary EVM calls, approvals, EVM batch contracts, or silent customer thawing.
 
@@ -62,12 +62,12 @@ Gate: concurrency above one stays disabled until resource isolation and replacem
 
 ### 9C — Bitcoin withdrawal batches (P9-02)
 
-- [ ] Persist an immutable batch and output-to-withdrawal mapping before signing: member withdrawal/hold IDs, exact destinations/principals, output indices and a deterministic fee allocation.
-- [ ] Reserve mature hot-owned UTXOs, batch fee budget and hot-owned change under one batch attempt; do not weaken input ownership checks.
-- [ ] Add batch-specific authority/signing/attestation contracts. Both Signer and Broadcast independently verify the full mapped output set and change.
-- [ ] Settle or reverse each original obligation once from the canonical batch inclusion and deterministic actual-fee allocation; total member accounting must equal the chain transaction.
-- [ ] Keep unknown submission and ambiguous members held. Define unsigned cancellation before batch membership becomes immutable; signed batches cannot be partially cancelled.
-- [ ] Test equal recipients, multiple outputs to one address, duplicate membership, changed output ordering, dust change, fee rises, spent UTXOs, partial projection delivery, lost submission response and batch reorgs.
+- [x] Persist an immutable batch and output-to-withdrawal mapping before signing: member withdrawal/hold IDs, exact destinations/principals, output indices and a deterministic fee allocation.
+- [x] Reserve mature hot-owned UTXOs, batch fee budget and hot-owned change under one batch attempt; do not weaken input ownership checks.
+- [x] Add batch-specific authority/signing/attestation contracts. Both Signer and Broadcast independently verify the full mapped output set and change.
+- [x] Settle or reverse each original obligation once from the canonical batch inclusion and deterministic actual-fee allocation; total member accounting must equal the chain transaction.
+- [x] Keep unknown submission and ambiguous members held. Define unsigned cancellation before batch membership becomes immutable; signed batches cannot be partially cancelled.
+- [x] Test equal recipients, multiple outputs to one address, duplicate membership, changed output ordering, dust change, fee rises, spent UTXOs, partial projection delivery, lost submission response and batch reorgs.
 
 Gate: exact member attribution and aggregate custody/fee equations hold under replay and recovery. Multi-source/multi-key sweep aggregation is a separate certification, not an implied consequence of withdrawal batching.
 
@@ -226,7 +226,7 @@ Wallet migration `20261015040000_unsigned_batch_preparations` retains immutable 
 
 The Bitcoin smoke now calls this same planner against disposable Bitcoin Core 29.0. It signs three exact payouts (including a repeated recipient), independently decodes every input/output and change, verifies actual fee and mempool admission, confirms six blocks, invalidates the inclusion block and confirms the **same transaction bytes/hash** on a new branch. Run at `2026-10-15T15:16:17.262Z` passed. Evidence is in `artifacts/acceptance/bitcoin-regtest/result.json`; it uses disposable fixture obligations and does not claim application batch authority, member financial settlement or public-network certification.
 
-Still pending for P9-02: independent batch authority in Ledger/Signer/Broadcast, publication/dispatch, canonical per-original-hold member settlement, winning-attempt/reorg financial handling, cancellation after authorization and unknown-outcome recovery. There is no public batch endpoint, automatic producer or batch dispatch. P9-01, P9-03 and P9-08 also remain open.
+At this historical unsigned-preparation checkpoint, the remaining P9-02 work was: independent batch authority in Ledger/Signer/Broadcast, publication/dispatch, canonical per-original-hold member settlement, winning-attempt/reorg financial handling, cancellation after authorization and unknown-outcome recovery. The later Wallet orchestration section records the completed automatic producer and dispatch. There is no public batch endpoint. P9-01, P9-03 and P9-08 remain open.
 
 
 ### Verified unsigned preparation checkpoint
@@ -246,7 +246,7 @@ Explicit Bitcoin batch signing uses an Ed25519 authority signature with its own 
 
 Broadcast accepts a separate immutable batch snapshot only when `ENABLE_BITCOIN_BATCH_WITHDRAWALS=true` and native withdrawals are also enabled. It independently validates manifest/preparation binding, the entire signed input/output/change set and fee, and the signer attestation before recording or submitting the snapshot. Its existing durable retry/monitoring flow preserves the same bytes under a lost response. The canonical Bitcoin observer now verifies all mapped outputs, including repeated recipients and change at index 1, before using inclusion/fee evidence. Single-obligation signing authority has not been broadened to accept batches.
 
-The flag is false in the example configuration and was not changed in any application environment. **Keep it disabled:** Wallet still lacks the durable aggregate saga that publishes batch approval, waits for Ledger acknowledgement, signs, projects each result, dispatches, reconciles and requests complete canonical settlement/reversal. The new consumer protocol is tested directly; it is not complete end-to-end Wallet batch execution.
+At this historical consumer checkpoint, Wallet orchestration was still pending and the consumers were tested directly. The later Wallet orchestration section supersedes that implementation gap. The flag remains false in example and application environments; deployment migrations, compatible consumers and the scoped canary gate still precede live enablement.
 
 Focused tests cover atomic original-hold approval, complete member settlement/reorg/reinclusion, exact total fee, changed replay, incorrect reversal references, independent member/hold mutation rejection, a crash while posting a later member, invalid later-member approval rollback, signature/scope/path/expiry tampering, a changed output despite a fresh valid signer attestation, disabled batch policy, and a lost submission response followed by same-byte retry/canonical confirmation. A disposable real Bitcoin Core run at `2026-10-15T15:58:15.991Z` passed independent batch authority/signing/attestation, exact outputs/fee/mempool admission, the canonical observer, six confirmations and same-byte reorg/reconfirmation. It does not certify Wallet orchestration or public-network operation.
 
@@ -254,13 +254,37 @@ Apply the Ledger migration before the new Ledger worker. Retain original operati
 
 ### Remaining implementation order
 
-1. Finish Wallet's durable Bitcoin batch saga, private queue result routing, original-member financial projections, unsigned cancellation/rejection rules, recovery scans and aggregate source/resource release/reorg reacquisition. Test crash boundaries between every consumer/outbox and delayed/reordered group/member results.
-2. Finish independently authorized child attempts and retained-hash canonical winner arbitration for the original obligation/hold, including fee exposure and reorg compensation. Do not relax the existing root-only guards prematurely.
-3. Complete bounded EVM slot permits through prepare/sign/broadcast/reconcile and replace source constraints atomically with resource invariants; certify shared native/token liquidity and nonce gaps above one.
-4. Complete native/classic-SPL Solana batch preparation/authority/dispatch with exact instruction, payer, ATA/rent, writable-account and size reservations, then canonical original-member financial attribution and expiry/nonpayment recovery.
-5. Run the selected P9-01/P9-02/P9-03/P9-08 end-to-end acceptance gates and chain evidence before marking the phase complete. The deferred P9-05–07 and excluded P9-04 remain outside the selected scope.
+1. Finish independently authorized child attempts and retained-hash canonical winner arbitration for the original obligation/hold, including fee exposure and reorg compensation. Do not relax the existing root-only guards prematurely.
+2. Complete bounded EVM slot permits through prepare/sign/broadcast/reconcile and replace source constraints atomically with resource invariants; certify shared native/token liquidity and nonce gaps above one.
+3. Complete native/classic-SPL Solana batch preparation/authority/dispatch with exact instruction, payer, ATA/rent, writable-account and size reservations, then canonical original-member financial attribution and expiry/nonpayment recovery.
+4. Run the selected P9-01/P9-02/P9-03/P9-08 end-to-end acceptance gates and chain evidence before marking the phase complete. The deferred P9-05–07 and excluded P9-04 remain outside the selected scope.
 
 
 ### Verified Bitcoin financial/signing consumer checkpoint
 
 Run `9e2a8635b6604f6aa1850a5194ec5103` passed **447 tests**, zero failures/skips/cancellations, all application builds and type checks, lint and formatting. Finished `2026-10-15T16:02:45.943Z`; tested-source SHA-256: `f75853989cc53934efd057384b18fd6ba3ad2dc2131a002885ff45d2dae050f2`. Disposable database cleanup had zero failures. Evidence: `artifacts/acceptance/9e2a8635b6604f6aa1850a5194ec5103/result.json`. Application environments and databases were unchanged. This checkpoint certifies the tested components, not completion or activation of P9-01/P9-02/P9-03/P9-08.
+
+
+## Wallet Bitcoin batch orchestration — 15 October
+
+Wallet migration `20261015060000_bitcoin_batch_execution` adds the durable aggregate execution and authenticated signer-result receipts. Bounded scheduling groups eligible held native Bitcoin withdrawals at hot0, skipping frozen/unready customers. Individual admission yields only when two eligible BTC holds can form a batch. Source/resource locks and existing immutable draft/member/preparation guards still serialize admission and protect every original obligation.
+
+Wallet commits the aggregate and Ledger approval outbox first. Only a matching current Ledger acknowledgement permits exact input revalidation and an independently signed Signer command; that command and its outbox commit together. Signed results are independently attested and checked against exact prepared bytes/fees before publication to Broadcast. Pausing policy after signing retains signed evidence and original holds. Unknown broadcast progress cannot settle a member; Wallet independently verifies canonical inclusion, then requests complete batch accounting. Even a Ledger settlement acknowledgement does not retire the hot source until a fresh canonical observation matches that accounting revision.
+
+Every original member changes financial projection together from the aggregate acknowledgement; individual member result delivery cannot partially move Wallet status. A proven outgoing reorg pauses the domain, restores original obligations through Ledger's atomic reversal and allows only higher-revision same-byte re-inclusion. Settled Bitcoin input ownership remains retained permanently: a provider rewind cannot assign that spent outpoint to a different obligation. The hot source fence can retire after matched canonical/accounting proof while those spent-input ownership records stay retained. No new attempt/hash/principal is introduced by a retry.
+
+Cancellation before aggregate admission atomically dissolves the entire unsigned draft and returns the other withdrawals to their original queued holds, then releases only the cancelling customer's original hold. Publishing Ledger approval is the batch cancellation boundary: admitted members cannot independently cancel or use unsigned dissolution. Expiry, absence, an outage or a signer rejection does not release an admitted hold or authorize replacement. An expired unadmitted preparation can dissolve and regroup safely. Expired admitted work retains its original evidence and holds for operator review; child/replacement authority remains P9-08.
+
+Signer rejections are retained as immutable authenticated receipts, but do not prove an original command was never successfully signed. A delayed valid signed result can supersede an expired retry's rejection while preserving both receipts. Later rejection cannot erase retained signed bytes. Prepared commands, signed evidence, monotonic revisions and all aggregate transitions have database guards; substantive execution transitions are captured transactionally in an immutable journal, excluding timer-only updates.
+
+The existing private operations repair path now repairs batch work. Current-scope failed Signer commands/results can be retried from their original authenticated envelopes using their bound authorization/attestation scope. Operator `retry-execution` accepts the batch transaction UUID, queues only the retained signed snapshot and deduplicates the audited command ID. Read-only `/internal/operations/batches/:batchId` requires the existing backend and operations credentials, validates UUIDs, scopes to the configured domain/epoch and returns at most 50 history summaries. Batch backlog/age, reversed exposure and retained outpoint ownership are included in existing operational metrics. No worker or new customer endpoint was added.
+
+All three Wallet/Signer/Broadcast services require the additional batch flag plus their existing withdrawal/rollout gates. The flag remains false in application environments. Apply the new Wallet and prior Ledger migrations and deploy all batch-aware consumers before enabling a certified scoped canary. Original root-only replacement guards and the single-source EVM/Solana scheduler remain unchanged.
+
+Individual recovery excludes batch-owned withdrawals before its bounded page is selected; forty older executing batch members cannot starve unrelated withdrawals. The per-row ownership recheck remains for concurrent claims. Older individual execution reorg/retry paths also recognize planned batch source ownership, preserving a newer batch's fence.
+
+### Verified Wallet batch checkpoint
+
+Run `427ea345134a4f41b6822b0e0a053915` passed **454 tests**, zero failures/skips/cancellations, all application builds and type checks, lint and formatting. Finished `2026-10-15T21:45:45.717Z`; tested-source SHA-256: `2a3c1031651e0ab189feaed8c68b6214e74f715abb466c733e1c28526ccf1b6e`. Disposable database cleanup had zero failures. Evidence: `artifacts/acceptance/427ea345134a4f41b6822b0e0a053915/result.json`.
+
+The Wallet saga uses isolated PostgreSQL/Redis and deterministic RPC/provider fixtures with actual signing. The earlier disposable Bitcoin Core regtest smoke certifies adapter bytes, mempool acceptance, finality and reorg/reinclusion separately. This establishes local P9-02 completion; it does not certify a deployed Wallet-to-Bitcoin canary or activate spending. Application environments/databases and feature flags were unchanged. P9-00B, P9-01, P9-03 and P9-08 remain open; the next implementation dependency is independent child authority and retained-attempt winner reconciliation under the original hold.

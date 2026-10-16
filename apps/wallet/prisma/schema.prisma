@@ -320,6 +320,7 @@ model ExchangeOperationProjection {
 }
 
 model ExchangeCustomer {
+  withdrawals Withdrawal[]
   customer_id              String                             @id @db.Uuid
   external_id              String                             @unique
   domain_id                String
@@ -385,6 +386,7 @@ model ExchangeDepositProjection {
 
 // Wallet owns customer withdrawal intents and their reservation/execution saga.
 model Withdrawal {
+  customer ExchangeCustomer @relation(fields:[customer_id],references:[customer_id],onDelete:Restrict,onUpdate:NoAction,map:"withdrawals_customer_id_fkey")
   batch_draft_id String? @db.Uuid
   batch_draft WithdrawalBatchDraft? @relation(fields:[batch_draft_id],references:[id],onDelete:NoAction,onUpdate:NoAction)
   batch_memberships WithdrawalBatchDraftMember[]
@@ -641,6 +643,8 @@ model WithdrawalBatchPreparation {
 }
 
 model BitcoinBatchExecution {
+ results BitcoinBatchSignerResult[]
+ events BitcoinBatchExecutionEvent[]
  batch_id String @id @db.Uuid
  preparation WithdrawalBatchPreparation @relation(fields:[batch_id],references:[batch_id],onDelete:NoAction,onUpdate:NoAction)
  state String @default("awaiting_ledger")
@@ -659,6 +663,27 @@ model BitcoinBatchExecution {
  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
  @@index([next_check_at,batch_id])
  @@map("bitcoin_batch_executions")
+}
+
+model BitcoinBatchExecutionEvent {
+ sequence BigInt @id @default(autoincrement())
+ batch_id String @db.Uuid
+ execution BitcoinBatchExecution @relation(fields:[batch_id],references:[batch_id],onDelete:NoAction,onUpdate:NoAction)
+ snapshot Json
+ digest String
+ created_at DateTime @default(now()) @db.Timestamptz
+ @@index([batch_id,sequence])
+ @@map("bitcoin_batch_execution_events")
+}
+
+model BitcoinBatchSignerResult {
+ batch_id String @db.Uuid
+ execution BitcoinBatchExecution @relation(fields:[batch_id],references:[batch_id],onDelete:NoAction,onUpdate:NoAction)
+ digest String
+ payload Json
+ received_at DateTime @default(now()) @db.Timestamptz
+ @@id([batch_id,digest])
+ @@map("bitcoin_batch_signer_results")
 }
 
 model WithdrawalBatchResource {

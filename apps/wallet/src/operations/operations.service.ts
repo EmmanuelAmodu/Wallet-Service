@@ -1,3 +1,4 @@
+import { BitcoinBatchExecutionService } from '../execution/bitcoin-batch-execution.service.js';
 import {
   rolloutConfig,
   RolloutSettings,
@@ -84,6 +85,7 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(rolloutConfig.KEY)
     private readonly rollout: RolloutSettings = closedRollout,
+    @Optional() private readonly batches?: BitcoinBatchExecutionService,
   ) {}
 
   onModuleInit() {
@@ -137,6 +139,7 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
     if (!domain || domain.reset_epoch !== this.auth.resetEpoch) return;
     this.retryTransport();
     await this.execution.repairDue();
+    await this.batches?.repairDue();
     await this.withdrawals.repairDue();
     const accepted = await this.db.operationsCommand.findMany({
       where: { domain_id: domain.id, reset_epoch: this.auth.resetEpoch, state: 'accepted' },
@@ -469,6 +472,7 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
     }
     if (message.type === 'operations.repair.requested.v1') {
       await this.execution.repairDue();
+      await this.batches?.repairDue();
       await this.withdrawals.repairDue();
       return true;
     }
@@ -712,9 +716,20 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
         const e = await this.db.custodyExecution.findUnique({
           where: { transaction_id: request.transactionId },
         });
-        if (!e || e.domain_id !== domainId || e.reset_epoch !== this.auth.resetEpoch)
-          throw new NotFoundException('Execution not found');
-        await this.execution.retrySigned(e.transaction_id, request.commandId);
+        if (e) {
+          if (e.domain_id !== domainId || e.reset_epoch !== this.auth.resetEpoch)
+            throw new NotFoundException('Execution not found');
+          await this.execution.retrySigned(e.transaction_id, request.commandId);
+        } else {
+          const batch = await this.db.bitcoinBatchExecution.findFirst({
+            where: {
+              batch_id: request.transactionId,
+              preparation: { batch: { domain_id: domainId, reset_epoch: this.auth.resetEpoch } },
+            },
+          });
+          if (!batch || !this.batches) throw new NotFoundException('Execution not found');
+          await this.batches.retrySigned(batch.batch_id, request.commandId);
+        }
       } else if (request.action === 'cancel-withdrawal') {
         const w = await this.db.withdrawal.findUnique({ where: { id: request.withdrawalId } });
         if (!w || w.domain_id !== domainId || w.reset_epoch !== this.auth.resetEpoch)
@@ -805,6 +820,7 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
       else if (request.action === 'repair') {
         this.retryTransport();
         await this.execution.repairDue();
+        await this.batches?.repairDue();
         await this.withdrawals.repairDue();
         await this.requestRepair(request.commandId);
       } else
@@ -1110,6 +1126,52 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
       },
     ];
     const reports = await this.db.operationsMetricReport.findMany({ where: scope });
+    const batchScope = { preparation: { batch: scope } };
+    const batchBacklog = await this.db.bitcoinBatchExecution.count({
+      where: { ...batchScope, state: { not: 'settled' } },
+    });
+    const batchReorgs = await this.db.bitcoinBatchExecution.count({
+      where: { ...batchScope, state: 'reverted' },
+    });
+    const oldestBatch = await this.db.bitcoinBatchExecution.findFirst({
+      where: { ...batchScope, state: { not: 'settled' } },
+      orderBy: { created_at: 'asc' },
+    });
+    const batchAge = oldestBatch ? Math.max(0, Date.now() - oldestBatch.created_at.getTime()) : 0;
+    metrics.push(
+      { name: 'bitcoin_batch_backlog', value: String(batchBacklog), labels: {} },
+      {
+        name: 'bitcoin_batch_oldest_age_ms',
+        value: String(batchAge),
+        labels: {},
+        ...(batchAge > this.settings.freshnessMs
+          ? {
+              alert: 'warning' as const,
+              reason: 'Batch execution requires reconciliation or original-message repair',
+            }
+          : {}),
+      },
+      {
+        name: 'bitcoin_batch_reorg_exposure',
+        value: String(batchReorgs),
+        labels: {},
+        ...(batchReorgs
+          ? {
+              alert: 'critical' as const,
+              reason: 'Reversed batch retains original customer obligations',
+            }
+          : {}),
+      },
+      {
+        name: 'bitcoin_retained_outpoint_owners',
+        value: String(
+          await this.db.withdrawalBatchResource.count({
+            where: { active: true, preparation: { batch: scope } },
+          }),
+        ),
+        labels: {},
+      },
+    );
     for (const consumer of ['ledger', 'sweep', 'activity-listener', 'broadcast']) {
       const report = reports.find((r) => r.consumer === consumer),
         age = report
@@ -1160,6 +1222,11 @@ export class OperationsService implements OnModuleInit, OnModuleDestroy {
     }
     await this.storeMetrics('wallet', metrics, new Date().toISOString());
     return metrics;
+  }
+
+  async batch(batchId: string) {
+    if (!this.batches) throw new NotFoundException('Batch operations unavailable');
+    return this.batches.inspect(batchId);
   }
 
   async attempts(transactionId: string, cursor?: string, limit = 50) {

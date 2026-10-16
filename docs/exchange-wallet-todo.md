@@ -1,35 +1,37 @@
 # Exchange wallet implementation TODO
 
-Updated: 11 October 2026
+Updated: 15 October 2026
 
-Status: Phases 0–5 implemented locally; coordinated deployment reset, live provider certification and native execution acceptance remain pending
+Status: Phases 0–7 implemented locally; Phase 8 local acceptance/rollout controls implemented. Selected Phase 9 throughput/recovery remains in progress. Actual deployment reset/bootstrap, live provider/token/Solana certification and deployment canaries remain open.
 
 Design reference: [Exchange wallet implementation plan](exchange-wallet-implementation-plan.md)
 
 Initial configuration and worker answers: [implementation decisions](exchange-wallet-initial-decisions.md). The target is one exchange per deployment, with no tenant model.
 
-Current audit: [Phases 1–3 review](exchange-wallet-phases1-3-review.md), 5 October. R1/R2/R6/R7 are fixed with regression coverage and the expanded 250-test suite passes. Phase 1 custody/bootstrap/issuance is implemented and verified locally. P0-07/P1-07 deployment reset and P3-02 external provider acceptance remain open. See [Phase 1 implementation notes](exchange-wallet-phase1.md). Phase 4 now adds safe native sweep execution; the 11 October whole-repository run passes 325 tests with no failures/skips. See [Phase 4 implementation notes](exchange-wallet-phase4.md). Phase 5 adds native hot0 withdrawals; the final 11 October whole-repository run passes 343 tests with no failures/skips. See [Phase 5 implementation notes](exchange-wallet-phase5.md).
+Current implementation references: [Phase 1](exchange-wallet-phase1.md), [Phase 4](exchange-wallet-phase4.md), [Phase 5](exchange-wallet-phase5.md), [Phase 6](exchange-wallet-phase6.md), [Phase 7](exchange-wallet-phase7.md), [Phase 8](exchange-wallet-phase8.md), and [Phase 9](exchange-wallet-phase9.md). The latest stable-source acceptance checkpoint passed 454 tests without failures/skips, including Wallet Bitcoin batch orchestration and recovery. P9-02 is locally complete; live enablement remains gated. Open deployment/provider gates are P0-07, P1-07, P3-02 and P8-02; do not check them off from deterministic test evidence.
+
+**Confirmed scope, 15 October:** finish P9-01–03 and P9-08 first. U-06 and P9-05–07 remain deferred; P9-04 remains excluded.
 
 ## How to work through this checklist
 
 - Work through phases 0–8 in order. Phase 9 contains optional follow-up work.
-- Use the task IDs when discussing, implementing, or reviewing work. Start with **P0-01**.
+- Use the task IDs when discussing, implementing, or reviewing work. Continue the next open item in the confirmed scope; completed foundations do not need to be restarted.
 - Mark a task complete only when its implementation and relevant verification are complete. Record blockers or implementation links beneath the task.
 - Complete each phase's gate before enabling the next customer-facing capability. Preparatory work can run in parallel when its prerequisites are ready.
 - Existing development records can be discarded. Use a coordinated reset; no legacy-address or opening-balance migration is required.
 
-| Phase | Deliverable                                    | Prerequisite | Status                                                                 |
-| ----- | ---------------------------------------------- | ------------ | ---------------------------------------------------------------------- |
-| 0     | Agreed configuration and contracts             | None         | Implemented/tested; coordinated deployment reset pending               |
-| 1     | Custody roles, allocation, and clean bootstrap | 0            | Implemented/tested; deployment reset/bootstrap pending                 |
-| 2     | Durable messaging and exchange accounting      | 1            | Implemented/tested; Phase 1 rollout prerequisite pending               |
-| 3     | Deposit detection, credit, and customer APIs   | 2            | Local implementation/tested; Phase 1 and P3-02 external gate pending   |
-| 4     | Safe execution and native sweeps               | 3            | Implemented/tested locally; live execution acceptance pending          |
-| 5     | Hot-wallet withdrawals                         | 4            | Native implementation verified; live acceptance pending                |
-| 6     | ERC-20 and SPL lifecycle support               | 5            | In progress: transfer adapters verified; financial integration pending |
-| 7     | Operational recovery and controls              | 6            | Pending                                                                |
-| 8     | End-to-end acceptance and rollout              | 7            | Pending                                                                |
-| 9     | Optional throughput and domain expansion       | 8            | Backlog                                                                |
+| Phase | Deliverable | Prerequisite | Status |
+| --- | --- | --- | --- |
+| 0 | Agreed configuration and contracts | None | Implemented/tested; deployment reset pending |
+| 1 | Custody roles, allocation, and clean bootstrap | 0 | Implemented/tested; deployment bootstrap pending |
+| 2 | Durable messaging and exchange accounting | 1 | Implemented/tested; Phase 1 rollout gate pending |
+| 3 | Deposit detection, credit, and customer APIs | 2 | Local implementation tested; external provider gate pending |
+| 4 | Safe execution and native sweeps | 3 | Implemented/tested locally; live acceptance pending |
+| 5 | Hot-wallet withdrawals | 4 | Native implementation tested; live acceptance pending |
+| 6 | ERC-20 and SPL lifecycle support | 5 | Implemented/tested locally; live token certification pending |
+| 7 | Operational recovery and controls | 6 | Implemented/tested locally |
+| 8 | End-to-end acceptance and rollout | 7 | Local acceptance/controls implemented; live gates pending |
+| 9 | Selected throughput and recovery | 8 | P9-02 locally complete; P9-00B/P9-01/P9-03/P9-08 open |
 
 ## New direction foundations — User and Sweep
 
@@ -40,7 +42,7 @@ These changes implement the 5 October service-boundary decision. Phase 1 custody
 - [x] **U-03** Remove runtime tenant models, DTO/message fields, auth context, key maps, and tenant scopes. Use one `WALLET_API_KEY`, separate exchange/Ledger credentials, globally scoped external wallet identity, and wallet-scoped transaction idempotency. Preserve historical migrations; additive Wallet/Ledger migrations reject conflicting global development identities instead of merging them.
 - [x] **U-04** Register User and Sweep in build/watch/start/migration tooling, Compose, CI, database isolation, and coordinated reset targets. Prepare configuration examples without modifying deployment secrets or resetting application data.
 - [x] **U-05** Add email/password login and short-lived RS256 access tokens. User holds the private token key; Wallet verifies with only the public key, issuer/audience, expiry, UUID subject, and reset epoch. Public `/v1/me` routes derive customer identity from the token; service keys and customer JWTs cannot substitute for each other. Registration responses contain identity fields only. Verify generic login failures, missing-account hashing, independent throttles, provisioning lag, and cross-customer rejection.
-- [ ] **U-06** Extend identity with refresh/session revocation/logout, verified email, password recovery, MFA, and coordinated key rotation. Deploy shared edge/distributed registration/login limits before scaling public authentication across replicas.
+- [ ] **U-06** **Deferred until the selected throughput/recovery scope is complete.** Extend identity with refresh/session revocation/logout, verified email, password recovery, MFA, and coordinated key rotation. Deploy shared edge/distributed registration/login limits before scaling public authentication across replicas.
 - [x] **U-07** Move Wallet operations to authenticated `/internal` routes, exclude them from public OpenAPI, and remove Ledger registration side effects from HTTP balance reads and remove its direct wallet registration HTTP route. Add a development Compose application overlay publishing only User/Wallet with separate owned database credentials and scoped token/custody secret mounts. Document public-ingress path restrictions and host UID/GID for owner-only secret files.
 
 See [architecture](architecture.md) for current boundaries and [implementation plan](exchange-wallet-implementation-plan.md) for execution ownership.
@@ -183,29 +185,29 @@ See [architecture](architecture.md) for current boundaries and [implementation p
 - [x] **P8-05** Add separate switches for address issuance, credit, sweeps, and withdrawals; validate dry-run scheduling and a single-domain/chain canary before expanding assets/networks.
 - [x] **P8-06** Record acceptance evidence and rollout/rollback procedures that preserve published addresses, operations, reservations, and journals. Enable only certified asset capabilities.
 
-**Gate remains closed:** 409 tests passed with zero skips, and native EVM/Bitcoin signed smoke passed; local acceptance and rollout controls are implemented; Solana smoke, live asset/provider certification and a deployment canary remain external acceptance requirements. See [Phase 8 evidence and rollout/rollback procedure](exchange-wallet-phase8.md).
+**Gate remains closed:** latest local acceptance passed 454 tests with zero skips, and native EVM/Bitcoin signed smoke passed; local acceptance and rollout controls are implemented; Solana smoke, live asset/provider certification and a deployment canary remain external acceptance requirements. See [Phase 8 evidence and rollout/rollback procedure](exchange-wallet-phase8.md).
 
 ## Phase 9 — Optional follow-up backlog
 
 These tasks increase throughput or scope after the core exchange flow is accepted. They are not prerequisites for the initial serialized hot-wallet scheduler.
 
-**Selected scope (updated 15 October):** P9-01–03 and P9-08. Multiple seeds/domains, internal transfers and Treasury extraction are deferred. The original-attempt journal/private inspection prerequisite is implemented; no main P9 item is complete yet. See the [Phase 9 delivery checklist](exchange-wallet-phase9.md).
+**Selected scope (updated 15 October):** P9-01–03 and P9-08. Multiple seeds/domains, internal transfers and Treasury extraction are deferred. The original-attempt journal/private inspection prerequisite and P9-02 native Bitcoin batching are locally complete. P9-00B, P9-01, P9-03 and P9-08 remain open. See the [Phase 9 delivery checklist](exchange-wallet-phase9.md).
 
 - [x] **P9-00A** Add immutable original-attempt identity and transactionally captured preparation/signing/inclusion/settlement/reversal history, migration baseline, and private scoped inspection.
 - [x] **P9-00B.1** Separate immutable Ledger original-attempt approval from financial obligation/hold terms; bind settlement/reversal to that approval and reject accepted-term mutations.
 - [x] **P9-00B.2** Separate per-attempt reported progress from canonical financial state; retain immutable revision receipts and preserve legacy revision fences without inventing report history.
 - [x] **P9-00B.3** Retain canonical settlement/reversal revision receipts independently of later projections, including migration of available reversed payloads.
 - [x] **P9-00C.1** Reserve native ETH/ERC-20 hot-withdrawal custody liquidity and nonce evidence under the existing one-source fence; signing requires the immutable reserve.
-- [x] **P9-00C.2** Add exact batch member/cost/output mapping primitives and Bitcoin exact multi-output signing verification; custody batch admission remains disabled.
+- [x] **P9-00C.2** Add exact batch member/cost/output mapping primitives and Bitcoin exact multi-output signing verification; the batch gate defaults disabled and live admission requires scoped certification.
 - [x] **P9-00C.3** Add EVM/Bitcoin resource-conflict and retained-lineage predicates; these confer no replacement authorization and reject fresh-blockhash Solana assumptions.
-- [x] **P9-00C.4** Persist complete unsigned batch draft membership/source ownership and atomic dissolution back to the same original holds. No batch signing/dispatch is admitted.
-- [x] **P9-00C.5** Prepare exact unsigned Bitcoin batches with durable immutable mappings/fee shares and exclusive UTXO claims; dissolve unsigned claims atomically without releasing original holds. Verify real regtest outputs, fees and same-byte reorg/reconfirmation. Batch authority/dispatch/settlement remain pending.
-- [x] **P9-00C.6** Add the private Ledger Bitcoin batch protocol with immutable complete original-hold approval and atomic member settlement/reversal, exact fee attribution, transaction ownership, replay receipts and mixed-version individual-member fences. Wallet orchestration remains pending.
-- [x] **P9-00C.7** Add separate independently signed Bitcoin batch authority, exact Signer/Broadcast snapshot/byte verification and opt-in consumer gates. Test same-byte retry after a lost submission response. No automatic Wallet batch producer is admitted.
+- [x] **P9-00C.4** Persist complete unsigned batch draft membership/source ownership and atomic dissolution back to the same original holds. The separate P9-02 execution provider owns signing/dispatch admission.
+- [x] **P9-00C.5** Prepare exact unsigned Bitcoin batches with durable immutable mappings/fee shares and exclusive UTXO claims; dissolve unsigned claims atomically without releasing original holds. Verify real regtest outputs, fees and same-byte reorg/reconfirmation. Original-batch integration is tracked in P9-02; replacement attempts remain P9-08.
+- [x] **P9-00C.6** Add the private Ledger Bitcoin batch protocol with immutable complete original-hold approval and atomic member settlement/reversal, exact fee attribution, transaction ownership, replay receipts and mixed-version individual-member fences. Original-batch Wallet orchestration is tracked in P9-02.
+- [x] **P9-00C.7** Add separate independently signed Bitcoin batch authority, exact Signer/Broadcast snapshot/byte verification and opt-in consumer gates. Test same-byte retry after a lost submission response. Wallet batch scheduling and orchestration are tracked in P9-02.
 - [ ] **P9-00B** Add independently authorized child attempts and obligation-level reconciliation before enabling replacements or concurrent payout windows.
 
 - [ ] **P9-01** Add bounded EVM nonce windows plus native/token liquidity reservations; remove serialization only after concurrent execution and replacement tests pass.
-- [ ] **P9-02** Add Bitcoin withdrawal batches with immutable output-to-withdrawal mappings, fee attribution, reserved UTXOs, and hot-owned change. Certify multi-source/multi-key sweep aggregation separately.
+- [x] **P9-02** Implement native Bitcoin withdrawal batches with immutable output-to-withdrawal mappings, deterministic fee attribution, mature reserved hot UTXOs and hot-owned change. Wallet coordinates original-hold Ledger approval, independent signing, Broadcast dispatch, aggregate canonical settlement/reversal, unsigned cancellation and same-byte recovery. Private repair/inspection/metrics and recovery fairness are verified. Locally complete with 454 passing tests plus the recorded Bitcoin Core regtest adapter evidence; deployment migrations, compatible consumers and a certified scoped canary precede live enablement. Multi-source/multi-key sweep aggregation and replacement attempts remain separate certification work.
 - [ ] **P9-03** Add supported Solana withdrawal batching/concurrency with source/token/fee reservations, account-contention limits, instruction-size limits, expiry, and per-withdrawal attribution.
 - **P9-04 — removed from scope:** EVM batch contracts/smart-account adapters conflict with the approved transfer-only, EOA-recipient policy. Keep independent EOA transfers; no arbitrary contract calls or approvals.
 - [ ] **P9-05** Add multiple technical custody domains/seeds with isolated signing routes, and safe generation rotation that continues monitoring funded older addresses. Keep the single-exchange ownership model.
