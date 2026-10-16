@@ -11,7 +11,7 @@ import {
 } from '../../shared/src/contracts.js';
 import { ChainRpcService, RpcFailure } from './chain-rpc.service.js';
 import { getWalletCore } from './coin-metadata.js';
-import { regtestWitnessAddress } from './bitcoin-address.js';
+import { bitcoinWitnessAddress } from './bitcoin-address.js';
 import { assertEvmExternalAddress, assertSolanaExternalAddress } from './recipient-policy.js';
 
 export type NativeSweepChain = 'ethereum' | 'bitcoin' | 'solana';
@@ -146,7 +146,14 @@ export class NativeSweepPlanner {
   constructor(private readonly rpc: ChainRpcService) {}
 
   private async verify(chain: NativeSweepChain, network: string) {
-    const approved = chain === 'ethereum' ? '11155111' : chain === 'bitcoin' ? 'regtest' : DEVNET;
+    const approved =
+      chain === 'ethereum'
+        ? '11155111'
+        : chain === 'bitcoin' && ['regtest', 'testnet'].includes(network)
+          ? network
+          : chain === 'bitcoin'
+            ? 'regtest'
+            : DEVNET;
     if (network !== approved || this.rpc.networkIdentity(chain) !== network)
       defer('attention', 'Native sweeps are restricted to the pinned development network');
     await this.rpc.verifyNetwork(chain);
@@ -267,8 +274,8 @@ export class NativeSweepPlanner {
   }
 
   private async bitcoin(input: { sourceAddress: string; hotAddress: string; amount?: string }) {
-    const source = regtestWitnessAddress(input.sourceAddress);
-    const hot = regtestWitnessAddress(input.hotAddress);
+    const source = bitcoinWitnessAddress(input.sourceAddress, this.rpc.networkIdentity('bitcoin'));
+    const hot = bitcoinWitnessAddress(input.hotAddress, this.rpc.networkIdentity('bitcoin'));
     if (source.program.length !== 20 || hot.program.length !== 20)
       defer('attention', 'Native Bitcoin custody requires P2WPKH addresses');
     evidence(
@@ -669,8 +676,11 @@ export class NativeSweepPlanner {
       (request.sweepAll === true && request.changeAmount !== undefined)
     )
       defer('attention', 'Bitcoin sweep must have one hot output and no change');
-    const source = regtestWitnessAddress(input.wallet.address);
-    const hot = regtestWitnessAddress(request.outputs[0].address);
+    const source = bitcoinWitnessAddress(input.wallet.address, input.wallet.network ?? 'regtest');
+    const hot = bitcoinWitnessAddress(
+      request.outputs[0].address,
+      input.wallet.network ?? 'regtest',
+    );
     if (source.program.length !== 20 || hot.program.length !== 20 || source.address === hot.address)
       defer('attention', 'Bitcoin sweep requires distinct P2WPKH source and hot addresses');
     const ownScript = `0014${Buffer.from(source.program).toString('hex')}`;
@@ -1225,7 +1235,10 @@ export function verifyBitcoinPayment(request: SignRequest, signed: SignedTransac
     'Bitcoin complete output count',
   );
   const script = (address: string) =>
-    '0014' + Buffer.from(regtestWitnessAddress(address).program).toString('hex');
+    '0014' +
+    Buffer.from(
+      bitcoinWitnessAddress(address, request.wallet.network ?? 'regtest').program,
+    ).toString('hex');
   for (const [index, payout] of tx.outputs.entries()) {
     const output = decoded.outputs[index + (change > 0n && index > 0 ? 1 : 0)];
     evidence(

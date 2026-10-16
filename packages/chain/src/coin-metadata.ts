@@ -1,7 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { initWasm, WalletCore } from '@trustwallet/wallet-core';
 import { accountSchema, Chain, chainFamily } from '../../shared/src/contracts.js';
-import { regtestWitnessAddress } from './bitcoin-address.js';
+import { bitcoinWitnessAddress } from './bitcoin-address.js';
 
 let corePromise: ReturnType<typeof initWasm> | undefined;
 
@@ -32,9 +32,9 @@ export function walletCoreMetadata(
     throw new BadRequestException('Wallet Core returned an unsupported derivation path');
   path[3] = `${account}'`;
   if (chain === 'bitcoin') {
-    if (!['mainnet', 'regtest'].includes(network))
+    if (!['mainnet', 'regtest', 'testnet'].includes(network))
       throw new BadRequestException('Unsupported Bitcoin network');
-    if (network === 'regtest') path[2] = "1'";
+    if (network !== 'mainnet') path[2] = "1'";
   }
   return { coin, family, path: path.join('/') };
 }
@@ -50,7 +50,8 @@ export async function coreDerivationPath(chain: Chain, account: number, network 
 }
 
 export async function canonicalizeDerivedAddress(chain: Chain, network: string, address: string) {
-  if (chain === 'bitcoin' && network === 'regtest') return regtestWitnessAddress(address).address;
+  if (chain === 'bitcoin' && ['regtest', 'testnet'].includes(network))
+    return bitcoinWitnessAddress(address, network).address;
   if (chain === 'bitcoin' && network !== 'mainnet')
     throw new BadRequestException('Unsupported Bitcoin network');
   const core = await getWalletCore();

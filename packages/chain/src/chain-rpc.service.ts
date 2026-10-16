@@ -16,7 +16,7 @@ import {
 } from '../../shared/src/contracts.js';
 
 import { ChainNetworkMap, ChainNetworkSettings, networkConfig } from './config.js';
-import { regtestWitnessAddress } from './bitcoin-address.js';
+import { bitcoinWitnessAddress } from './bitcoin-address.js';
 import { assertEvmExternalAddress, assertSolanaExternalAddress } from './recipient-policy.js';
 import { Transaction } from 'ethers';
 import { getWalletCore } from './coin-metadata.js';
@@ -139,6 +139,13 @@ export class ChainRpcService {
         .parse(await this.call(chain, 'getblockchaininfo', []));
       if (info.chain !== (settings.rpcNetwork ?? 'main'))
         throw new BadGatewayException(`${chain} RPC network mismatch`);
+      if (
+        chain === 'bitcoin' &&
+        settings.network === 'testnet' &&
+        (await this.call(chain, 'getblockhash', [0])) !==
+          '000000000933ea01ad0ee984209779baaec3ced90fa3f408719526f8d77f4943'
+      )
+        throw new BadGatewayException('Bitcoin Testnet3 genesis mismatch');
     } else {
       if ((await this.call(chain, 'getGenesisHash', [])) !== settings.genesisHash)
         throw new BadGatewayException('Solana RPC network mismatch');
@@ -297,11 +304,15 @@ export class ChainRpcService {
   ): Promise<BitcoinTransaction> {
     if (
       transfer.chain === 'bitcoin' &&
-      this.networkSettings(transfer.chain).network === 'regtest'
+      ['regtest', 'testnet'].includes(this.networkSettings(transfer.chain).network)
     ) {
-      if (regtestWitnessAddress(address).address !== address)
+      if (
+        bitcoinWitnessAddress(address, this.networkSettings(transfer.chain).network).address !==
+        address
+      )
         throw new BadRequestException('Bitcoin source address must be canonical');
-      for (const output of transfer.outputs) regtestWitnessAddress(output.address);
+      for (const output of transfer.outputs)
+        bitcoinWitnessAddress(output.address, this.networkSettings(transfer.chain).network);
     }
     if (new Set(transfer.utxos.map((u) => `${u.txid}:${u.vout}`)).size !== transfer.utxos.length)
       throw new BadRequestException('Duplicate UTXO');

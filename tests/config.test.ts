@@ -101,7 +101,7 @@ test('Bitcoin regtest overrides bind address network and RPC network while other
   process.env.CHAIN_NETWORKS = JSON.stringify({ litecoin: { network: 'regtest' } });
   assert.throws(() => chainNetworksFromEnv('11155111', 'devnet'), /mainnet/);
   process.env.CHAIN_NETWORKS = JSON.stringify({ bitcoin: { network: 'testnet' } });
-  assert.throws(() => chainNetworksFromEnv('11155111', 'devnet'), /mainnet/);
+  assert.equal(chainNetworksFromEnv('11155111', 'devnet').bitcoin.rpcNetwork, 'test');
 });
 
 test('application configuration is scoped and rejects unsafe settings at startup', async (t) => {

@@ -976,7 +976,7 @@ export class SettlementsService {
     const feeCap =
       source.chain === 'ethereum' && source.network === '11155111'
         ? 5000000000000000n
-        : source.chain === 'bitcoin' && source.network === 'regtest'
+        : source.chain === 'bitcoin' && ['regtest', 'testnet'].includes(source.network)
           ? 10000n
           : source.chain === 'solana' &&
               ['devnet', 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'].includes(source.network)

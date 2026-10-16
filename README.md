@@ -126,14 +126,19 @@ npm run build
 
 Fresh `setup:local` also creates two independent Ed25519 execution key pairs. Existing installations can run `npm run setup:execution-policy` to create these files without replacing any existing execution key or changing the custody seed, `.env`, or reset epoch. Add the four `EXECUTION_*_KEY_FILE` paths from [.env.example](.env.example) to your configuration. Wallet receives only the execution authority private key and Signer public key; Signer receives the authority public key and its own private attestation key; Broadcast receives only the Signer public key. Keep `ENABLE_NATIVE_SWEEPS=false` and `ALLOW_BROADCAST=false` until the relevant rollout gates are satisfied. `EXECUTION_RECONCILIATION_MS`, `SWEEP_RECONCILIATION_MS`, and `SWEEP_RETRY_DELAY_MS` control bounded repair scheduling. The optional setup command accepts `--directory PATH` for a separate key directory and refuses partial existing key sets as well as complete ones.
 
-For containerized development, after infrastructure, Pub/Sub, and migrations are ready, use the application overlay. Supply your host UID/GID so owner-only key files remain readable without changing their permissions:
+For containerized development, use the application overlay after local secrets/configuration have been created. It starts infrastructure, applies all six databases' migrations, creates the epoch-scoped Pub/Sub resources, then starts the applications. Supply your host UID/GID so owner-only key files remain readable without changing their permissions (or save `LOCAL_UID`/`LOCAL_GID` in `.env`):
 
 ```sh
 LOCAL_UID=$(id -u) LOCAL_GID=$(id -g) \
-  docker compose -f compose.yaml -f compose.apps.yaml up --build
+  docker compose -f compose.yaml -f compose.apps.yaml up --build -d
+docker compose -f compose.yaml -f compose.apps.yaml ps -a
 ```
 
-Only User 3001 and Wallet 3000 are published; Ledger remains private and other workers have no HTTP listener. Each app receives its own database URL and only its required secret mounts. This overlay uses development credentials; public ingress must exclude Wallet `/internal/*`. Application image/startup was not exercised in this change.
+Only User 3001 and Wallet 3000 are published; Ledger remains private and other workers have no HTTP listener. Wallet API documentation is at `http://127.0.0.1:3000/docs`. Each app receives its own database URL and only its required secret mounts. This overlay uses development credentials; public ingress must exclude Wallet `/internal/*`. The `migrate` and `pubsub-setup` containers exit successfully after setup; the seven application containers remain running. Existing database volumes are retained. Back up existing databases before deploying schema upgrades.
+
+If Redis port 6379 is already occupied, set `REDIS_HOST_PORT=6380` and `REDIS_URL=redis://127.0.0.1:6380` in `.env`; containers always connect to `redis:6379` internally. Use `docker compose -f compose.yaml -f compose.apps.yaml logs --tail=100` to inspect startup. Stop with `docker compose -f compose.yaml -f compose.apps.yaml down`; omit `-v` to preserve data. Financial rollout, signing and broadcasting gates remain disabled by default. Starting the stack does not certify live chain/provider execution.
+
+For Sepolia and Solana Devnet connections, see [local testnet RPC setup](docs/local-testnet-setup.md). `npm run testnet:check` performs read-only pinned-network/finalized-head checks without signing or broadcasting.
 
 The generated `PUBSUB_TOPIC` and `PUBSUB_SUBSCRIPTION` include an epoch suffix; `setup:pubsub` creates exactly those values from `.env`, not fixed resource names. Configure the external provider publisher with `PUBSUB_PROJECT_ID` and `PUBSUB_TOPIC`; every discovery payload must include a top-level `resetEpoch` equal to the configured `RESET_EPOCH`. ActivityListener quarantines events with a missing or stale epoch, even on the current topic. The current external listener's `NODE_ENV=development` mode writes activities to `./output` instead of Pub/Sub, so local end-to-end ingestion requires its Pub/Sub-publishing mode and epoch field. Configure RPC URLs and `CHAIN_NETWORKS` for the chains you use. Address derivation uses Wallet Core metadata; transaction preparation and activity finality checks require configured RPC endpoints.
 

@@ -36,7 +36,7 @@ import {
   assertEvmExternalAddress,
   assertSolanaExternalAddress,
 } from '../../../../packages/chain/src/recipient-policy.js';
-import { regtestWitnessAddress } from '../../../../packages/chain/src/bitcoin-address.js';
+import { bitcoinWitnessAddress } from '../../../../packages/chain/src/bitcoin-address.js';
 import { WalletPrismaService } from '../prisma/prisma.service.js';
 import { CustodyService } from '../custody/custody.service.js';
 import { ExchangeMessagingService } from '../exchange-messaging/exchange-messaging.service.js';
@@ -63,6 +63,7 @@ type Reserve = Extract<ExchangeEvent, { type: 'withdrawal.reserve.requested.v1' 
 export async function canonicalWithdrawalDestination(
   chain: WithdrawalRequest['asset']['chain'],
   address: string,
+  network = 'regtest',
 ) {
   const core = await getWalletCore();
   const coin =
@@ -73,12 +74,12 @@ export async function canonicalWithdrawalDestination(
         : core.CoinType.solana;
   if (chain === 'bitcoin') {
     try {
-      const parsed = regtestWitnessAddress(address);
+      const parsed = bitcoinWitnessAddress(address, network);
       if (parsed.program.length !== 20) throw new Error();
       return parsed.address;
     } catch {
       throw new BadRequestException(
-        'Bitcoin withdrawals require canonical regtest P2WPKH destinations',
+        'Bitcoin withdrawals require canonical P2WPKH destinations on the selected network',
       );
     }
   }
@@ -195,6 +196,7 @@ export class WithdrawalsService implements OnModuleInit, OnModuleDestroy {
     const destination = await canonicalWithdrawalDestination(
       parsed.asset.chain,
       parsed.destination,
+      parsed.asset.network,
     );
     const body = { asset: parsed.asset, destination, amount: parsed.amount };
     const digest = executionDigest({

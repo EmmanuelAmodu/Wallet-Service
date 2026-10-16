@@ -6,6 +6,8 @@ Status: Phases 0–7 implemented locally; Phase 8 local acceptance/rollout contr
 
 Design reference: [Exchange wallet implementation plan](exchange-wallet-implementation-plan.md)
 
+**Deployment update, 16 October:** the local Docker profile now targets hosted Bitcoin Testnet3 instead of a local regtest node, alongside Sepolia and Solana Devnet. Regtest evidence below remains isolated-test evidence; Bitcoin batch authority is still regtest-only and disabled for this profile. Gateway/UTXO discovery and real Testnet3 execution acceptance remain open. See [local testnet setup](local-testnet-setup.md).
+
 Initial configuration and worker answers: [implementation decisions](exchange-wallet-initial-decisions.md). The target is one exchange per deployment, with no tenant model.
 
 Current implementation references: [Phase 1](exchange-wallet-phase1.md), [Phase 4](exchange-wallet-phase4.md), [Phase 5](exchange-wallet-phase5.md), [Phase 6](exchange-wallet-phase6.md), [Phase 7](exchange-wallet-phase7.md), [Phase 8](exchange-wallet-phase8.md), and [Phase 9](exchange-wallet-phase9.md). The latest stable-source acceptance checkpoint passed 454 tests without failures/skips, including Wallet Bitcoin batch orchestration and recovery. P9-02 is locally complete; live enablement remains gated. Open deployment/provider gates are P0-07, P1-07, P3-02 and P8-02; do not check them off from deterministic test evidence.

@@ -14,6 +14,13 @@ x-queue: &queue
   RESET_IN_PROGRESS: ${RESET_IN_PROGRESS:-}
   QUEUE_PREFIX: ${QUEUE_PREFIX:-waas}
   QUEUE_AUTH_KEY: ${QUEUE_AUTH_KEY}
+  EXCHANGE_ROLLOUT_MODE: ${EXCHANGE_ROLLOUT_MODE:-closed}
+  ENABLE_ADDRESS_ISSUANCE: ${ENABLE_ADDRESS_ISSUANCE:-false}
+  ENABLE_DEPOSIT_CREDIT: ${ENABLE_DEPOSIT_CREDIT:-false}
+  ENABLE_EXCHANGE_SWEEPS: ${ENABLE_EXCHANGE_SWEEPS:-false}
+  ENABLE_EXCHANGE_WITHDRAWALS: ${ENABLE_EXCHANGE_WITHDRAWALS:-false}
+  EXCHANGE_CANARY_CHAIN: ${EXCHANGE_CANARY_CHAIN:-}
+  EXCHANGE_CANARY_NETWORK: ${EXCHANGE_CANARY_NETWORK:-}
 
 x-chain: &chain
   ETH_CHAIN_ID: ${ETH_CHAIN_ID:-11155111}
@@ -26,6 +33,38 @@ x-chain: &chain
   CHAIN_NETWORKS: ${CHAIN_NETWORKS:-{}}
 
 services:
+  migrate:
+    build:
+      context: .
+      target: migrate
+    image: wallet-exchange-migrate-local
+    restart: 'no'
+    environment:
+      NODE_ENV: production
+      WALLET_DATABASE_URL: postgresql://wallet:wallet_local_only@postgres:5432/wallet
+      BROADCAST_DATABASE_URL: postgresql://broadcast:broadcast_local_only@broadcast-postgres:5432/broadcast
+      LEDGER_DATABASE_URL: postgresql://ledger:ledger_local_only@ledger-postgres:5432/ledger
+      ACTIVITY_DATABASE_URL: postgresql://activity:activity_local_only@activity-postgres:5432/activity
+      SWEEP_DATABASE_URL: postgresql://sweep:sweep_local_only@sweep-postgres:5432/sweep
+      USER_DATABASE_URL: postgresql://users:users_local_only@user-postgres:5432/users
+    depends_on:
+      postgres: { condition: service_healthy }
+      broadcast-postgres: { condition: service_healthy }
+      ledger-postgres: { condition: service_healthy }
+      activity-postgres: { condition: service_healthy }
+      sweep-postgres: { condition: service_healthy }
+      user-postgres: { condition: service_healthy }
+  pubsub-setup:
+    <<: *application
+    restart: 'no'
+    command: ['node', 'dist/scripts/setup-pubsub.js']
+    environment:
+      PUBSUB_PROJECT_ID: ${PUBSUB_PROJECT_ID:-wallet-local}
+      PUBSUB_TOPIC: ${PUBSUB_TOPIC}
+      PUBSUB_SUBSCRIPTION: ${PUBSUB_SUBSCRIPTION}
+      PUBSUB_API_ENDPOINT: pubsub:8086
+    depends_on:
+      pubsub: { condition: service_started }
   user:
     <<: *application
     command: ['node', 'dist/apps/user/src/main.js']
@@ -41,6 +80,7 @@ services:
     secrets: [auth-private]
     ports: ['${PUBLIC_BIND_ADDRESS:-127.0.0.1}:3001:3001']
     depends_on:
+      migrate: { condition: service_completed_successfully }
       user-postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
   wallet:
@@ -61,12 +101,18 @@ services:
       AUTH_TOKEN_AUDIENCE: ${AUTH_TOKEN_AUDIENCE:-exchange-wallet}
       ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
       ENABLE_NATIVE_WITHDRAWALS: ${ENABLE_NATIVE_WITHDRAWALS:-false}
+      ENABLE_BITCOIN_BATCH_WITHDRAWALS: ${ENABLE_BITCOIN_BATCH_WITHDRAWALS:-false}
+      ENABLE_TOKEN_EXECUTION: ${ENABLE_TOKEN_EXECUTION:-false}
+      ENABLE_OPERATIONS_MONITORING: ${ENABLE_OPERATIONS_MONITORING:-false}
+      OPERATIONS_API_KEY: ${OPERATIONS_API_KEY:-}
+      OPERATIONS_ACTOR: ${OPERATIONS_ACTOR:-operations-service}
       EXECUTION_RECONCILIATION_MS: ${EXECUTION_RECONCILIATION_MS:-30000}
       EXECUTION_AUTHORITY_PRIVATE_KEY_FILE: /run/secrets/execution-authority-private
       EXECUTION_SIGNER_PUBLIC_KEY_FILE: /run/secrets/execution-signer-public
     secrets: [auth-public, execution-authority-private, execution-signer-public]
     ports: ['${PUBLIC_BIND_ADDRESS:-127.0.0.1}:3000:3000']
     depends_on:
+      migrate: { condition: service_completed_successfully }
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
   ledger:
@@ -79,6 +125,7 @@ services:
       LEDGER_HOST: 0.0.0.0
     expose: ['3010']
     depends_on:
+      migrate: { condition: service_completed_successfully }
       ledger-postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
   signer:
@@ -91,10 +138,13 @@ services:
       EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
       ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
       ENABLE_NATIVE_WITHDRAWALS: ${ENABLE_NATIVE_WITHDRAWALS:-false}
+      ENABLE_BITCOIN_BATCH_WITHDRAWALS: ${ENABLE_BITCOIN_BATCH_WITHDRAWALS:-false}
+      ENABLE_TOKEN_SIGNING: ${ENABLE_TOKEN_SIGNING:-false}
       EXECUTION_AUTHORITY_PUBLIC_KEY_FILE: /run/secrets/execution-authority-public
       EXECUTION_SIGNER_PRIVATE_KEY_FILE: /run/secrets/execution-signer-private
     secrets: [custody-seed, execution-authority-public, execution-signer-private]
     depends_on:
+      migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
   broadcast:
     <<: *application
@@ -105,10 +155,13 @@ services:
       ALLOW_BROADCAST: ${ALLOW_BROADCAST:-false}
       ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
       ENABLE_NATIVE_WITHDRAWALS: ${ENABLE_NATIVE_WITHDRAWALS:-false}
+      ENABLE_BITCOIN_BATCH_WITHDRAWALS: ${ENABLE_BITCOIN_BATCH_WITHDRAWALS:-false}
+      ENABLE_TOKEN_EXECUTION: ${ENABLE_TOKEN_EXECUTION:-false}
       EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
       EXECUTION_SIGNER_PUBLIC_KEY_FILE: /run/secrets/execution-signer-public
     secrets: [execution-signer-public]
     depends_on:
+      migrate: { condition: service_completed_successfully }
       broadcast-postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
   sweep:
@@ -119,10 +172,12 @@ services:
       SWEEP_DATABASE_URL: postgresql://sweep:sweep_local_only@sweep-postgres:5432/sweep
       EXCHANGE_DOMAIN_ID: ${EXCHANGE_DOMAIN_ID:-exchange-development}
       ENABLE_NATIVE_SWEEPS: ${ENABLE_NATIVE_SWEEPS:-false}
+      ENABLE_TOKEN_EXECUTION: ${ENABLE_TOKEN_EXECUTION:-false}
       SWEEP_RECONCILIATION_MS: ${SWEEP_RECONCILIATION_MS:-15000}
       SWEEP_RETRY_DELAY_MS: ${SWEEP_RETRY_DELAY_MS:-60000}
       EXCHANGE_FINANCIAL_POLICY_VERSION: ${EXCHANGE_FINANCIAL_POLICY_VERSION:-exchange-financial-v1}
     depends_on:
+      migrate: { condition: service_completed_successfully }
       sweep-postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
   activity-listener:
@@ -147,6 +202,8 @@ services:
       EXCHANGE_BTC_RPC_USER: ${EXCHANGE_BTC_RPC_USER:-}
       EXCHANGE_BTC_RPC_PASSWORD: ${EXCHANGE_BTC_RPC_PASSWORD:-}
     depends_on:
+      migrate: { condition: service_completed_successfully }
+      pubsub-setup: { condition: service_completed_successfully }
       activity-postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
 

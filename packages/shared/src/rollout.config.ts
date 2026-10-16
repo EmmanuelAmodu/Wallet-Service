@@ -38,7 +38,7 @@ export const rolloutConfig = registerAs('exchangeRollout', (): RolloutSettings =
     const network = z.string().min(1).parse(process.env.EXCHANGE_CANARY_NETWORK);
     const pinned = {
       ethereum: '11155111',
-      bitcoin: 'regtest',
+      bitcoin: network === 'testnet' ? 'testnet' : 'regtest',
       solana: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG',
     };
     if (network !== pinned[chain]) throw new Error('Canary requires a supported pinned network');

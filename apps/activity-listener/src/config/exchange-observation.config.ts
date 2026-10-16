@@ -9,8 +9,8 @@ export const exchangeObservationConfig = registerAs('exchangeObservation', () =>
   // Observation-only regtest RPC: this never enables mainnet-only transaction preparation/signing.
   if (process.env.EXCHANGE_BTC_RPC_URL)
     chainNetworks.bitcoin = {
-      network: 'regtest',
-      rpcNetwork: 'regtest',
+      network: chainNetworks.bitcoin.network,
+      rpcNetwork: chainNetworks.bitcoin.rpcNetwork,
       rpcUrl: z.url().parse(process.env.EXCHANGE_BTC_RPC_URL),
       rpcUser: process.env.EXCHANGE_BTC_RPC_USER,
       rpcPassword: process.env.EXCHANGE_BTC_RPC_PASSWORD,

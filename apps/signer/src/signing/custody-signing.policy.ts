@@ -83,7 +83,7 @@ export class CustodySigningPolicy {
       throw new Error('Execution network mismatch');
     const approvedNetwork = {
       ethereum: '11155111',
-      bitcoin: 'regtest',
+      bitcoin: ['regtest', 'testnet'].includes(c.asset.network) ? c.asset.network : 'regtest',
       solana: 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG',
     }[c.asset.chain];
     if (c.asset.network !== approvedNetwork)

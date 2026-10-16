@@ -48,7 +48,8 @@
     "acceptance:exchange": "tsx scripts/exchange-acceptance.ts",
     "smoke:evm:local": "tsx scripts/smoke-evm-local.ts",
     "smoke:bitcoin:regtest": "tsx scripts/smoke-bitcoin-regtest.ts",
-    "smoke:solana:devnet": "tsx scripts/smoke-solana-devnet.ts"
+    "smoke:solana:devnet": "tsx scripts/smoke-solana-devnet.ts",
+    "testnet:check": "tsx --env-file-if-exists=.env scripts/check-testnet-rpc.ts"
   },
   "license": "ISC",
   "type": "module",

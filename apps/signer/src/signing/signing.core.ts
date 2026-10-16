@@ -3,7 +3,7 @@ import { initWasm, TW, WalletCore } from '@trustwallet/wallet-core';
 import { readFileSync, statSync } from 'node:fs';
 import { walletCoreMetadata } from '../../../../packages/chain/src/coin-metadata.js';
 import { ChainNetworkMap, networkFor } from '../../../../packages/chain/src/config.js';
-import { regtestWitnessAddress } from '../../../../packages/chain/src/bitcoin-address.js';
+import { bitcoinWitnessAddress } from '../../../../packages/chain/src/bitcoin-address.js';
 import {
   assertEvmExternalAddress,
   assertSolanaExternalAddress,
@@ -152,12 +152,16 @@ export class SigningCore {
     const { coin, path } = walletCoreMetadata(this.core, request.chain, request.account, network);
     const key = this.hd.getKey(coin, path);
     try {
-      if (request.chain === 'bitcoin' && network === 'regtest') {
+      if (request.chain === 'bitcoin' && ['regtest', 'testnet'].includes(network)) {
         const publicKey = key.getPublicKeySecp256k1(true);
         try {
-          const address = this.core.AnyAddress.createBech32WithPublicKey(publicKey, coin, 'bcrt');
+          const address = this.core.AnyAddress.createBech32WithPublicKey(
+            publicKey,
+            coin,
+            network === 'testnet' ? 'tb' : 'bcrt',
+          );
           try {
-            return fn(key, regtestWitnessAddress(address.description()).address, path);
+            return fn(key, bitcoinWitnessAddress(address.description(), network).address, path);
           } finally {
             address.delete();
           }
@@ -206,7 +210,7 @@ export class SigningCore {
     if (
       (request.wallet.network !== undefined && request.wallet.network !== network) ||
       (request.wallet.chain === 'bitcoin' &&
-        network === 'regtest' &&
+        ['regtest', 'testnet'].includes(network) &&
         request.wallet.network === undefined)
     )
       throw new BadRequestException('Signing wallet network does not match signer configuration');
@@ -392,9 +396,10 @@ export class SigningCore {
     address: string,
     privateKey: Uint8Array,
   ): SignedTransaction {
-    const regtest = tx.chain === 'bitcoin' && this.network(tx.chain) === 'regtest';
+    const regtest =
+      tx.chain === 'bitcoin' && ['regtest', 'testnet'].includes(this.network(tx.chain));
     const signingAddress = (value: string) =>
-      regtest ? regtestWitnessAddress(value).signingAddress : value;
+      regtest ? bitcoinWitnessAddress(value, this.network(tx.chain)).signingAddress : value;
     tx.outputs.forEach((output) => this.assertValidAddress(output.address, tx.chain));
     if (new Set(tx.utxos.map((utxo) => `${utxo.txid}:${utxo.vout}`)).size !== tx.utxos.length)
       throw new BadRequestException('Duplicate UTXO');
@@ -589,8 +594,8 @@ export class SigningCore {
   }
 
   assertValidAddress(address: string, chain: DeriveRequest['chain']) {
-    if (chain === 'bitcoin' && this.network(chain) === 'regtest') {
-      regtestWitnessAddress(address);
+    if (chain === 'bitcoin' && ['regtest', 'testnet'].includes(this.network(chain))) {
+      bitcoinWitnessAddress(address, this.network(chain));
       return;
     }
     if (!this.core.AnyAddress.isValid(address, this.coin(chain)))

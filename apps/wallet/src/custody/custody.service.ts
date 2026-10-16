@@ -88,11 +88,22 @@ export class CustodyService {
     return this.exchange.domainId;
   }
 
+  private profiles() {
+    const bitcoin = networkFor('bitcoin', this.config);
+    return PROFILES.map((profile) =>
+      profile.chain === 'bitcoin' && bitcoin === 'testnet'
+        ? { ...profile, network: 'testnet', name: 'Testnet3 Bitcoin' }
+        : profile,
+    );
+  }
+
   validateNetwork(chain: Chain, network: string) {
-    const profile = PROFILES.find((entry) => entry.chain === chain && entry.network === network);
+    const profile = this.profiles().find(
+      (entry) => entry.chain === chain && entry.network === network,
+    );
     if (!profile)
       throw new BadRequestException(
-        'Custody supports Sepolia, Bitcoin regtest and Solana Devnet only',
+        'Custody supports Sepolia, configured Bitcoin Testnet3/regtest and Solana Devnet only',
       );
     if (networkFor(chain, this.config) !== profile.network)
       throw new ConflictException(
@@ -104,7 +115,7 @@ export class CustodyService {
   async configure(tx?: Prisma.TransactionClient): Promise<CustodyDomain> {
     if (!tx) return this.db.$transaction((db) => this.configure(db));
     const domainId = this.domainId();
-    for (const profile of PROFILES) this.validateNetwork(profile.chain, profile.network);
+    for (const profile of this.profiles()) this.validateNetwork(profile.chain, profile.network);
     await lock(tx, `custody-domain:${domainId}`);
     const previous = await tx.custodyDomain.findUnique({ where: { id: domainId } });
     if (
@@ -130,7 +141,7 @@ export class CustodyService {
           configuration_revision: 1,
         },
       }));
-    for (const profile of PROFILES) {
+    for (const profile of this.profiles()) {
       const identity = { domain_id: domainId, chain: profile.chain, network: profile.network };
       const nativeAsset = `token:${profile.chain}:native`;
       const network = await tx.custodyNetwork.findUnique({
@@ -214,7 +225,7 @@ export class CustodyService {
     const domain = await this.configure(tx);
     const hotWallets: Wallet[] = [];
     const managementWallets: Wallet[] = [];
-    for (const profile of PROFILES) {
+    for (const profile of this.profiles()) {
       hotWallets.push(await this.ensureWallet(tx, profile.chain, profile.network, 'hot', 0));
       if (profile.management)
         managementWallets.push(await this.createManagement(tx, profile.chain, profile.network, 1));
@@ -460,7 +471,7 @@ export class CustodyService {
         },
       },
     });
-    const profile = PROFILES.find(
+    const profile = this.profiles().find(
       (entry) => entry.chain === wallet.chain && entry.network === wallet.network,
     )!;
     return (

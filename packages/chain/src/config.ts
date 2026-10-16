@@ -39,9 +39,19 @@ export function chainNetworkOverridesFromEnv(): ChainNetworkMap {
     if (family === 'ethereum' && settings.network !== settings.chainId)
       throw new Error(`CHAIN_NETWORKS.${name}.network must equal its EVM chainId`);
     if (family === 'bitcoin') {
-      if (settings.network !== 'mainnet' && !(name === 'bitcoin' && settings.network === 'regtest'))
-        throw new Error(`CHAIN_NETWORKS.${name}.network must be mainnet or Bitcoin regtest`);
-      const expected = settings.network === 'regtest' ? 'regtest' : 'main';
+      if (
+        settings.network !== 'mainnet' &&
+        !(name === 'bitcoin' && ['regtest', 'testnet'].includes(settings.network))
+      )
+        throw new Error(
+          `CHAIN_NETWORKS.${name}.network must be mainnet, Bitcoin regtest or Bitcoin testnet`,
+        );
+      const expected =
+        settings.network === 'regtest'
+          ? 'regtest'
+          : settings.network === 'testnet'
+            ? 'test'
+            : 'main';
       if (settings.rpcNetwork && settings.rpcNetwork !== expected)
         throw new Error(`CHAIN_NETWORKS.${name}.rpcNetwork does not match its network`);
       settings.rpcNetwork = expected;

@@ -178,6 +178,8 @@ test(
           ? 'dist/tests/helpers/legacy-signer-worker.js'
           : `dist/apps/${name}/src/main.js`;
       const child = spawn(process.execPath, [resolve(entry)], {
+        // Nest's dotenv loader must use this fixture's .env, never deployment settings.
+        cwd: dir,
         env: {
           ...env,
           DATABASE_URL: undefined,

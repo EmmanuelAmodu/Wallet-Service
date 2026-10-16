@@ -258,6 +258,6 @@ export function derivationPath(chain: Chain, account: number, network = 'mainnet
   accountSchema.parse(account);
   if (chain === 'solana') return `m/44'/501'/${account}'`;
   return chain === 'bitcoin'
-    ? `m/84'/${network === 'regtest' ? 1 : 0}'/${account}'/0/0`
+    ? `m/84'/${['regtest', 'testnet'].includes(network) ? 1 : 0}'/${account}'/0/0`
     : `m/44'/60'/${account}'/0/0`;
 }

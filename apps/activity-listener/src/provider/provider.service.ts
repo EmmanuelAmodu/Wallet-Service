@@ -55,7 +55,9 @@ export class HttpExchangeWatchProvider implements ExchangeWatchProvider {
   certified(chain: string, network: string) {
     const providerSupportsChain =
       this.name === 'quicknode'
-        ? chain === 'ethereum' || chain === 'solana'
+        ? chain === 'ethereum' ||
+          chain === 'solana' ||
+          (chain === 'bitcoin' && network === 'testnet')
         : chain === 'bitcoin' && network === 'regtest';
     return (
       !!this.base &&
@@ -174,7 +176,11 @@ export class RoutingExchangeWatchProvider implements ExchangeWatchProvider {
   private route(chain: string, network: string) {
     if (chain === 'bitcoin' && network === 'regtest')
       return this.bitcoin ?? (this.primary.name === 'bitcoin-core' ? this.primary : undefined);
-    if (chain === 'ethereum' || chain === 'solana')
+    if (
+      chain === 'ethereum' ||
+      chain === 'solana' ||
+      (chain === 'bitcoin' && network === 'testnet')
+    )
       return this.primary.name === 'quicknode' ? this.primary : undefined;
     return undefined;
   }
